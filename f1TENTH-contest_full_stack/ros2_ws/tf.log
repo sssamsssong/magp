@@ -1,0 +1,6 @@
+nohup: ignoring input
+[WARN] [1778320125.058534574] []: Old-style arguments are deprecated; see --help for new-style arguments
+[INFO] [1778320125.108804115] [static_transform_publisher_JfMTft3eChWi1C1s]: Spinning until stopped - publishing transform
+translation: ('0.000000', '0.000000', '0.100000')
+rotation: ('0.000000', '0.000000', '0.000000', '1.000000')
+from 'base_link' to 'laser'
