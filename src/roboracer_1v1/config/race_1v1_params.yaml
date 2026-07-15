@@ -1,0 +1,56 @@
+opponent_tracker_node:
+  ros__parameters:
+    detection_range_m:      8.0
+    cluster_eps:            0.30
+    cluster_min_samples:    3
+    vehicle_width_min:      0.10
+    vehicle_width_max:      0.60
+    vehicle_height_min:     0.05
+    lost_timeout_sec:       0.5
+    smoothing_alpha:        0.40
+
+gap_follow_node:
+  ros__parameters:
+    car_width:               0.35
+    disparity_threshold:     0.30
+    bubble_radius:           0.25
+    speed_with_obstacles:    2.5
+    speed_no_obstacles:      4.5
+    speed_max:               5.5
+    speed_min:               1.0
+    steer_gain:              0.35
+    steer_max_deg:           25.0
+    opponent_virtual_dist:   1.5
+    opponent_influence_deg:  12.0
+    safety_distance:         0.8
+    obstacle_removal_lap:    10
+
+overtaking_node:
+  ros__parameters:
+    engage_distance:         4.0
+    side_gap_threshold:      1.2
+    overtake_steer_offset:   0.18
+    overtake_duration_sec:   3.0
+    cooldown_sec:            5.0
+    side_scan_angle_deg:     60.0
+    side_scan_start_deg:     45.0
+
+fully_autonomous_manager:
+  ros__parameters:
+    q1_required_laps:        3
+    q2_required_laps:        5
+    q3_required_laps:        20
+    start_timeout_sec:       120.0
+
+lap_counter_node:
+  ros__parameters:
+    finish_line_x:           0.0
+    finish_line_y:           0.0
+    min_lap_time_sec:        5.0
+    trigger_radius:          0.6
+
+emergency_stop_node:
+  ros__parameters:
+    min_front_distance:      0.20
+    front_angle_deg:         30.0
+    stop_duration_sec:       2.0
