@@ -1,0 +1,38 @@
+amcl:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: "base_link"
+    odom_frame_id: "odom"
+    global_frame_id: "map"
+    scan_topic: "scan"
+
+    # 파티클 수: 많을수록 정확하지만 느림 (Orin NX면 여유 있음)
+    min_particles: 500
+    max_particles: 2000
+
+    # 레이저 모델
+    laser_model_type: "likelihood_field"
+    laser_likelihood_max_dist: 2.0
+    laser_max_range: 20.0
+    laser_min_range: 0.06
+    max_beams: 60
+
+    # 모션 모델: 애커만 차량이지만 AMCL은 diff 모델로 근사 (odom이 정확하면 OK)
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    alpha1: 0.2   # 회전→회전 노이즈
+    alpha2: 0.2   # 병진→회전 노이즈
+    alpha3: 0.2   # 병진→병진 노이즈
+    alpha4: 0.2   # 회전→병진 노이즈
+
+    # 업데이트 조건 (고속주행이므로 자주 업데이트)
+    update_min_d: 0.1     # 10cm 이동마다
+    update_min_a: 0.1     # 0.1rad 회전마다
+    resample_interval: 1
+
+    transform_tolerance: 0.5
+    recovery_alpha_slow: 0.0
+    recovery_alpha_fast: 0.0
+
+    # 초기 포즈는 launch에서 주입 (set_initial_pose: true)
+    always_reset_initial_pose: false
+    tf_broadcast: true
