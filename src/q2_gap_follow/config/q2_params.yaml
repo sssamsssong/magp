@@ -1,0 +1,32 @@
+q2_driver:
+  ros__parameters:
+    # speed / steering
+    max_speed: 3.0
+    min_speed: 1.0
+    max_steering: 0.4
+
+    # Wall-Follow PID (20Hz)
+    kp: 0.8
+    ki: 0.0
+    kd: 0.3
+    desired_distance: 1.0
+    lookahead: 1.0
+    alpha_angle: 45.0
+    follow_side: 'right'
+
+    # Gap-Follow
+    bubble_radius: 0.35
+    max_lidar_dist: 4.0
+    disparity_threshold: 0.3
+    gap_fov_deg: 180.0
+
+    # Obstacle detection
+    obstacle_detect_fov_deg: 60.0
+    obstacle_detect_range: 3.0
+    obstacle_min_pts: 3
+    obstacle_max_width: 0.8
+    cluster_gap: 0.25
+    mode_switch_cooldown: 1.5
+
+    # control rate
+    control_rate: 20.0

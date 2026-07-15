@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.bak
+*.bak_*
+.DS_Store
+__MACOSX/
+build/
+install/
+log/
