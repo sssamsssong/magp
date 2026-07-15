@@ -1,0 +1,17 @@
+# ROS2 colcon 빌드 산출물
+**/build/
+**/install/
+**/log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 에디터
+.vscode/
+.idea/
+*.sw[op]
+
+# Claude Code 로컬 전용 설정
+.claude/settings.local.json
