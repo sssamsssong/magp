@@ -23,6 +23,9 @@
 - 재빌드가 필요한 경우: 새 파일 추가, `setup.py`/`package.xml` 변경
   → `cd ~/f1tenth_ws && colcon build --packages-select race_stack q2_gap_follow roboracer_1v1 --symlink-install`
 - `race_script.yaml`은 repo(`~/yax`)에만 존재 — `race.sh`가 자기 디렉토리에서 읽음
+- `config/vesc.yaml`(조향/모터 캘리브레이션)도 repo가 원본 — `~/f1tenth_ws`의
+  f1tenth_stack src·install 양쪽이 여기로 심링크됨. f1tenth_stack을 colcon build
+  하면 install 링크가 복사본으로 덮이니 `install_on_jetson.sh` 재실행으로 재링크
 
 ## 주요 스크립트
 
