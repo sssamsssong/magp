@@ -32,6 +32,16 @@ if [ ! -e /dev/sensors/vesc ]; then
     sudo ln -sf /dev/ttyACM0 /dev/sensors/vesc
 fi
 
+# ---------- 1-1. loopback 멀티캐스트 (재부팅마다 필요) ----------
+# 이 젯슨은 lo 에 MULTICAST 플래그가 없어서, 같은 호스트 두 프로세스도
+# 오직 WiFi/이더넷 멀티캐스트로만 서로를 발견한다. WiFi만 연결된 상태(SSH)
+# 에서는 discovery 가 불안정해져 다른 터미널의 /map(slam_toolbox)을 못 찾아
+# savemap 이 실패한다. lo 멀티캐스트를 켜서 loopback discovery 경로를 열어준다.
+if ! ip link show lo | head -1 | grep -q "MULTICAST"; then
+    echo "[race.sh] lo 멀티캐스트 활성화 (같은 호스트 DDS discovery 안정화)"
+    sudo ip link set dev lo multicast on
+fi
+
 # ---------- 2. 모드 결정 ----------
 export RACE_SCRIPT   # launch 파일이 이 env로 yaml 경로를 읽음
 CMD=${1:-}

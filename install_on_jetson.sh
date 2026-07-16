@@ -27,13 +27,18 @@ sudo apt-get install -y \
     python3-pil
 
 # scikit-image (gen_waypoints용), scikit-learn (opponent tracker DBSCAN용)
-pip3 install scikit-image scikit-learn --quiet
+# numpy는 1.26.4 고정 — 2.x로 올라가면 cv2/matplotlib/colcon 이 깨진다
+pip3 install "numpy==1.26.4" scikit-image scikit-learn --quiet
 
-echo "[2/4] 패키지 복사 → $WS/src/"
+echo "[2/4] 패키지 심링크 → $WS/src/  (복사 아님: 이 git repo가 유일 소스)"
+# cp 가 아니라 심링크. 실행 WS 는 git repo 를 그대로 가리키므로
+# repo 에서 편집하면 즉시 반영되고(파이썬은 --symlink-install 로 무빌드),
+# 실행 WS 쪽에서 고쳐도 그게 곧 git repo 라 커밋/푸시로 보존된다.
 mkdir -p "$WS/src"
-cp -r "$SCRIPT_DIR/src/race_stack"    "$WS/src/"
-cp -r "$SCRIPT_DIR/src/q2_gap_follow" "$WS/src/"
-cp -r "$SCRIPT_DIR/src/roboracer_1v1" "$WS/src/"
+ln -sfn "$SCRIPT_DIR/src/race_stack"    "$WS/src/race_stack"
+ln -sfn "$SCRIPT_DIR/src/q2_gap_follow" "$WS/src/q2_gap_follow"
+ln -sfn "$SCRIPT_DIR/src/roboracer_1v1" "$WS/src/roboracer_1v1"
+ln -sfn "$SCRIPT_DIR/race.sh"           "$WS/race.sh"   # jetson.sh 가 WS 에서 ./race.sh 호출
 
 echo "[3/4] colcon build"
 source /opt/ros/humble/setup.bash
