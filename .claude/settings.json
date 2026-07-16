@@ -24,7 +24,16 @@
       "Read(//home/jetson/.ros/**)",
       "Bash(bash -n /home/jetson/yax/race.sh)",
       "Bash(grep -iE \"install|deploy|setup|sync|\\\\.sh$\")",
-      "Bash(find /home/jetson/yax -name \"JETSON_COMMANDS.md\" 2>/dev/null; find /home/jetson -maxdepth 2 -name \"JETSON_COMMANDS.md\" 2>/dev/null)"
+      "Bash(find /home/jetson/yax -name \"JETSON_COMMANDS.md\" 2>/dev/null; find /home/jetson -maxdepth 2 -name \"JETSON_COMMANDS.md\" 2>/dev/null)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'chore: Claude Code 허용 명령 목록 갱신 *)",
+      "Bash(git push *)",
+      "Read(//home/jetson/f1tenth_ws/install/race_stack/share/race_stack/maps/**)",
+      "Read(//home/jetson/f1tenth_ws/install/race_stack/share/race_stack/waypoints/**)",
+      "Read(//home/jetson/f1tenth_ws/install/race_stack/share/race_stack/maps/track_2nd_clean/**)",
+      "Bash(grep -rn \"servo\" /home/jetson/f1tenth_ws/src/vesc/vesc_ackermann/src/vesc_to_odom.cpp 2>/dev/null | head; ls /home/jetson/f1tenth_ws/src/vesc/vesc_ackermann/src/ 2>/dev/null)",
+      "Bash(sed -n 95,135p /home/jetson/f1tenth_ws/src/vesc/vesc_ackermann/src/vesc_to_odom.cpp)",
+      "Bash(python3 -m py_compile /home/jetson/yax/src/race_stack/race_stack/stanley_controller.py /home/jetson/yax/src/race_stack/race_stack/pure_pursuit.py)"
     ],
     "additionalDirectories": [
       "/home/jetson/f1tenth_ws/src/f1tenth_system/f1tenth_stack/config"
