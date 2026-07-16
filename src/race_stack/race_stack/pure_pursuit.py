@@ -46,10 +46,26 @@ class PurePursuit(Node):
 
         self.enabled = True
         self.last_speed = 0.0
+        self.got_pose = False
         self.create_subscription(Bool, '/race/enabled', self.enabled_cb, 10)
         self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose',
                                  self.pose_cb, 10)
         self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
+
+        # ── odom kick: 데드락 방지 ─────────────────────────────────────
+        # vesc_to_odom 은 서보 명령을 한 번 받기 전까지 odom(TF)을 발행하지
+        # 않는다 → AMCL 이 스캔을 버려 /amcl_pose 가 안 나오고, 이 노드는
+        # pose 콜백에서만 /drive 를 내므로 서보 명령도 영원히 안 나간다.
+        # 첫 pose 가 올 때까지 0속도 명령을 흘려보내 고리를 끊는다.
+        self._kick_timer = self.create_timer(0.1, self._odom_kick)
+
+    def _odom_kick(self):
+        if not self.got_pose:
+            msg = AckermannDriveStamped()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            self.drive_pub.publish(msg)
+        else:
+            self._kick_timer.cancel()
 
     def load_waypoints(self, path):
         try:
@@ -74,6 +90,7 @@ class PurePursuit(Node):
         self.enabled = msg.data
 
     def pose_cb(self, msg: PoseWithCovarianceStamped):
+        self.got_pose = True
         if not self.enabled or self.waypoints is None:
             return
         px = msg.pose.pose.position.x

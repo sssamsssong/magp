@@ -202,7 +202,20 @@ class StanleyController(Node):
         self.wp_pub    = self.create_publisher(Marker,                 '/waypoint', 10)
         self.obs_pub   = self.create_publisher(MarkerArray,            '/obstacle', 10)
 
+        # ── odom kick: 데드락 방지 ─────────────────────────────────────
+        # vesc_to_odom 은 서보 명령을 한 번 받기 전까지 odom(TF)을 발행하지
+        # 않는다 → AMCL 이 스캔을 버려 /amcl_pose 가 안 나오고, 이 노드는
+        # pose 콜백에서만 /drive 를 내므로 서보 명령도 영원히 안 나간다.
+        # 첫 pose 가 올 때까지 0속도 명령을 흘려보내 고리를 끊는다.
+        self._kick_timer = self.create_timer(0.1, self._odom_kick)
+
         self.get_logger().info(f'StanleyController ready [mode={self.mode}]')
+
+    def _odom_kick(self):
+        if self.pos is None:
+            self._publish_cmd(0.0, 0.0)
+        else:
+            self._kick_timer.cancel()
 
     # ── event callbacks ────────────────────────────────────────────────────
 

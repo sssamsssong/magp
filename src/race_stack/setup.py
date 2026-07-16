@@ -16,7 +16,9 @@ setup(
         (os.path.join('share', package_name, 'maps'),
          [f for f in glob('maps/*') if os.path.isfile(f)]),
         # maps/<map_name>/ subdirectories (e.g. inner_bound.npy for Stanley Q2)
-        *[(os.path.join('share', package_name, 'maps', os.path.basename(d)),
+        # normpath 필수: glob('maps/*/')는 끝에 '/'가 붙어 basename이 빈 문자열이 됨
+        *[(os.path.join('share', package_name, 'maps',
+                        os.path.basename(os.path.normpath(d))),
            [f for f in glob(os.path.join(d, '*')) if os.path.isfile(f)])
           for d in glob('maps/*/') if os.path.isdir(d)],
         (os.path.join('share', package_name, 'waypoints'),
