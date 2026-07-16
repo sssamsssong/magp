@@ -1,19 +1,23 @@
-# F1TENTH 자율주행 프로젝트
+# F1TENTH 자율주행 프로젝트 (시뮬레이터 스택)
 
 ## 프로젝트 개요
 
 F1TENTH 시뮬레이터 기반 자율주행 프로젝트.  
-Pure Pursuit 알고리즘으로 웨이포인트를 추종하며 충돌 없이 완주하는 것을 목표로 한다.
+Pure Pursuit / 하이브리드(APP·Stanley·LQR) 컨트롤러로 웨이포인트를 추종하며 충돌 없이 완주하는 것을 목표로 한다.
 
 - **OS:** Ubuntu 22.04 / **ROS 2:** Humble / **Python:** 3.10
 - **시뮬레이터:** f1tenth_gym_ros
+- **저장소:** `lloes098/26-jetson-f1tenth`의 `main` 브랜치, 이 폴더는 그 안의 시뮬 번들
+- **실차(젯슨) 스택은 별개**: `~/yax/src/race_stack` 등 — 실차 사용법은 repo 루트의 `JETSON_COMMANDS.md` 참조
 
 ---
 
 ## 워크스페이스 구조
 
 ```
-~/f1tenth/f1TENTH/
+~/yax/f1TENTH-contest_full_stack/        ← 이 번들의 루트 (구 ~/f1tenth/f1TENTH/)
+├── contest.sh                           # 빌드·맵핑·트랙추출·주행 통합 스크립트 (실차용)
+├── track_data/maps|waypoints/           # contest.sh 가 만드는 트랙 데이터
 ├── sim_ws/src/f1tenth_gym_ros/
 │   ├── config/sim.yaml              # 맵 경로 · 스폰 위치 설정
 │   ├── launch/gym_bridge_launch.py  # 시뮬레이터 launch
@@ -26,14 +30,22 @@ Pure Pursuit 알고리즘으로 웨이포인트를 추종하며 충돌 없이 �
 │       ├── {맵}_ga_route{n}.csv        # GA 최적화 결과 (ga_racing_line.py)
 │       └── {맵}_ga.jpg                 # GA 시각화 (ga_racing_line.py)
 │
-└── f1tenth_ws/src/f1tenth_racing/f1tenth_racing/
-    ├── pure_pursuit_node.py              # ★ 메인 주행 노드
-    ├── generate_waypoints.py             # 웨이포인트 생성 (레이싱 라인 최적화)
-    ├── generate_waypoints_center.py      # 중심선 추출 + 분기점 그래프 시각화
-    ├── make_waypoints.py                 # 웨이포인트 생성 통합 스크립트
-    ├── make_map_yaml.py                  # 맵 yaml 자동 생성
-    ├── setup_sim.py                      # 시뮬 설정 (스폰 위치 · 방향)
-    └── optimize_pp_params.py             # Pure Pursuit 파라미터 자동 최적화
+└── f1tenth_ws/src/
+    ├── contest_autonomy/                 # 실차 맵핑·주행 패키지 (contest.sh 가 사용)
+    ├── f1tenth_system/ ackermann_mux/ vesc/  # 실차 드라이버 스택
+    └── f1tenth_racing/f1tenth_racing/
+        ├── racing_node.py                    # 주행 방식 선택 런처 (컨트롤러 고르기)
+        ├── pure_pursuit_node.py              # ★ Pure Pursuit 주행 노드
+        ├── hybrid_controller_node.py         # APP·Stanley·LQR 하이브리드 컨트롤러
+        ├── lap_timer_node.py                 # 랩타임 측정 + CSV 기록
+        ├── generate_waypoints.py             # 웨이포인트 생성 (레이싱 라인 최적화)
+        ├── generate_waypoints_center.py      # 중심선 추출 + 분기점 그래프 시각화
+        ├── ga_racing_line.py                 # GA 레이싱 라인 최적화
+        ├── generate_controller_map.py        # 곡률 기준 APP/Stanley/LQR 구간 분류 시각화
+        ├── make_waypoints.py                 # 웨이포인트 생성 통합 스크립트
+        ├── make_yaml.py                      # 맵 yaml 자동 생성
+        ├── setup_sim.py                      # 시뮬 설정 (스폰 위치 · 방향)
+        └── optimize_pp_params.py             # Pure Pursuit 파라미터 자동 최적화
 ```
 
 ---
@@ -46,6 +58,12 @@ Pure Pursuit 알고리즘으로 웨이포인트를 추종하며 충돌 없이 �
 
 ---
 
+### `racing_node.py` — 주행 방식 선택 런처 (ROS 노드)
+| | |
+|---|---|
+| **실행** | `ros2 run f1tenth_racing racing_node` |
+| **동작** | 컨트롤러(pure_pursuit / hybrid) 선택 실행, 선택 결과를 `~/.f1tenth_active_controller`에 기록 (lap_timer가 읽음) |
+
 ### `pure_pursuit_node.py` — ★ 메인 주행 노드 (ROS 노드)
 | | |
 |---|---|
@@ -53,10 +71,16 @@ Pure Pursuit 알고리즘으로 웨이포인트를 추종하며 충돌 없이 �
 | **출력** | `/drive` (AckermannDriveStamped 조향·속도 명령) |
 | **설정** | 파일 상단 `WAYPOINTS_MAP`, `SPEED_SCALE`, `LA_BASE` 등 파라미터 |
 
+### `hybrid_controller_node.py` — 하이브리드 컨트롤러 (ROS 노드)
+| | |
+|---|---|
+| **입력** | `/ego_racecar/odom`, 웨이포인트 CSV |
+| **출력** | `/drive` — 곡률에 따라 APP(타이트 코너) / Stanley(완만한 커브) / LQR(직선) 전환 |
+
 ### `lap_timer_node.py` — 랩타임 측정 (ROS 노드)
 | | |
 |---|---|
-| **입력** | `/ego_racecar/odom` (위치), `pure_pursuit_node.py` (파라미터 읽기) |
+| **입력** | `/ego_racecar/odom` (위치), `~/.f1tenth_active_controller` (활성 컨트롤러 이름) |
 | **출력** | 터미널 랩타임 출력, `~/f1TENTH/lap_results.csv` |
 
 ### `generate_waypoints.py` — 레이싱 라인 생성 (독립 스크립트)
@@ -110,12 +134,12 @@ Pure Pursuit 알고리즘으로 웨이포인트를 추종하며 충돌 없이 �
 
 ```bash
 # f1tenth_racing 패키지만 빌드 (일반적인 경우)
-cd ~/f1tenth/f1TENTH/f1tenth_ws
+cd ~/yax/f1TENTH-contest_full_stack/f1tenth_ws
 colcon build --packages-select f1tenth_racing
 source install/setup.bash
 
 # sim_ws 빌드 (시뮬레이터 변경 시)
-cd ~/f1tenth/f1TENTH/sim_ws
+cd ~/yax/f1TENTH-contest_full_stack/sim_ws
 colcon build
 source install/setup.bash
 ```
@@ -126,12 +150,14 @@ source install/setup.bash
 
 ```bash
 # 터미널 1 — 시뮬레이터
-cd ~/f1tenth/f1TENTH/sim_ws && source install/setup.bash
+cd ~/yax/f1TENTH-contest_full_stack/sim_ws && source install/setup.bash
 ros2 launch f1tenth_gym_ros gym_bridge_launch.py
 
 # 터미널 2 — 드라이버 (ros2 run 사용, launch 아님 — input() 프롬프트 때문)
-cd ~/f1tenth/f1TENTH/f1tenth_ws && source install/setup.bash
+cd ~/yax/f1TENTH-contest_full_stack/f1tenth_ws && source install/setup.bash
 ros2 run f1tenth_racing pure_pursuit_node
+# 또는 컨트롤러 선택 런처:
+ros2 run f1tenth_racing racing_node
 ```
 
 ---
@@ -139,7 +165,7 @@ ros2 run f1tenth_racing pure_pursuit_node
 ## 새 맵 추가 순서
 
 1. `maps/`에 `.png` 복사
-2. `make_map_yaml.py` 실행 → `.yaml` 생성
+2. `make_yaml.py` 실행 → `.yaml` 생성
 3. `make_waypoints.py` 실행 → 스폰 클릭 → 안전 여유 입력 (0.4~0.8m)
 4. `setup_sim.py` 실행 → 스폰 위치·방향 클릭
 5. `colcon build --packages-select f1tenth_racing && source install/setup.bash`
@@ -166,6 +192,7 @@ ros2 run f1tenth_racing pure_pursuit_node
 
 ### 경로 처리
 - `ros2 run`으로 실행되는 노드는 install 경로가 가변적이므로 `_find_repo_root()`로 루트 탐색
+  (`sim_ws/`와 `f1tenth_ws/`를 모두 포함하는 디렉토리 = 이 번들 루트 `~/yax/f1TENTH-contest_full_stack/`)
 - 직접 실행 스크립트는 `__file__` 기준 4단계 상위로 루트 확정
 - 절대경로(`/home/sssamsssong/...`) 하드코딩 금지 — 팀원 환경 호환성 깨짐
 
@@ -213,8 +240,9 @@ def _find_repo_root():
 "오늘 프로젝트를 마무리하자"라고 하면 다음 순서로 진행:
 
 1. **대화록 저장** — `forme/대화록/대화록_MMDD.md`에 오늘 대화 내용 요약 저장  
-   (`forme/`는 `.gitignore`에 등록된 개인 폴더 — 커밋/푸시 대상 아님)
+   (`forme/`는 이 폴더의 `.gitignore`에 등록된 개인 폴더 — 커밋/푸시 대상 아님)
 2. **문서 업데이트**
    - `README.md`: 새로 완성된 프로그램, 다른 사람이 알아야 할 사용법 추가
    - `개발현황.md`: 날짜 헤더 + 번호 목록으로 의도·작업 내용·시행착오 기록
-3. **커밋 & 푸시** — 파일마다 어울리는 커밋 메시지로 커밋 후 `git push`
+3. **커밋 & 푸시** — 파일마다 어울리는 커밋 메시지로 커밋 후 `git push`  
+   (push 대상: `lloes098/26-jetson-f1tenth`의 `main` 브랜치 — 구 `naykwak/f1TENTH`의 `hj_v2_f1tenth_ws` 아님)

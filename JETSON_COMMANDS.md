@@ -1,6 +1,7 @@
 # 젯슨 실행 명령어 총정리
 
-브랜치: `hj_v2_f1tenth_ws` — https://github.com/naykwak/f1TENTH/tree/hj_v2_f1tenth_ws
+저장소: `main` — https://github.com/lloes098/26-jetson-f1tenth
+젯슨 내 경로: `~/yax` (git repo가 유일 소스. `~/f1tenth_ws/src/`의 race_stack 등 3개 패키지는 여기로 심링크됨)
 
 ---
 
@@ -18,18 +19,22 @@ ssh-keygen -t ed25519
 ssh-copy-id jetson@192.168.45.246
 ```
 
+> 노트북에 이 repo를 클론했다면 `./jetson.sh q1|q2|savemap <이름>|log <이름>|stop|status|attach` 로
+> SSH+tmux를 통해 젯슨의 `race.sh`를 원격 실행할 수도 있음.
+
 ---
 
 ## 1. 폴더 이동 (한 번만)
 
 ```bash
-# 클론으로 받은 경우
-cd ~/Desktop/f1TENTH
+# 젯슨에 이미 클론돼 있음
+cd ~/yax
 
-# ZIP으로 받은 경우
-cd ~/Desktop/f1TENTH-hj_v2_f1tenth_ws
+# 새로 클론해야 하는 경우
+git clone git@github.com:lloes098/26-jetson-f1tenth.git ~/yax
+cd ~/yax
 
-# 실행 권한 부여
+# 실행 권한 부여 (필요 시)
 chmod +x install_on_jetson.sh race.sh
 ```
 
@@ -42,6 +47,9 @@ chmod +x install_on_jetson.sh race.sh
 ```
 
 > `~/f1tenth_ws`가 이미 있고 `f1tenth_stack`이 빌드된 상태여야 합니다.
+> 이 스크립트는 `~/yax/src/`의 패키지 3개(race_stack, q2_gap_follow, roboracer_1v1)를
+> `~/f1tenth_ws/src/`에 **심링크**로 연결(복사 아님)하고 colcon build 합니다.
+> 이후 repo에서 파이썬 코드를 수정하면 재빌드 없이 즉시 반영됩니다(`--symlink-install`).
 
 ---
 
@@ -54,6 +62,8 @@ ls /dev/ttyACM*
 # 심링크 확인
 ls -l /dev/sensors/vesc
 ```
+
+> 심링크가 없어도 `race.sh`가 실행 시 자동 생성하므로 보통 신경 쓸 필요 없음.
 
 ---
 
@@ -74,7 +84,7 @@ ls -l /dev/sensors/vesc
 
 > `mapping-joy`는 bringup + SLAM + joystick_teleop을 한 번에 기동함.
 > `joystick.launch.py`와 동시에 쓰면 bringup 중복으로 충돌 — 함께 쓰지 말 것.
-> 수동조작 속도 상한은 `race_script.yaml`의 `speed.mapping_max`로 조절 (현재 1.5 m/s).
+> 수동조작 속도 상한은 `race_script.yaml`의 `speed.mapping_max`로 조절 (현재 1.0 m/s).
 
 ---
 
@@ -93,7 +103,7 @@ sudo apt install python3-tk
 ### Step 1 — 맵 정제
 
 ```bash
-cd ~/f1tenth_ws/src/race_stack/maps
+cd ~/yax/src/race_stack/maps
 python3 clean_map.py
 # → 터미널에서 맵 목록이 나타남. 번호 또는 이름 입력으로 선택.
 #   (* 표시 = 이미 _clean 버전이 있는 맵)
@@ -123,9 +133,14 @@ python3 clean_map.py
 > 반드시 정제된 맵 사용. raw SLAM 맵은 복도 전체가 연결되어 스켈레톤 추출 실패.
 
 ```bash
-cd ~/f1tenth_ws/src/race_stack/race_stack
+# 방법 1 — race.sh로 실행 (권장)
+cd ~/yax
+./race.sh waypoints              # 맵 목록에서 선택
+./race.sh waypoints track_2_clean  # 맵 이름 직접 지정
+
+# 방법 2 — 직접 실행 (옵션 세밀 조정 시)
+cd ~/yax/src/race_stack/race_stack
 python3 gen_waypoints.py
-# 옵션 직접 지정:
 # python3 gen_waypoints.py --map track_2_clean --safety 0.2 --vmax 4.0 --vmin 1.0
 ```
 
@@ -148,7 +163,7 @@ maps/<맵이름>/outer_bound.npy
 ### Step 3 — race_script.yaml 수정
 
 ```bash
-nano ~/f1tenth_ws/race_script.yaml
+nano ~/yax/race_script.yaml
 ```
 
 ```yaml
@@ -204,8 +219,10 @@ ros2 run race_stack joystick_teleop --ros-args -p max_speed:=1.5
 ## 6. race_script.yaml 수정
 
 ```bash
-nano race_script.yaml
+nano ~/yax/race_script.yaml
 ```
+
+> `race.sh`는 자기가 있는 디렉토리(`~/yax`)의 `race_script.yaml`을 읽음. `~/f1tenth_ws`에는 이 파일이 없음.
 
 ```yaml
 map_name: my_track       # savemap 때 쓴 이름
@@ -246,7 +263,7 @@ ros2 topic pub --once /race/enabled std_msgs/msg/Bool "{data: false}"
 ## 10. 트러블슈팅
 
 ```bash
-# VESC 심링크 수동 생성 (udev rule 안 먹힐 때)
+# VESC 심링크 수동 생성 (race.sh가 자동 생성하지만, 직접 만들 때)
 sudo mkdir -p /dev/sensors
 sudo ln -sf /dev/ttyACM0 /dev/sensors/vesc
 
@@ -255,7 +272,8 @@ ros2 topic list
 ros2 topic echo /amcl_pose     # 위치 추정 확인
 ros2 topic echo /race/enabled  # 미션 매니저 상태
 
-# 빌드 다시 (코드 수정 후)
+# 빌드 다시 — 파이썬 코드만 고쳤으면 불필요 (--symlink-install 이라 즉시 반영).
+# 새 파일 추가 / setup.py·package.xml 변경 / launch·config 추가 때만 실행:
 cd ~/f1tenth_ws
 colcon build --packages-select race_stack q2_gap_follow roboracer_1v1 --symlink-install
 source install/setup.bash
@@ -423,7 +441,7 @@ pkill x11vnc; pkill openbox; pkill Xvfb
 | bringup | 터미널1에서 직접 launch | 자동 포함 |
 | SLAM | 터미널2에서 직접 launch | 자동 포함 |
 | 조종 | 터미널4에서 별도 스크립트 | 자동 포함 |
-| 맵 저장 위치 | `~/maps/` (race stack이 못 읽음) | `~/f1tenth_ws/src/race_stack/maps/` (바로 사용 가능) |
+| 맵 저장 위치 | `~/maps/` (race stack이 못 읽음) | `~/yax/src/race_stack/maps/` (= `~/f1tenth_ws/src/race_stack/maps/`, 바로 사용 가능) |
 
 ---
 
@@ -467,8 +485,10 @@ cd ~/yax   # race.sh 있는 경로
 ./race.sh q1   # Stanley로 자율주행
 ```
 
-> **git pull 후 주의**: `./install_on_jetson.sh` 한 번 다시 실행해야 변경된 소스가 `~/f1tenth_ws/src/`에 반영됨.
-> `race.sh`, `race_script.yaml`은 레포 디렉토리에서 직접 읽으므로 pull만 해도 즉시 적용.
+> **git pull 후**: 패키지가 `~/f1tenth_ws/src/`에 **심링크**로 연결돼 있어 pull만 하면 즉시 반영됨
+> (`race.sh`, `race_script.yaml` 포함). 재빌드가 필요한 경우는 새 파일 추가·setup.py 변경 등뿐 —
+> 그때만 `cd ~/f1tenth_ws && colcon build --packages-select race_stack q2_gap_follow roboracer_1v1 --symlink-install`.
+> `./install_on_jetson.sh` 재실행은 새 의존 패키지가 추가됐을 때만 필요.
 
 ---
 
