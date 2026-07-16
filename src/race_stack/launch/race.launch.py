@@ -31,17 +31,19 @@ def generate_launch_description():
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
 
-    # mode:=... 오버라이드는 race.sh가 env 대신 launch arg로 줄 수도 있어
+    # mode:=/controller:= 오버라이드는 race.sh가 launch arg로 준다.
     # sys.argv를 직접 파싱한다 (LaunchConfiguration은 파이썬 로직에서 못 씀)
     import sys
     mode = cfg['mode']
+    controller = cfg.get('controller', 'auto')
     for a in sys.argv:
         if a.startswith('mode:='):
             mode = a.split(':=')[1]
+        elif a.startswith('controller:='):
+            controller = a.split(':=')[1]
     if mode not in DEFAULT_CONTROLLER:
         raise RuntimeError(f'race.launch.py: 잘못된 mode "{mode}"')
 
-    controller = cfg.get('controller', 'auto')
     if controller == 'auto':
         controller = DEFAULT_CONTROLLER[mode]
     if controller not in VALID_CONTROLLERS:
@@ -186,5 +188,7 @@ def generate_launch_description():
                      f'max_speed={max_speed} map={cfg["map_name"]}'],
         output='screen'))
 
-    return LaunchDescription([DeclareLaunchArgument('mode', default_value=mode)]
-                             + nodes)
+    return LaunchDescription(
+        [DeclareLaunchArgument('mode', default_value=mode),
+         DeclareLaunchArgument('controller', default_value=controller)]
+        + nodes)

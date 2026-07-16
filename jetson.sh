@@ -8,7 +8,8 @@ CMD="${1:-status}"
 
 case "$CMD" in
   q1|q2|q3|final|mapping)
-    ssh -t "$JETSON_HOST" "tmux new-session -d -s $SESSION -c $JETSON_WS './race.sh $CMD; bash' 2>/dev/null || tmux new-window -t $SESSION -c $JETSON_WS './race.sh $CMD; bash'; tmux attach -t $SESSION"
+    CTRL="${2:-}"   # 선택: 컨트롤러 오버라이드 (예: ./jetson.sh q1 pure_pursuit)
+    ssh -t "$JETSON_HOST" "tmux new-session -d -s $SESSION -c $JETSON_WS './race.sh $CMD $CTRL; bash' 2>/dev/null || tmux new-window -t $SESSION -c $JETSON_WS './race.sh $CMD $CTRL; bash'; tmux attach -t $SESSION"
     ;;
   savemap)
     NAME="${2:?usage: ./jetson.sh savemap <map_name>}"

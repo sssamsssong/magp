@@ -6,7 +6,10 @@
 #    ./race.sh                 race_script.yaml의 mode대로 실행
 #    ./race.sh mapping         모드 임시 오버라이드 (yaml 안 바꿔도 됨)
 #    ./race.sh mapping-joy     조이스틱으로 SLAM 맵핑
-#    ./race.sh q1|q2|q3|race
+#    ./race.sh q1|q2|q3|race [컨트롤러]
+#                              컨트롤러 생략 시 yaml의 controller 값 사용
+#                              (auto | stanley | pure_pursuit | gap_follower)
+#                              예: ./race.sh q1 pure_pursuit
 #    ./race.sh savemap <이름>  맵핑 끝난 뒤 맵 저장
 #    ./race.sh teleop          키보드 텔레옵만 단독 실행
 #    ./race.sh joy             조이스틱 수동 조종 (브링업 포함)
@@ -102,13 +105,20 @@ case "$CMD" in
     else
       exec ros2 run race_stack gen_waypoints
     fi ;;
-  "" ) MODE=$(get_yaml mode) ;;
-  mapping|mapping-joy|q1|q2|q3|race) MODE=$CMD ;;
+  "" ) MODE=$(get_yaml mode); CTRL="" ;;
+  mapping|mapping-joy) MODE=$CMD; CTRL="" ;;
+  q1|q2|q3|race)
+    MODE=$CMD
+    CTRL=${2:-}   # 두 번째 인자로 컨트롤러 오버라이드 (yaml 수정 불필요)
+    case "$CTRL" in
+      ""|auto|stanley|pure_pursuit|gap_follower) ;;
+      * ) echo "알 수 없는 컨트롤러: $CTRL  (auto|stanley|pure_pursuit|gap_follower)"; exit 1 ;;
+    esac ;;
   * ) echo "알 수 없는 명령: $CMD"; exit 1 ;;
 esac
 
 echo "============================================"
-echo "  RoboRacer 2026  |  MODE = $MODE"
+echo "  RoboRacer 2026  |  MODE = $MODE${CTRL:+  |  CONTROLLER = $CTRL}"
 echo "  config: $RACE_SCRIPT"
 echo "============================================"
 
@@ -174,5 +184,5 @@ elif [ "$MODE" = "mapping-joy" ]; then
         -p arm_on_neutral:="$ARM" \
         -p debug:="$JOY_DBG"
 else
-    exec ros2 launch race_stack race.launch.py mode:=$MODE
+    exec ros2 launch race_stack race.launch.py mode:=$MODE ${CTRL:+controller:=$CTRL}
 fi
