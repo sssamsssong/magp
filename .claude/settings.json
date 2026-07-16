@@ -33,7 +33,8 @@
       "Read(//home/jetson/f1tenth_ws/install/race_stack/share/race_stack/maps/track_2nd_clean/**)",
       "Bash(grep -rn \"servo\" /home/jetson/f1tenth_ws/src/vesc/vesc_ackermann/src/vesc_to_odom.cpp 2>/dev/null | head; ls /home/jetson/f1tenth_ws/src/vesc/vesc_ackermann/src/ 2>/dev/null)",
       "Bash(sed -n 95,135p /home/jetson/f1tenth_ws/src/vesc/vesc_ackermann/src/vesc_to_odom.cpp)",
-      "Bash(python3 -m py_compile /home/jetson/yax/src/race_stack/race_stack/stanley_controller.py /home/jetson/yax/src/race_stack/race_stack/pure_pursuit.py)"
+      "Bash(python3 -m py_compile /home/jetson/yax/src/race_stack/race_stack/stanley_controller.py /home/jetson/yax/src/race_stack/race_stack/pure_pursuit.py)",
+      "Bash(bash -c 'SCRIPT_DIR=\"$\\(cd \"$\\(dirname \"./race.sh\"\\)\" && pwd\\)\"; echo \"SCRIPT_DIR=$SCRIPT_DIR\"; echo \"RACE_SCRIPT=$SCRIPT_DIR/race_script.yaml\"; ls -la \"$SCRIPT_DIR/race_script.yaml\" 2>&1')"
     ],
     "additionalDirectories": [
       "/home/jetson/f1tenth_ws/src/f1tenth_system/f1tenth_stack/config"
