@@ -202,25 +202,29 @@ class StanleyController(Node):
         self.wp_pub    = self.create_publisher(Marker,                 '/waypoint', 10)
         self.obs_pub   = self.create_publisher(MarkerArray,            '/obstacle', 10)
 
-        # ── odom kick: 데드락 방지 ─────────────────────────────────────
-        # vesc_to_odom 은 서보 명령을 한 번 받기 전까지 odom(TF)을 발행하지
-        # 않는다 → AMCL 이 스캔을 버려 /amcl_pose 가 안 나오고, 이 노드는
-        # pose 콜백에서만 /drive 를 내므로 서보 명령도 영원히 안 나간다.
-        # 첫 pose 가 올 때까지 0속도 명령을 흘려보내 고리를 끊는다.
-        self._kick_timer = self.create_timer(0.1, self._odom_kick)
+        # ── 고정 주기 명령 발행 (20Hz) ─────────────────────────────────
+        # AMCL 은 차가 update_min_d(10cm) 이상 움직여야만 /amcl_pose 를 내고,
+        # ackermann_mux 는 /drive 가 0.2s 끊기면 명령을 버린다. pose 콜백에서만
+        # /drive 를 내면 "pose 1개 → 0.2s 구동 → 10cm 못 감 → pose 없음" 의
+        # 데드락으로 차가 출발하지 못한다 (odom kick 데드락과 별개의 두 번째 고리).
+        # → pose 콜백은 조향·속도 계산만 하고, 발행은 이 타이머가 계속 한다.
+        #   첫 pose 전에는 0속도를 흘려 vesc_to_odom odom kick 역할도 겸한다.
+        self._cmd = (0.0, 0.0)      # (steer, speed) — 최근 계산된 명령
+        self.create_timer(0.05, self._cmd_tick)
 
         self.get_logger().info(f'StanleyController ready [mode={self.mode}]')
 
-    def _odom_kick(self):
-        if self.pos is None:
+    def _cmd_tick(self):
+        if not self.enabled or self.pos is None:
             self._publish_cmd(0.0, 0.0)
         else:
-            self._kick_timer.cancel()
+            self._publish_cmd(*self._cmd)
 
     # ── event callbacks ────────────────────────────────────────────────────
 
     def _enabled_cb(self, msg: Bool):
         if self.enabled and not msg.data:
+            self._cmd = (0.0, 0.0)   # 재활성화 시 이전 명령 재사용 방지
             self._publish_cmd(0.0, 0.0)
         self.enabled = msg.data
 
@@ -292,7 +296,7 @@ class StanleyController(Node):
             cmd_v *= self.obs_decel
         cmd_v = float(np.clip(cmd_v, self.min_speed, self.max_speed))
 
-        self._publish_cmd(steer, cmd_v)
+        self._cmd = (steer, cmd_v)   # 발행은 _cmd_tick(20Hz)이 담당
         self._pub_wp_marker(target)
 
     # ── Q2 obstacle avoidance ──────────────────────────────────────────────

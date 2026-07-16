@@ -16,7 +16,9 @@
 set -e
 
 WS=${RACE_WS:-$HOME/f1tenth_ws}
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ~/f1tenth_ws/race.sh 는 이 repo로 가는 심링크 — readlink -f 로 실제 위치(~/yax)를
+# 찾아야 race_script.yaml 을 제대로 읽는다 (심링크 경유 실행 시 launch가 즉사하던 버그)
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 RACE_SCRIPT="$SCRIPT_DIR/race_script.yaml"
 PKG_SHARE_MAPS="$WS/src/race_stack/maps"
 PKG_SHARE_WP="$WS/src/race_stack/waypoints"
