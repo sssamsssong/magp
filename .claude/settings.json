@@ -23,7 +23,8 @@
       "Read(//dev/shm/**)",
       "Read(//home/jetson/.ros/**)",
       "Bash(bash -n /home/jetson/yax/race.sh)",
-      "Bash(grep -iE \"install|deploy|setup|sync|\\\\.sh$\")"
+      "Bash(grep -iE \"install|deploy|setup|sync|\\\\.sh$\")",
+      "Bash(find /home/jetson/yax -name \"JETSON_COMMANDS.md\" 2>/dev/null; find /home/jetson -maxdepth 2 -name \"JETSON_COMMANDS.md\" 2>/dev/null)"
     ],
     "additionalDirectories": [
       "/home/jetson/f1tenth_ws/src/f1tenth_system/f1tenth_stack/config"
