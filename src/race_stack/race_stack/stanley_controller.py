@@ -277,7 +277,21 @@ class StanleyController(Node):
 
         # ── Stanley steering ───────────────────────────────────────────
         closest  = wps[nearest, :2]
-        path_yaw = math.atan2(target[1] - closest[1], target[0] - closest[0])
+
+        # path_yaw = 경로의 "국소 접선" 방향 (교과서 Stanley).
+        # 이전엔 최근접점→lookahead 목표의 현(chord)을 썼는데, 곡선에서 현은
+        # 항상 코너 안쪽을 가리켜 정상상태 오프셋 tan(편향각)×(v+ks)/k 만큼
+        # 안쪽으로 파고든다 (이 트랙 기준 0.3~0.6m → 가운데 장애물 충돌 원인).
+        j = nearest
+        for _ in range(n):
+            j = (j + 1) % n
+            if traj_d[j] > 0.2:     # ~0.2m 앞 점과의 방향 = 접선 근사
+                break
+        path_yaw = math.atan2(wps[j, 1] - closest[1], wps[j, 0] - closest[0])
+
+        # Q2 회피 중에는 시프트된 목표점을 향해 조향 (회피 기동 유지)
+        if self.mode == 'q2' and not self.lane_free:
+            path_yaw = math.atan2(target[1] - py, target[0] - px)
         cte_size = float(np.hypot(px - closest[0], py - closest[1]))
         cte_sign = float(np.sign(np.cross(
             [math.cos(path_yaw), math.sin(path_yaw)],
