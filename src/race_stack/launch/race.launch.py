@@ -158,6 +158,9 @@ def generate_launch_description():
                 'lookahead_min':   float(sc.get('lookahead_min',  0.5)),
                 'lookahead_max':   float(sc.get('lookahead_max',  2.0)),
                 'lookahead_gain':  float(sc.get('lookahead_gain', 7.0)),
+                'ff_gain':         float(sc.get('ff_gain',        1.0)),
+                'ff_preview_sec':  float(sc.get('ff_preview_sec', 0.10)),
+                'steer_lpf':       float(sc.get('steer_lpf',      1.0)),
                 # Q2 obstacle detection
                 'map_yaml':        map_yaml,
                 'bound_dir':       bound_dir,

@@ -24,9 +24,10 @@ amcl:
     alpha3: 0.2   # 병진→병진 노이즈
     alpha4: 0.2   # 회전→병진 노이즈
 
-    # 업데이트 조건 (고속주행이므로 자주 업데이트)
-    update_min_d: 0.1     # 10cm 이동마다
-    update_min_a: 0.1     # 0.1rad 회전마다
+    # 업데이트 조건 — 사실상 매 스캔 갱신 (컨트롤러의 amcl 보정 주기를 올림.
+    # Orin CPU 여유 충분. 정지 중엔 어차피 안 돌아 부하 없음)
+    update_min_d: 0.025   # 2.5cm 이동마다
+    update_min_a: 0.03    # ~1.7도 회전마다
     resample_interval: 1
 
     transform_tolerance: 0.5

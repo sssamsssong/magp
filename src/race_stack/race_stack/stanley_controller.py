@@ -25,6 +25,7 @@ Boundary files (Q2):  inner_bound.npy, outer_bound.npy  — pixel coords (int32)
 import csv
 import math
 import os
+from collections import deque
 
 import cv2
 import numpy as np
@@ -109,6 +110,9 @@ class StanleyController(Node):
         self.declare_parameter('lookahead_min',    0.5)
         self.declare_parameter('lookahead_max',    2.0)
         self.declare_parameter('lookahead_gain',   7.0)
+        self.declare_parameter('ff_gain',          1.0)
+        self.declare_parameter('ff_preview_sec',   0.10)
+        self.declare_parameter('steer_lpf',        1.0)
         # Q2 obstacle detection
         self.declare_parameter('map_yaml',         '')
         self.declare_parameter('bound_dir',        '')
@@ -136,6 +140,10 @@ class StanleyController(Node):
         self.L_min      = p('lookahead_min')
         self.L_max      = p('lookahead_max')
         self.L_gain     = p('lookahead_gain')
+        self.wheelbase  = p('wheelbase')
+        self.ff_gain    = p('ff_gain')
+        self.ff_prev_s  = p('ff_preview_sec')
+        self.steer_lpf  = p('steer_lpf')
 
         # ── waypoints ─────────────────────────────────────────────────
         self.wps = self._load_waypoints(p('waypoint_file'))
@@ -148,6 +156,15 @@ class StanleyController(Node):
             self.get_logger().info(
                 f'[Stanley/{self.mode}] {len(self.wps)} waypoints loaded')
 
+        # ── 곡률 사전계산 (피드포워드용, 로드 시 1회) ──────────────────
+        self.kappa  = None
+        self._wp_ds = 0.1
+        if self.wps is not None and len(self.wps) > 10:
+            self.kappa, self._wp_ds = self._precompute_curvature()
+            self.get_logger().info(
+                f'curvature precomputed: |κ|max={np.abs(self.kappa).max():.2f} '
+                f'(spacing {self._wp_ds:.3f}m)')
+
         # ── state ─────────────────────────────────────────────────────
         self.enabled        = True
         self.pos            = None
@@ -156,6 +173,16 @@ class StanleyController(Node):
         self.lane_free      = True
         self.free_votes: list[bool] = []
         self.all_on_track: list[np.ndarray] = []
+
+        # ── pose 융합 상태 ─────────────────────────────────────────────
+        # /amcl_pose 는 느리고(이동해야 갱신) /odom 은 빠르지만 드리프트.
+        # amcl 이 올 때마다 map←odom 보정(th,tx,ty)을 갱신하고, 제어 주기마다
+        # 최신 odom 에 보정을 적용해 "지금" 위치를 50Hz 로 추정한다.
+        self._odom_buf      = deque(maxlen=200)   # (t, x, y, yaw) 최근 ~2s
+        self._odom_last     = None                # 최신 odom 샘플
+        self._amcl_pose     = None                # 원시 amcl (odom 폴백용)
+        self._map_from_odom = None                # (th, tx, ty) 보정 변환
+        self._steer_prev    = 0.0                 # 조향 LPF 상태
 
         # ── Q2: map image + polygon bounds ────────────────────────────
         self.map_arr        = None
@@ -202,47 +229,75 @@ class StanleyController(Node):
         self.wp_pub    = self.create_publisher(Marker,                 '/waypoint', 10)
         self.obs_pub   = self.create_publisher(MarkerArray,            '/obstacle', 10)
 
-        # ── 고정 주기 명령 발행 (20Hz) ─────────────────────────────────
-        # AMCL 은 차가 update_min_d(10cm) 이상 움직여야만 /amcl_pose 를 내고,
-        # ackermann_mux 는 /drive 가 0.2s 끊기면 명령을 버린다. pose 콜백에서만
-        # /drive 를 내면 "pose 1개 → 0.2s 구동 → 10cm 못 감 → pose 없음" 의
-        # 데드락으로 차가 출발하지 못한다 (odom kick 데드락과 별개의 두 번째 고리).
-        # → pose 콜백은 조향·속도 계산만 하고, 발행은 이 타이머가 계속 한다.
-        #   첫 pose 전에는 0속도를 흘려 vesc_to_odom odom kick 역할도 겸한다.
-        self._cmd = (0.0, 0.0)      # (steer, speed) — 최근 계산된 명령
-        self.create_timer(0.05, self._cmd_tick)
+        # ── 고정 주기 제어 루프 (50Hz) ─────────────────────────────────
+        # 매 주기 (amcl 보정 + 최신 odom)으로 "지금" pose 를 추정해 조향을
+        # 새로 계산·발행한다. pose 콜백 주기(이동 거리 조건)에 묶이지 않으므로
+        # - mux timeout(0.2s) 데드락 없음 (정지 시에도 0속도 발행 = odom kick)
+        # - 고속에서도 수십 cm 지난 위치가 아닌 현재 위치 기준으로 조향
+        self.create_timer(0.02, self._cmd_tick)
 
         self.get_logger().info(f'StanleyController ready [mode={self.mode}]')
 
     def _cmd_tick(self):
-        if not self.enabled or self.pos is None:
+        pose = self._current_pose()
+        if not self.enabled or self.wps is None or pose is None:
             self._publish_cmd(0.0, 0.0)
-        else:
-            self._publish_cmd(*self._cmd)
+            return
+        self.pos = np.array([pose[0], pose[1]])   # scan_cb 등 공용 상태 갱신
+        self.yaw = pose[2]
+        steer, speed = self._compute_cmd(*pose)
+        self._publish_cmd(steer, speed)
+
+    def _current_pose(self):
+        """amcl 보정 ⊕ 최신 odom = 고주기 pose 추정. 없으면 amcl 원시값 폴백."""
+        if self._map_from_odom is not None and self._odom_last is not None:
+            th, tx, ty = self._map_from_odom
+            _, ox, oy, oyaw = self._odom_last
+            c, s = math.cos(th), math.sin(th)
+            return (tx + c * ox - s * oy,
+                    ty + s * ox + c * oy,
+                    _normalize(th + oyaw))
+        return self._amcl_pose
 
     # ── event callbacks ────────────────────────────────────────────────────
 
     def _enabled_cb(self, msg: Bool):
         if self.enabled and not msg.data:
-            self._cmd = (0.0, 0.0)   # 재활성화 시 이전 명령 재사용 방지
+            self._steer_prev = 0.0   # 재활성화 시 이전 조향 재사용 방지
             self._publish_cmd(0.0, 0.0)
         self.enabled = msg.data
 
     def _odom_cb(self, msg: Odometry):
         self.speed = msg.twist.twist.linear.x
-
-    # ── main control loop (triggered by AMCL at ~10 Hz) ───────────────────
+        p = msg.pose.pose
+        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        entry = (t, p.position.x, p.position.y, _yaw(p.orientation))
+        self._odom_last = entry
+        self._odom_buf.append(entry)
 
     def _pose_cb(self, msg: PoseWithCovarianceStamped):
-        if not self.enabled or self.wps is None:
-            return
-
+        """amcl 수신 → map←odom 보정 변환 갱신 (제어는 _cmd_tick 이 50Hz로)."""
         px  = msg.pose.pose.position.x
         py  = msg.pose.pose.position.y
         yaw = _yaw(msg.pose.pose.orientation)
-        self.pos = np.array([px, py])
-        self.yaw = yaw
-        speed    = abs(self.speed)
+        self._amcl_pose = (px, py, yaw)
+
+        # amcl 측정 시각과 가장 가까운 odom 샘플 기준으로 보정 계산
+        # (amcl 은 그 시각의 pose 이므로, 그 시각의 odom 과 짝지어야 정확)
+        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        od = (min(self._odom_buf, key=lambda e: abs(e[0] - t))
+              if self._odom_buf else self._odom_last)
+        if od is None:
+            return
+        _, ox, oy, oyaw = od
+        th = _normalize(yaw - oyaw)
+        c, s = math.cos(th), math.sin(th)
+        self._map_from_odom = (th, px - (c * ox - s * oy), py - (s * ox + c * oy))
+
+    # ── main control loop (50Hz, _cmd_tick 에서 호출) ──────────────────────
+
+    def _compute_cmd(self, px: float, py: float, yaw: float):
+        speed = abs(self.speed)
 
         # ── adaptive lookahead: L = (Lmax-Lmin)/Lgain * v + Lmin ──────
         L = float(np.clip(
@@ -282,12 +337,12 @@ class StanleyController(Node):
         # 이전엔 최근접점→lookahead 목표의 현(chord)을 썼는데, 곡선에서 현은
         # 항상 코너 안쪽을 가리켜 정상상태 오프셋 tan(편향각)×(v+ks)/k 만큼
         # 안쪽으로 파고든다 (이 트랙 기준 0.3~0.6m → 가운데 장애물 충돌 원인).
-        j = nearest
-        for _ in range(n):
-            j = (j + 1) % n
-            if traj_d[j] > 0.2:     # ~0.2m 앞 점과의 방향 = 접선 근사
-                break
-        path_yaw = math.atan2(wps[j, 1] - closest[1], wps[j, 0] - closest[0])
+        # 접선은 중심차분(±0.1m)으로 계산 — 전방차분은 편향이 남는다.
+        m_t = max(1, int(round(0.1 / self._wp_ds)))
+        j_f = (nearest + m_t) % n
+        j_b = (nearest - m_t) % n
+        path_yaw = math.atan2(wps[j_f, 1] - wps[j_b, 1],
+                              wps[j_f, 0] - wps[j_b, 0])
 
         # Q2 회피 중에는 시프트된 목표점을 향해 조향 (회피 기동 유지)
         if self.mode == 'q2' and not self.lane_free:
@@ -299,10 +354,23 @@ class StanleyController(Node):
         cte     = cte_size * cte_sign
         yaw_err = _normalize(path_yaw - yaw)
 
+        # ── 곡률 피드포워드: 코너의 "정답 조향각"을 미리 적용 ──────────
+        # Stanley 피드백은 오차가 생겨야 반응하지만, 피드포워드는 경로 곡률
+        # 만으로 조향을 선행한다. ff_preview_sec 은 서보 지연 보상용 예견.
+        steer_ff = 0.0
+        if self.kappa is not None:
+            prev_m = int(speed * self.ff_prev_s / self._wp_ds)
+            kap    = float(self.kappa[(nearest + prev_m) % n])
+            steer_ff = self.ff_gain * math.atan(self.wheelbase * kap)
+
         v_safe = max(speed, 0.5)   # avoid division by near-zero
-        steer  = self.gain * (yaw_err
+        steer  = steer_ff + self.gain * (yaw_err
                               - math.atan2(self.k_cte * cte, v_safe + self.ks))
         steer  = float(np.clip(steer, -self.max_steer, self.max_steer))
+
+        # ── 조향 저역통과 (steer_lpf=1.0 이면 비활성) ───────────────────
+        steer = self.steer_lpf * steer + (1.0 - self.steer_lpf) * self._steer_prev
+        self._steer_prev = steer
 
         # ── target speed from CSV ──────────────────────────────────────
         cmd_v = float(wps[nearest, 2]) * self.vel_scale
@@ -310,8 +378,29 @@ class StanleyController(Node):
             cmd_v *= self.obs_decel
         cmd_v = float(np.clip(cmd_v, self.min_speed, self.max_speed))
 
-        self._cmd = (steer, cmd_v)   # 발행은 _cmd_tick(20Hz)이 담당
         self._pub_wp_marker(target)
+        return steer, cmd_v
+
+    def _precompute_curvature(self, span: float = 0.2, smooth: int = 5):
+        """각 웨이포인트의 부호 있는 곡률(좌회전 +)을 로드 시 1회 계산.
+
+        ±span(m) 떨어진 세 점의 Menger curvature 를 쓰고 이동평균으로
+        스무딩한다. 반환: (kappa 배열, 평균 점 간격 ds)
+        """
+        w  = self.wps[:, :2]
+        ds = float(np.mean(np.hypot(*(np.roll(w, -1, axis=0) - w).T)))
+        m  = max(1, int(round(span / max(ds, 1e-6))))
+        a  = np.roll(w,  m, axis=0)
+        c  = np.roll(w, -m, axis=0)
+        ab, bc, ac = w - a, c - w, c - a
+        cross = ab[:, 0] * bc[:, 1] - ab[:, 1] * bc[:, 0]
+        denom = (np.linalg.norm(ab, axis=1) * np.linalg.norm(bc, axis=1)
+                 * np.linalg.norm(ac, axis=1))
+        kappa = 2.0 * cross / np.maximum(denom, 1e-9)
+        kern  = np.ones(smooth) / smooth
+        pad   = np.concatenate([kappa[-smooth:], kappa, kappa[:smooth]])
+        kappa = np.convolve(pad, kern, 'same')[smooth:-smooth]
+        return kappa, ds
 
     # ── Q2 obstacle avoidance ──────────────────────────────────────────────
 
