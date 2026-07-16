@@ -11,7 +11,7 @@
       "Bash(grep -rn \"0.36\\\\|max_steer\\\\|steering\" README.md JETSON_COMMANDS.md 2>/dev/null | head -20; echo \"=== f1tenth_stack 원본 joy_teleop 설정 ===\"; grep -rn \"steering\\\\|axis\\\\|scale\" /home/jetson/f1tenth_ws/src/f1tenth_system/f1tenth_stack/config/joy_teleop.yaml 2>/dev/null | head -20)",
       "Bash(echo \"=== 이 레포 ===\"; grep -rn \"wheelbase\" config/ src/ race_script.yaml 2>/dev/null; echo; echo \"=== f1tenth_ws \\(VESC/브링업\\) ===\"; grep -rn \"wheelbase\" /home/jetson/f1tenth_ws/src/ 2>/dev/null | grep -v \"\\\\.git\")",
       "Read(//home/jetson/f1tenth_ws/src/**)",
-      "Bash(chmod +x /home/jetson/Downloads/f1TENTH-hj_v2_f1tenth_ws/yaw_check.py)",
+      "Bash(chmod +x /home/jetson/yax/yaw_check.py)",
       "Read(//home/jetson/f1tenth_ws/src/f1tenth_system/f1tenth_stack/**)",
       "Read(//home/jetson/f1tenth_ws/install/vesc_driver/lib/vesc_driver/**)",
       "Read(//home/jetson/f1tenth_ws/src/vesc/vesc_driver/src/**)",
@@ -22,7 +22,7 @@
       "Bash(ros2 doctor *)",
       "Read(//dev/shm/**)",
       "Read(//home/jetson/.ros/**)",
-      "Bash(bash -n /home/jetson/Downloads/f1TENTH-hj_v2_f1tenth_ws/race.sh)",
+      "Bash(bash -n /home/jetson/yax/race.sh)",
       "Bash(grep -iE \"install|deploy|setup|sync|\\\\.sh$\")"
     ],
     "additionalDirectories": [

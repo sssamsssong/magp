@@ -433,7 +433,7 @@ pkill x11vnc; pkill openbox; pkill Xvfb
 
 ```bash
 ssh jetson@192.168.45.246
-cd ~/Downloads/f1TENTH_hj0705   # race.sh 있는 경로
+cd ~/yax   # race.sh 있는 경로
 
 # 조이스틱으로 맵핑 (bringup + SLAM + joystick 한번에)
 ./race.sh mapping-joy
@@ -533,7 +533,7 @@ ROS 좌표계: 오른쪽(+x 방향) = 0 rad, 반시계 방향이 양수.
 #### 3단계 — race_script.yaml 수정
 
 ```bash
-nano ~/Downloads/f1TENTH_hj0705/race_script.yaml
+nano ~/yax/race_script.yaml
 ```
 
 ```yaml

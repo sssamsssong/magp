@@ -139,10 +139,10 @@ offset을 0.5304 → 0.40 으로 크게 옮긴 대가로 클리핑이 한쪽에�
 
 ```bash
 # 터미널 A
-cd ~/Downloads/f1TENTH-hj_v2_f1tenth_ws && ./race.sh joy
+cd ~/yax && ./race.sh joy
 
 # 터미널 B
-cd ~/Downloads/f1TENTH-hj_v2_f1tenth_ws
+cd ~/yax
 source /opt/ros/humble/setup.bash
 python3 yaw_check.py
 ```
