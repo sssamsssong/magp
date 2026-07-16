@@ -21,8 +21,8 @@ mode: q2
 #    (주최측 배포 맵을 maps/ 폴더에 넣고 이름만 적으면 됨)
 #    웨이포인트: race_stack/waypoints/<waypoints>.csv  (x,y,speed)
 # ------------------------------------------------------------
-map_name: track_2_clean     # maps/track_2_clean.yaml
-waypoints: track_2_clean_wp # waypoints/track_2_clean_wp.csv (pure_pursuit용)
+map_name: track_2nd_clean     # maps/track_2_clean.yaml
+waypoints: track_2nd_clean_wp # waypoints/track_2_clean_wp.csv (pure_pursuit용)
 
 # ------------------------------------------------------------
 # 3. 컨트롤러 선택
