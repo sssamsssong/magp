@@ -21,8 +21,8 @@ mode: q2
 #    (주최측 배포 맵을 maps/ 폴더에 넣고 이름만 적으면 됨)
 #    웨이포인트: race_stack/waypoints/<waypoints>.csv  (x,y,speed)
 # ------------------------------------------------------------
-map_name: track_2nd_clean     # maps/track_2_clean.yaml
-waypoints: track_2nd_clean_wp # waypoints/track_2_clean_wp.csv (pure_pursuit용)
+map_name: 0717_clean          # maps/0717_clean.yaml
+waypoints: 0717_clean_wp      # waypoints/0717_clean_wp.csv
 
 # ------------------------------------------------------------
 # 3. 컨트롤러 선택
@@ -52,7 +52,7 @@ viz: true
 # ------------------------------------------------------------
 speed:
   q1_max: 1.5               # 예선1 최고속도 (미주행 디버깅 중 임시 하향, 원래 3.0)
-  q2_max: 2.0               # 예선2 (장애물 회피, 안전마진)
+  q2_max: 1.5               # 예선2 (장애물 회피, 안전마진)
   q3_max: 4.5               # 예선3 (공격적)
   race_max: 3.0             # 1대1 경주
   mapping_max: 1.0          # 맵핑 시 키보드 텔레옵 최고속도

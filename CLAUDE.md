@@ -20,8 +20,12 @@
 
 - repo에서 파이썬 코드 수정 → 재빌드 없이 즉시 반영 (`--symlink-install`)
 - `~/f1tenth_ws` 쪽에서 수정해도 그게 곧 repo → 커밋/푸시로 보존
-- 재빌드가 필요한 경우: 새 파일 추가, `setup.py`/`package.xml` 변경
+- 재빌드가 필요한 경우: 새 `.py`/launch 파일 추가, `setup.py`/`package.xml` 변경
   → `cd ~/f1tenth_ws && colcon build --packages-select race_stack q2_gap_follow roboracer_1v1 --symlink-install`
+- **맵/웨이포인트 신규 추가는 재빌드 불필요** (2026-07-17~): `race.sh`가 `RACE_WS`를
+  export하고, `gen_waypoints`·`race.launch.py`가 이 값 기준으로 repo `src/race_stack`의
+  `maps/`·`waypoints/`를 직접 읽는다. 예전엔 build/install 스냅샷을 읽어 새 맵이 안 보였음.
+  (그래도 새 맵 파일은 커밋/푸시로 repo에 보존할 것)
 - `race_script.yaml`은 repo(`~/yax`)에만 존재 — `race.sh`가 자기 디렉토리에서 읽음
 - `config/vesc.yaml`(조향/모터 캘리브레이션)도 repo가 원본 — `~/f1tenth_ws`의
   f1tenth_stack src·install 양쪽이 여기로 심링크됨. f1tenth_stack을 colcon build
