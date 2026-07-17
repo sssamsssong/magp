@@ -1,0 +1,112 @@
+# race.rviz — 실차 주행 실시간 시각화 (노트북에서 rviz2 -d config/race.rviz)
+#   맵 + 레이싱라인(속도컬러) + 차 위치/궤적 + LiDAR + 목표점 + 장애물(Q2)
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded: true
+    Help Height: 0
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Global Options:
+    Fixed Frame: map
+    Frame Rate: 30
+    Background Color: 48; 48; 48
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 20
+      Color: 160; 160; 164
+    - Class: rviz_default_plugins/Map
+      Name: Map
+      Enabled: true
+      Topic:
+        Value: /map
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+      Color Scheme: map
+      Alpha: 0.7
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: true
+      Show Axes: true
+      Marker Scale: 0.5
+    - Class: rviz_default_plugins/Marker
+      Name: RacingLine
+      Enabled: true
+      Namespaces:
+        racing_line: true
+      Topic:
+        Value: /waypoints_path
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Marker
+      Name: TargetPoint
+      Enabled: true
+      Namespaces:
+        target_wp: true
+      Topic:
+        Value: /waypoint
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Obstacles
+      Enabled: true
+      Topic:
+        Value: /obstacle
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Path
+      Name: CarTrail
+      Enabled: true
+      Color: 0; 170; 255
+      Line Style: Lines
+      Topic:
+        Value: /car_path
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/PoseWithCovariance
+      Name: AMCL Pose
+      Enabled: true
+      Color: 255; 0; 0
+      Covariance:
+        Value: false
+      Topic:
+        Value: /amcl_pose
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/LaserScan
+      Name: LaserScan
+      Enabled: true
+      Size (m): 0.03
+      Color: 255; 255; 0
+      Topic:
+        Value: /scan
+        Durability Policy: Volatile
+        Reliability Policy: Best Effort
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: TopDown
+      Scale: 60
+      Target Frame: base_link
+      X: 0
+      Y: 0
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/SetInitialPose
+      Topic:
+        Value: /initialpose
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Value: /goal_pose
+Window Geometry:
+  Height: 900
+  Width: 1200
+  Hide Left Dock: false
+  Hide Right Dock: false

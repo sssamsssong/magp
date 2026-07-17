@@ -36,10 +36,10 @@ from PIL import Image
 import rclpy
 from rclpy.node import Node
 from ackermann_msgs.msg import AckermannDriveStamped
-from geometry_msgs.msg import PoseWithCovarianceStamped
-from nav_msgs.msg import Odometry
+from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped
+from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, ColorRGBA
 from visualization_msgs.msg import Marker, MarkerArray
 
 
@@ -228,6 +228,14 @@ class StanleyController(Node):
         self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive',    10)
         self.wp_pub    = self.create_publisher(Marker,                 '/waypoint', 10)
         self.obs_pub   = self.create_publisher(MarkerArray,            '/obstacle', 10)
+        # ── RViz 시각화: 전체 레이싱라인(속도 컬러) + 차 이동궤적 ─────────
+        # 노트북 RViz 가 늦게 접속해도 받도록 1Hz 로 주기 재발행한다.
+        self.path_pub    = self.create_publisher(Marker, '/waypoints_path', 10)
+        self.carpath_pub = self.create_publisher(Path,   '/car_path',       10)
+        self._car_path = Path()
+        self._car_path.header.frame_id = 'map'
+        self._last_trail = None
+        self.create_timer(1.0, self._publish_racing_line)   # 1Hz 재발행
 
         # ── 고정 주기 제어 루프 (50Hz) ─────────────────────────────────
         # 매 주기 (amcl 보정 + 최신 odom)으로 "지금" pose 를 추정해 조향을
@@ -247,6 +255,7 @@ class StanleyController(Node):
         self.yaw = pose[2]
         steer, speed = self._compute_cmd(*pose)
         self._publish_cmd(steer, speed)
+        self._update_car_trail(pose[0], pose[1])
 
     def _current_pose(self):
         """amcl 보정 ⊕ 최신 odom = 고주기 pose 추정. 없으면 amcl 원시값 폴백."""
@@ -504,6 +513,47 @@ class StanleyController(Node):
         msg.drive.steering_angle = steer
         msg.drive.speed          = speed
         self.drive_pub.publish(msg)
+
+    def _publish_racing_line(self):
+        """전체 웨이포인트를 속도 컬러 LINE_STRIP 으로 발행 (RViz 레이싱라인)."""
+        if self.wps is None:
+            return
+        m = Marker()
+        m.header.frame_id = 'map'
+        m.header.stamp    = self.get_clock().now().to_msg()
+        m.ns = 'racing_line'; m.id = 0
+        m.type = Marker.LINE_STRIP; m.action = Marker.ADD
+        m.scale.x = 0.05                      # 선 두께 (m)
+        m.pose.orientation.w = 1.0
+        vmin = float(self.wps[:, 2].min())
+        vmax = float(self.wps[:, 2].max())
+        span = max(vmax - vmin, 1e-6)
+        for x, y, v in self.wps:
+            m.points.append(Point(x=float(x), y=float(y), z=0.0))
+            t = (float(v) - vmin) / span      # 0=느림(빨강) ~ 1=빠름(초록)
+            m.colors.append(ColorRGBA(r=float(1.0 - t), g=float(t), b=0.0, a=1.0))
+        # 순환 경로 — 시작점을 이어 닫는다
+        m.points.append(Point(x=float(self.wps[0, 0]), y=float(self.wps[0, 1]), z=0.0))
+        m.colors.append(m.colors[0])
+        self.path_pub.publish(m)
+
+    def _update_car_trail(self, x: float, y: float):
+        """차가 지나온 궤적을 Path 로 발행 (0.1m 이상 이동 시에만 점 추가)."""
+        if self._last_trail is not None and \
+                math.hypot(x - self._last_trail[0], y - self._last_trail[1]) < 0.1:
+            return
+        self._last_trail = (x, y)
+        ps = PoseStamped()
+        ps.header.frame_id = 'map'
+        ps.header.stamp = self.get_clock().now().to_msg()
+        ps.pose.position.x = float(x)
+        ps.pose.position.y = float(y)
+        ps.pose.orientation.w = 1.0
+        self._car_path.poses.append(ps)
+        if len(self._car_path.poses) > 3000:   # 메모리 상한 (한 바퀴 400점 ×여러 랩)
+            self._car_path.poses.pop(0)
+        self._car_path.header.stamp = ps.header.stamp
+        self.carpath_pub.publish(self._car_path)
 
     def _pub_wp_marker(self, target: np.ndarray):
         m = Marker()
