@@ -56,8 +56,18 @@ def generate_launch_description():
 
     race_share = get_package_share_directory('race_stack')
     f1tenth_share = get_package_share_directory('f1tenth_stack')
-    map_yaml = os.path.join(race_share, 'maps', cfg['map_name'] + '.yaml')
-    wp_csv = os.path.join(race_share, 'waypoints', cfg['waypoints'] + '.csv')
+
+    # 맵/웨이포인트/경계는 빌드 시점 스냅샷(share)이 아니라 repo src 에서 직접 읽는다.
+    # RACE_WS 가 있고 그 src/race_stack/maps 가 실재하면 이를 우선 사용 → 새 맵·
+    # 웨이포인트를 만들어도 colcon build 없이 즉시 인식된다 (gen_waypoints 와 동일 규약).
+    # 없으면 기존처럼 share 로 폴백.
+    _ws = os.environ.get('RACE_WS')
+    _src = os.path.join(_ws, 'src', 'race_stack') if _ws else None
+    race_data = _src if _src and os.path.isdir(os.path.join(_src, 'maps')) \
+                else race_share
+
+    map_yaml = os.path.join(race_data, 'maps', cfg['map_name'] + '.yaml')
+    wp_csv = os.path.join(race_data, 'waypoints', cfg['waypoints'] + '.csv')
     amcl_yaml = os.path.join(race_share, 'config', 'amcl.yaml')
 
     if not os.path.exists(map_yaml):
@@ -136,7 +146,7 @@ def generate_launch_description():
 
         # Q2: boundary files live in  maps/<map_name>/  subdirectory
         bound_dir = sc.get('bound_dir', '') or \
-            os.path.join(race_share, 'maps', cfg['map_name'])
+            os.path.join(race_data, 'maps', cfg['map_name'])
 
         ctrl = Node(
             package='race_stack', executable='stanley_controller',
