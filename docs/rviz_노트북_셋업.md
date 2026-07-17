@@ -22,20 +22,20 @@
 
 ## 노트북에서 할 일 (우리 방식 = 직접 SSH)
 
+> 노트북엔 repo 가 없다. **repo 전체를 clone 할 필요 없이** RViz 설정
+> 파일(`race.rviz`) 하나만 젯슨에서 받아오면 된다.
+
 ### A. 최초 1회 준비
 1. **ROS 2 Humble + rviz2 설치**
    ```bash
    sudo apt install ros-humble-rviz2      # 또는 ros-humble-desktop
    ```
-2. **이 repo 를 노트북에 클론** (없으면)
+2. **RViz 설정 파일을 젯슨에서 scp 로 받기** (파일 1개)
    ```bash
-   git clone git@github.com:lloes098/26-jetson-f1tenth.git
+   scp jetson@192.168.45.246:~/yax/config/race.rviz ~/race.rviz
    ```
-   이미 있으면:
-   ```bash
-   cd <repo 폴더> && git pull
-   ```
-   → `rviz.sh` 와 `config/race.rviz` 를 노트북에서 읽는다.
+   > 설정이 나중에 바뀌면 이 scp 만 다시 하면 된다.
+   > (git 으로 관리하고 싶으면 clone 해도 되지만 필수는 아님)
 3. **네트워크 / 도메인 확인**
    - 노트북과 젯슨이 같은 네트워크(`192.168.45.x`)
    - `ROS_DOMAIN_ID` 가 양쪽 동일해야 함 (기본 미설정=0).
@@ -50,10 +50,14 @@ cd ~/yax && ./race.sh q2        # 평소대로 주행 (q1/q2/q3/race)
 
 **② 노트북 로컬 터미널 (SSH 아님):**
 ```bash
-cd <repo 폴더> && ./rviz.sh      # RViz 뷰어 실행
+source /opt/ros/humble/setup.bash
+rviz2 -d ~/race.rviz            # RViz 뷰어 실행
 ```
-`rviz.sh` 가 ROS 소싱 → `config/race.rviz` 로 rviz2 실행. rviz2 미설치·
-토픽 미수신이면 안내 메시지를 띄운다 (주행 시작하면 자동으로 나타남).
+젯슨에서 주행이 돌고 있으면 맵·레이싱라인·차 위치/궤적이 바로 나타난다.
+(주행 전에 먼저 띄워둬도 됨 — 주행 시작하면 자동으로 채워짐)
+
+> `rviz.sh` 는 repo 를 clone 한 경우를 위한 편의 스크립트다. 파일만 scp
+> 받은 경우엔 위처럼 `rviz2 -d ~/race.rviz` 를 직접 쓰면 된다.
 
 ---
 
