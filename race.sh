@@ -19,6 +19,10 @@
 set -e
 
 WS=${RACE_WS:-$HOME/f1tenth_ws}
+# gen_waypoints 등 파이썬 노드는 RACE_WS 로 맵/웨이포인트 폴더를 찾는다. export 안 하면
+# __file__ 기준으로 build/race_stack/maps(빌드 시점 스냅샷 복사본)를 읽어 새 맵이 안 보인다.
+# WS/src/race_stack 는 repo(~/yax)로 심링크돼 있으므로 여기를 가리키게 export.
+export RACE_WS="$WS"
 # ~/f1tenth_ws/race.sh 는 이 repo로 가는 심링크 — readlink -f 로 실제 위치(~/yax)를
 # 찾아야 race_script.yaml 을 제대로 읽는다 (심링크 경유 실행 시 launch가 즉사하던 버그)
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
