@@ -503,8 +503,50 @@ def speed_profile(x, y):
 # ══════════════════════════════════════════════════════════════════════════════
 # 저장
 # ══════════════════════════════════════════════════════════════════════════════
+def save_overlay_png(map_name, rx, ry, v, wp_path, img_arr):
+    """웨이포인트(속도 컬러) 를 맵 위에 올린 오버레이 PNG 저장.
+
+    파일명:  waypoints/<wp_stem>.png  (CSV 와 확장자만 다른 짝, 예: track_2nd_clean_wp.png)
+
+    전역 백엔드(TkAgg)는 디스플레이가 없으면 figure 생성이 실패하므로,
+    여기서는 Agg 캔버스를 직접 만들어 headless 환경에서도 항상 저장되게 한다.
+    """
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.colors import Normalize
+
+    h = img_arr.shape[0]
+    px, py = world_to_px(rx, ry, h)
+    # 트랙은 순환 — 시작점을 끝에 이어 라인을 닫는다
+    px = np.append(px, px[0]); py = np.append(py, py[0])
+    v_ext = np.append(v, v[0])
+
+    fig = Figure(figsize=(9, 9))
+    FigureCanvasAgg(fig)
+    ax = fig.add_subplot(111)
+    ax.imshow(img_arr, cmap='gray', origin='upper')
+    ax.set_aspect('equal'); ax.axis('off')
+
+    pts  = np.array([px, py]).T.reshape(-1, 1, 2)
+    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+    lc   = LineCollection(segs, cmap='RdYlGn',
+                          norm=Normalize(V_MIN, V_MAX), linewidth=2.5, zorder=5)
+    lc.set_array(v_ext)
+    ax.add_collection(lc)
+    ax.plot(px[0], py[0], 'b*', ms=15, zorder=6)   # 시작점
+    fig.colorbar(lc, ax=ax, label='speed (m/s)', fraction=0.03, pad=0.02)
+    ax.set_title(f'{map_name}  —  {len(rx)} waypoints '
+                 f'({v.min():.1f}~{v.max():.1f} m/s)', fontsize=10, fontweight='bold')
+
+    out = os.path.join(os.path.dirname(wp_path),
+                       f'{os.path.splitext(os.path.basename(wp_path))[0]}.png')
+    fig.tight_layout()
+    fig.savefig(out, dpi=130, bbox_inches='tight')
+    print(f'  오버레이 저장: {out}')
+
+
 def save_all(map_name, rx, ry, v, wp_path, img_arr):
-    """웨이포인트 CSV + inner/outer_bound.npy 저장"""
+    """웨이포인트 CSV + 오버레이 PNG + inner/outer_bound.npy 저장"""
     os.makedirs(os.path.dirname(wp_path), exist_ok=True)
     with open(wp_path, 'w', newline='') as f:
         w = csv.writer(f)
@@ -512,6 +554,9 @@ def save_all(map_name, rx, ry, v, wp_path, img_arr):
         for xi, yi, vi in zip(rx, ry, v):
             w.writerow([f'{xi:.4f}', f'{yi:.4f}', f'{vi:.4f}'])
     print(f'  웨이포인트 저장: {len(rx)} pts -> {wp_path}')
+
+    # 웨이포인트를 맵 위에 올린 오버레이 PNG (속도 컬러맵) — 디스플레이 없이도 저장
+    save_overlay_png(map_name, rx, ry, v, wp_path, img_arr)
 
     # 경계 추출 (Q2 장애물 회피용)
     bound_dir = os.path.join(MAPS_DIR, map_name)
