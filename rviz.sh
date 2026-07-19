@@ -22,6 +22,21 @@ CFG="$DIR/config/race.rviz"
 
 source /opt/ros/humble/setup.bash
 
+# DDS 설정 — 젯슨의 race.sh 와 같은 파일을 읽어 양쪽 미들웨어를 일치시킨다.
+# (RMW 가 한쪽만 다르면 토픽이 하나도 안 보인다)
+export RACE_SCRIPT="$DIR/race_script.yaml"
+[ -f "$DIR/config/dds_env.sh" ] && source "$DIR/config/dds_env.sh"
+
+# SSH 세션이면 RViz 창이 젯슨 모니터에 뜬다 — 노트북에서 보려는 의도와 어긋난다.
+# rviz.sh 는 "노트북에서 네이티브 실행"이 전제다 (화면 전송이 아니라 토픽 구독).
+if [ -n "${SSH_CONNECTION:-}" ]; then
+    echo "⚠ SSH 세션에서 실행 중입니다."
+    echo "  RViz 창은 이 명령을 받은 기기(젯슨)의 화면에 뜹니다."
+    echo "  노트북에서 보려면 SSH 를 끊고 노트북 로컬 터미널에서 실행하세요."
+    echo "  (rviz.sh 는 화면을 전송하는 게 아니라, 노트북이 직접 토픽을 구독해 그립니다)"
+    echo ""
+fi
+
 if ! command -v rviz2 >/dev/null 2>&1; then
     echo "✗ rviz2 가 없습니다.  sudo apt install ros-humble-rviz2"
     exit 1

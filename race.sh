@@ -39,6 +39,11 @@ PKG_SHARE_WP="$WS/src/race_stack/waypoints"
 source /opt/ros/humble/setup.bash
 source "$WS/install/setup.bash"
 
+# DDS 설정 (race_script.yaml 의 network: 섹션). 노트북에서 RViz 로 관찰할 때
+# 통신 안정성을 좌우한다 — rviz.sh 도 같은 파일을 source 해서 양쪽을 맞춘다.
+export RACE_SCRIPT="$SCRIPT_DIR/race_script.yaml"
+[ -f "$SCRIPT_DIR/config/dds_env.sh" ] && source "$SCRIPT_DIR/config/dds_env.sh"
+
 # ---------- 1. VESC 심링크 (재부팅마다 필요) ----------
 if [ ! -e /dev/sensors/vesc ]; then
     echo "[race.sh] /dev/sensors/vesc 심링크 생성"
