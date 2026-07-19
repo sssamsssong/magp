@@ -31,16 +31,19 @@ def generate_launch_description():
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
 
-    # mode:=/controller:= 오버라이드는 race.sh가 launch arg로 준다.
+    # mode:=/controller:=/bench:= 오버라이드는 race.sh가 launch arg로 준다.
     # sys.argv를 직접 파싱한다 (LaunchConfiguration은 파이썬 로직에서 못 씀)
     import sys
     mode = cfg['mode']
     controller = cfg.get('controller', 'auto')
+    bench = False
     for a in sys.argv:
         if a.startswith('mode:='):
             mode = a.split(':=')[1]
         elif a.startswith('controller:='):
             controller = a.split(':=')[1]
+        elif a.startswith('bench:='):
+            bench = a.split(':=')[1].lower() in ('true', '1', 'yes')
     if mode not in DEFAULT_CONTROLLER:
         raise RuntimeError(f'race.launch.py: 잘못된 mode "{mode}"')
 
@@ -53,6 +56,16 @@ def generate_launch_description():
 
     max_speed = float(cfg['speed'][f'{mode}_max'])
     min_speed = float(cfg['speed']['min_speed'])
+
+    # ---------- bench(박스 위) 모드 ----------
+    # 차를 박스에 올려두고 토픽/RViz/조향만 확인하는 용도. 바퀴는 절대 돌리지 않는다.
+    # 바퀴가 돌면 VESC 엔코더 odom 은 "전진 중"이라 하고 LiDAR 는 "제자리"라 해서
+    # AMCL 이 요동친다 → 정작 확인하려던 RViz 위치가 쓰레기가 되고, 출발선 반경을
+    # 들락날락하며 mission_manager 가 가짜 랩을 세어 /race/enabled 를 꺼버린다.
+    # 세 컨트롤러 모두 최종 속도를 clip(v, min_speed, max_speed) 하므로 둘 다 0이면 정지.
+    if bench:
+        max_speed = 0.0
+        min_speed = 0.0
 
     race_share = get_package_share_directory('race_stack')
     f1tenth_share = get_package_share_directory('f1tenth_stack')
@@ -97,21 +110,33 @@ def generate_launch_description():
                      'initial_pose.y': float(loc.get('init_y', 0.0)),
                      'initial_pose.yaw': float(loc.get('init_yaw', 0.0)),
                      'set_initial_pose': True}]))
-    nodes.append(Node(
+    # lifecycle_manager 는 5초 지연 기동한다.
+    # 동시에 띄우면 manager 가 map_server 보다 먼저 Configuring 을 호출하는 경쟁이
+    # 생긴다. map_server 가 아직 lifecycle 서비스를 등록하기 전이라 전환이 실패하고,
+    # map_server/amcl 이 unconfigured 로 멈춰 /map 발행자 0 · map→odom TF 없음이 된다.
+    # (증상: RViz 에 맵이 안 뜨고 차 위치도 안 나옴. 실행할 때마다 되다 안 되다 함)
+    nodes.append(TimerAction(period=5.0, actions=[Node(
         package='nav2_lifecycle_manager', executable='lifecycle_manager',
         name='lifecycle_manager_localization', output='screen',
         parameters=[{'autostart': True,
-                     'node_names': ['map_server', 'amcl']}]))
+                     'bond_timeout': 10.0,
+                     'attempt_respawn_reconnection': True,
+                     'node_names': ['map_server', 'amcl']}])]))
 
     # ---------- 3. 미션 매니저 ----------
     m = cfg['mission']
     time_limit = int(m.get('time_limit_sec', 0))
+    laps = int(m.get('laps', 0))
     if mode == 'q3' and time_limit == 0:
         time_limit = 120   # Q3 규정: 2분
+    if bench:
+        # 자동 정지 없음 — bench 는 사람이 Ctrl+C 로 끝낸다.
+        laps = 0
+        time_limit = 0
     nodes.append(Node(
         package='race_stack', executable='mission_manager',
         name='mission_manager', output='screen',
-        parameters=[{'laps': int(m.get('laps', 0)),
+        parameters=[{'laps': laps,
                      'time_limit_sec': time_limit,
                      'start_x': float(m.get('start_x', 0.0)),
                      'start_y': float(m.get('start_y', 0.0)),
@@ -126,7 +151,9 @@ def generate_launch_description():
             parameters=[{'ttc_threshold': float(s.get('ttc_threshold', 0.6)),
                          'hold_sec': float(s.get('hold_sec', 1.0))}]))
 
-    # ---------- 5. 컨트롤러 (AMCL 수렴 시간 확보를 위해 3초 지연 기동) ----------
+    # ---------- 5. 컨트롤러 (AMCL 수렴 시간 확보를 위해 8초 지연 기동) ----------
+    # lifecycle_manager 가 5초에 뜬 뒤 map_server→amcl 활성화까지 마쳐야 하므로
+    # 그보다 뒤여야 한다. (앞서면 pose 가 None 이라 컨트롤러가 헛돈다)
     if controller == 'pure_pursuit':
         pp = cfg['pure_pursuit']
         ctrl = Node(
@@ -194,14 +221,16 @@ def generate_launch_description():
                          'speed_gain': float(gf['speed_gain']),
                          'max_steer': float(cfg['pure_pursuit']['max_steer'])}])
 
-    nodes.append(TimerAction(period=3.0, actions=[ctrl]))
+    nodes.append(TimerAction(period=8.0, actions=[ctrl]))
 
     nodes.append(ExecuteProcess(
         cmd=['echo', f'[race.launch] mode={mode} controller={controller} '
-                     f'max_speed={max_speed} map={cfg["map_name"]}'],
+                     f'max_speed={max_speed} map={cfg["map_name"]}'
+                     + (' BENCH(바퀴 정지)' if bench else '')],
         output='screen'))
 
     return LaunchDescription(
         [DeclareLaunchArgument('mode', default_value=mode),
-         DeclareLaunchArgument('controller', default_value=controller)]
+         DeclareLaunchArgument('controller', default_value=controller),
+         DeclareLaunchArgument('bench', default_value=str(bench).lower())]
         + nodes)

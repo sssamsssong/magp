@@ -10,6 +10,11 @@
 #                              컨트롤러 생략 시 yaml의 controller 값 사용
 #                              (auto | stanley | pure_pursuit | gap_follower)
 #                              예: ./race.sh q1 pure_pursuit
+#    ./race.sh box [모드]      ★ 박스 위 벤치 테스트 — 바퀴를 돌리지 않는다.
+#                              실주행과 동일한 스택(맵/AMCL/LiDAR/컨트롤러)을 띄우되
+#                              속도만 0. 토픽 통신·RViz 표시·조향 서보 확인용.
+#    ./race.sh check           토픽이 실제로 발행 중인지 표로 확인 (주행 중 별도 터미널)
+#    ./race.sh stop            돌고 있는 스택 전부 정리
 #    ./race.sh savemap <이름>  맵핑 끝난 뒤 맵 저장
 #    ./race.sh teleop          키보드 텔레옵만 단독 실행
 #    ./race.sh joy             조이스틱 수동 조종 (브링업 포함)
@@ -61,7 +66,74 @@ k='$1'.split('.'); v=d
 for kk in k: v=v[kk]
 print(v)"; }
 
+# 돌고 있는 스택 프로세스 PID 목록.
+# ★ launch 부모만 찾으면 안 된다. 터미널을 pkill 하거나 SSH 가 끊기면 부모(launch)만
+#   죽고 urg_node·map_server·컨트롤러가 고아로 살아남는다. 이 상태를 탐지 못 하면
+#   다음 실행에서 LiDAR TCP 포트·VESC 시리얼을 고아가 쥐고 있어 그대로 충돌한다.
+#   그래서 부모와 자식 노드를 모두 본다.
+STACK_PROCS="[r]ace\.launch\.py|[m]apping\.launch\.py|[u]rg_node_driver|[v]esc_driver_node|\
+[n]av2_amcl/amcl|[n]av2_map_server/map_server|[l]ifecycle_manager|[s]tanley_controller|\
+[m]ission_manager|[p]ure_pursuit|[g]ap_follower|[s]afety_node|[a]ckermann_mux|\
+[a]ckermann_to_vesc_node|[v]esc_to_odom_node|[s]lam_toolbox"
+running_pids () { pgrep -f "$STACK_PROCS" 2>/dev/null || true; }
+
+kill_stack () {
+    [ -z "$(running_pids)" ] && return 0
+    # launch 부모부터 정리해야 자식이 respawn 되지 않는다.
+    local parents; parents=$(pgrep -f "[r]ace\.launch\.py|[m]apping\.launch\.py" 2>/dev/null || true)
+    if [ -n "$parents" ]; then
+        echo "[race.sh] launch 종료 (PID: $(echo $parents | tr '\n' ' '))"
+        kill $parents 2>/dev/null || true
+        sleep 3
+    fi
+    local orphans; orphans=$(running_pids)
+    if [ -n "$orphans" ]; then
+        echo "[race.sh] 남은 노드 정리 (PID: $(echo $orphans | tr '\n' ' '))"
+        kill $orphans 2>/dev/null || true
+        sleep 2
+        orphans=$(running_pids)
+        [ -n "$orphans" ] && { kill -9 $orphans 2>/dev/null || true; sleep 1; }
+    fi
+    if [ -n "$(running_pids)" ]; then
+        echo "[race.sh] ⚠ 아직 남은 프로세스가 있습니다. 수동 확인:"
+        echo "          ps -ef | grep -E 'race.launch|urg_node|vesc_driver|map_server'"
+        return 1
+    fi
+    echo "[race.sh] 정리 완료"
+}
+
 case "$CMD" in
+  stop)
+    kill_stack; exit $? ;;
+  check)
+    # 주행 중 다른 터미널에서 실행 — 각 토픽이 실제로 발행되고 있는지 확인.
+    # ros2 topic list 는 discovery 만 되면 뜨므로 판정 근거가 못 된다.
+    # Publisher count 와 실제 수신 여부를 둘 다 본다.
+    echo "============================================"
+    echo "  토픽 상태 점검  |  ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}"
+    echo "============================================"
+    printf "%-20s %-10s %s\n" "TOPIC" "PUB" "수신"
+    printf "%-20s %-10s %s\n" "--------------------" "----------" "------"
+    for t in /map /scan /odom /tf /amcl_pose /drive /ackermann_cmd \
+             /commands/motor/speed /race/enabled /waypoints_path; do
+        n=$(ros2 topic info "$t" 2>/dev/null | sed -n 's/Publisher count: //p')
+        n=${n:-0}
+        if [ "$n" -gt 0 ] 2>/dev/null; then
+            # transient_local(/map, /race/enabled)도 잡히도록 echo 로 실수신 확인.
+            # 젯슨에서 ros2 CLI 노드 기동이 느려 5초로는 40Hz 토픽도 오탐이 난다.
+            if timeout 10 ros2 topic echo "$t" --once >/dev/null 2>&1; then
+                rx="OK"
+            else
+                rx="✗ 발행자는 있는데 데이터 없음"
+            fi
+        else
+            rx="✗ 발행자 없음"
+        fi
+        printf "%-20s %-10s %s\n" "$t" "$n" "$rx"
+    done
+    echo ""
+    echo "  ※ 노트북에서 이 스크립트를 돌리면 젯슨↔노트북 DDS 연결까지 검증됩니다."
+    exit 0 ;;
   savemap)
     NAME=${2:?맵 이름을 주세요: ./race.sh savemap my_track}
 
@@ -111,6 +183,12 @@ case "$CMD" in
     fi ;;
   "" ) MODE=$(get_yaml mode); CTRL="" ;;
   mapping|mapping-joy) MODE=$CMD; CTRL="" ;;
+  box)
+    # 박스 위 벤치 테스트. 모드는 인자 > yaml 순으로 결정 — 실주행과 같은 스택을
+    # 그대로 띄워야 검증이 의미가 있다. 차이는 bench:=true (속도 0, 자동정지 없음)뿐.
+    MODE=${2:-$(get_yaml mode)}
+    CTRL=""
+    BENCH=1 ;;
   q1|q2|q3|race)
     MODE=$CMD
     CTRL=${2:-}   # 두 번째 인자로 컨트롤러 오버라이드 (yaml 수정 불필요)
@@ -121,9 +199,27 @@ case "$CMD" in
   * ) echo "알 수 없는 명령: $CMD"; exit 1 ;;
 esac
 
+# ---------- 2-1. 중복 실행 가드 ----------
+# 스택이 두 벌 뜨면 LiDAR TCP 포트(1클라이언트)·VESC 시리얼을 서로 뺏어
+# urg_node 연결 실패, vesc_driver 세그폴트, 같은 이름 노드 충돌로 map_server
+# lifecycle 활성화 실패가 연쇄로 터진다. 증상이 하드웨어 고장처럼 보여 디버깅이 샌다.
+if [ -n "$(running_pids)" ]; then
+    echo "[race.sh] ⚠ 이미 실행 중인 스택이 있습니다 (PID: $(running_pids | tr '\n' ' '))"
+    echo "          두 벌이 뜨면 LiDAR/VESC 를 서로 뺏어 전부 실패합니다."
+    read -r -p "          기존 스택을 정리하고 계속할까요? [Y/n] " ans
+    case "$ans" in
+        [nN]*) echo "[race.sh] 중단했습니다."; exit 1 ;;
+        *) kill_stack || exit 1 ;;
+    esac
+fi
+
 echo "============================================"
 echo "  RoboRacer 2026  |  MODE = $MODE${CTRL:+  |  CONTROLLER = $CTRL}"
 echo "  config: $RACE_SCRIPT"
+if [ -n "${BENCH:-}" ]; then
+echo "  ★ BENCH (박스 위) — 속도 0, 바퀴 안 돎, 자동정지 없음"
+echo "     확인용: 다른 터미널에서  ./race.sh check   /  노트북에서  ./rviz.sh"
+fi
 echo "============================================"
 
 if [ "$MODE" = "mapping" ]; then
@@ -188,5 +284,6 @@ elif [ "$MODE" = "mapping-joy" ]; then
         -p arm_on_neutral:="$ARM" \
         -p debug:="$JOY_DBG"
 else
-    exec ros2 launch race_stack race.launch.py mode:=$MODE ${CTRL:+controller:=$CTRL}
+    exec ros2 launch race_stack race.launch.py mode:=$MODE \
+        ${CTRL:+controller:=$CTRL} ${BENCH:+bench:=true}
 fi
