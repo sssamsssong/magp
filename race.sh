@@ -76,10 +76,16 @@ print(v)"; }
 #   죽고 urg_node·map_server·컨트롤러가 고아로 살아남는다. 이 상태를 탐지 못 하면
 #   다음 실행에서 LiDAR TCP 포트·VESC 시리얼을 고아가 쥐고 있어 그대로 충돌한다.
 #   그래서 부모와 자식 노드를 모두 본다.
+#   ★ 빠짐없이 적을 것. joy_node/joy_teleop/static_transform_publisher 가 빠져 있어
+#     실행할 때마다 누적됐고, 6세대 17개가 RTPS 포트(7400/7410~)를 쥔 채 남아 있었다.
+#     FastDDS 는 견뎠지만 CycloneDDS 는 참여자 인덱스를 못 찾아 스택 전체가 죽었다
+#     ("Failed to find a free participant index for domain 0").
 STACK_PROCS="[r]ace\.launch\.py|[m]apping\.launch\.py|[u]rg_node_driver|[v]esc_driver_node|\
 [n]av2_amcl/amcl|[n]av2_map_server/map_server|[l]ifecycle_manager|[s]tanley_controller|\
 [m]ission_manager|[p]ure_pursuit|[g]ap_follower|[s]afety_node|[a]ckermann_mux|\
-[a]ckermann_to_vesc_node|[v]esc_to_odom_node|[s]lam_toolbox"
+[a]ckermann_to_vesc_node|[v]esc_to_odom_node|[s]lam_toolbox|\
+[j]oy_node|[j]oy_teleop|[s]tatic_transform_publisher|[k]eyboard_teleop|[j]oystick_teleop|\
+[w]aypoint_logger"
 running_pids () { pgrep -f "$STACK_PROCS" 2>/dev/null || true; }
 
 kill_stack () {
