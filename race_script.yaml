@@ -21,8 +21,17 @@ mode: q2
 #    (주최측 배포 맵을 maps/ 폴더에 넣고 이름만 적으면 됨)
 #    웨이포인트: race_stack/waypoints/<waypoints>.csv  (x,y,speed)
 # ------------------------------------------------------------
-map_name: track_2nd_clean     # maps/track_2nd_clean.yaml
-waypoints: track_2nd_clean_wp # waypoints/track_2nd_clean_wp.csv
+map_name: track_2nd_clean           # maps/track_2nd_clean.yaml
+waypoints: track_2nd_clean_wp       # waypoints/track_2nd_clean_wp.csv
+
+# ------------------------------------------------------------
+# 시뮬레이터 스폰 위치 (map 좌표계)
+#   첫 웨이포인트 근처에 배치, heading은 진행 방향
+# ------------------------------------------------------------
+sim:
+  sx:     2.45      # 첫 웨이포인트 x
+  sy:     3.78      # 첫 웨이포인트 y
+  stheta: 3.14159   # π = 진행 방향 (트랙에 맞게 조정)
 
 # ------------------------------------------------------------
 # 3. 컨트롤러 선택

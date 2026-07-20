@@ -1,112 +1,276 @@
-# race.rviz — 실차 주행 실시간 시각화 (노트북에서 rviz2 -d config/race.rviz)
-#   맵 + 레이싱라인(속도컬러) + 차 위치/궤적 + LiDAR + 목표점 + 장애물(Q2)
 Panels:
   - Class: rviz_common/Displays
+    Help Height: 70
     Name: Displays
     Property Tree Widget:
-      Expanded: true
-    Help Height: 0
+      Expanded: ~
+      Splitter Ratio: 0.5
+    Tree Height: 357
   - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
     Name: Views
+    Splitter Ratio: 0.5
 Visualization Manager:
-  Global Options:
-    Fixed Frame: map
-    Frame Rate: 30
-    Background Color: 48; 48; 48
+  Class: ""
   Displays:
-    - Class: rviz_default_plugins/Grid
-      Name: Grid
-      Enabled: true
+    - Alpha: 0.5
       Cell Size: 1
-      Plane Cell Count: 20
+      Class: rviz_default_plugins/Grid
       Color: 160; 160; 164
-    - Class: rviz_default_plugins/Map
-      Name: Map
       Enabled: true
-      Topic:
-        Value: /map
-        Durability Policy: Transient Local
-        Reliability Policy: Reliable
+      Line Style:
+        Line Width: 0.029999999329447746
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 20
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Alpha: 0.699999988079071
+      Class: rviz_default_plugins/Map
       Color Scheme: map
-      Alpha: 0.7
+      Draw Behind: false
+      Enabled: true
+      Name: Map
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map_updates
+      Use Timestamp: false
+      Value: true
     - Class: rviz_default_plugins/TF
-      Name: TF
       Enabled: true
-      Show Names: true
-      Show Axes: true
+      Frame Timeout: 15
+      Frames:
+        All Enabled: true
+        base_link:
+          Value: true
+        laser:
+          Value: true
+        map:
+          Value: true
+        odom:
+          Value: true
       Marker Scale: 0.5
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Tree:
+        map:
+          odom:
+            base_link:
+              laser:
+                {}
+      Update Interval: 0
+      Value: true
     - Class: rviz_default_plugins/Marker
-      Name: RacingLine
       Enabled: true
+      Name: RacingLine
       Namespaces:
         racing_line: true
       Topic:
-        Value: /waypoints_path
+        Depth: 5
         Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
         Reliability Policy: Reliable
+        Value: /waypoints_path
+      Value: true
     - Class: rviz_default_plugins/Marker
-      Name: TargetPoint
       Enabled: true
+      Name: TargetPoint
       Namespaces:
         target_wp: true
       Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
         Value: /waypoint
-        Durability Policy: Volatile
-        Reliability Policy: Reliable
+      Value: true
     - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
       Name: Obstacles
-      Enabled: true
+      Namespaces:
+        {}
       Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
         Value: /obstacle
-        Durability Policy: Volatile
-        Reliability Policy: Reliable
-    - Class: rviz_default_plugins/Path
-      Name: CarTrail
-      Enabled: true
+      Value: true
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
       Color: 0; 170; 255
-      Line Style: Lines
-      Topic:
-        Value: /car_path
-        Durability Policy: Volatile
-        Reliability Policy: Reliable
-    - Class: rviz_default_plugins/PoseWithCovariance
-      Name: AMCL Pose
       Enabled: true
+      Head Diameter: 0.30000001192092896
+      Head Length: 0.20000000298023224
+      Length: 0.30000001192092896
+      Line Style: Lines
+      Line Width: 0.029999999329447746
+      Name: CarTrail
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 85; 255
+      Pose Style: None
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.10000000149011612
+      Shaft Length: 0.10000000149011612
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /car_path
+      Value: true
+    - Alpha: 1
+      Axes Length: 1
+      Axes Radius: 0.10000000149011612
+      Class: rviz_default_plugins/PoseWithCovariance
       Color: 255; 0; 0
       Covariance:
+        Orientation:
+          Alpha: 0.5
+          Color: 255; 255; 127
+          Color Style: Unique
+          Frame: Local
+          Offset: 1
+          Scale: 1
+          Value: true
+        Position:
+          Alpha: 0.30000001192092896
+          Color: 204; 51; 204
+          Scale: 1
+          Value: true
         Value: false
-      Topic:
-        Value: /amcl_pose
-        Durability Policy: Volatile
-        Reliability Policy: Reliable
-    - Class: rviz_default_plugins/LaserScan
-      Name: LaserScan
       Enabled: true
-      Size (m): 0.03
-      Color: 255; 255; 0
+      Head Length: 0.30000001192092896
+      Head Radius: 0.10000000149011612
+      Name: AMCL Pose
+      Shaft Length: 1
+      Shaft Radius: 0.05000000074505806
+      Shape: Arrow
       Topic:
-        Value: /scan
+        Depth: 5
         Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /amcl_pose
+      Value: true
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/LaserScan
+      Color: 255; 255; 0
+      Color Transformer: Intensity
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: LaserScan
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.029999999329447746
+      Style: Flat Squares
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
         Reliability Policy: Best Effort
-  Views:
-    Current:
-      Class: rviz_default_plugins/TopDownOrtho
-      Name: TopDown
-      Scale: 60
-      Target Frame: base_link
-      X: 0
-      Y: 0
+        Value: /scan
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
   Tools:
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/Select
     - Class: rviz_default_plugins/SetInitialPose
+      Covariance x: 0.25
+      Covariance y: 0.25
+      Covariance yaw: 0.06853891909122467
       Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
         Value: /initialpose
     - Class: rviz_default_plugins/SetGoal
       Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
         Value: /goal_pose
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Angle: 0
+      Class: rviz_default_plugins/TopDownOrtho
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Scale: 60
+      Target Frame: base_link
+      Value: TopDownOrtho (rviz_default_plugins)
+      X: 0
+      Y: 0
+    Saved: ~
 Window Geometry:
+  Displays:
+    collapsed: false
   Height: 900
-  Width: 1200
   Hide Left Dock: false
   Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd0000000100000000000001cb0000032afc0200000002fb000000100044006900730070006c006100790073010000003d000001e8000000c900fffffffb0000000a00560069006500770073010000022b0000013c000000a400ffffff000002df0000032a00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Views:
+    collapsed: false
+  Width: 1200
+  X: 720
+  Y: 81
