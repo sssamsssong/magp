@@ -20,6 +20,9 @@
 #    ./race.sh joy             조이스틱 수동 조종 (브링업 포함)
 #    ./race.sh log <이름>      웨이포인트 기록 (수동주행하며 레이싱라인 녹화)
 #    ./race.sh waypoints [맵]  SLAM 맵에서 레이싱라인 생성 (GUI, 디스플레이 필요)
+#    ./race.sh savepose        ★ 지금 AMCL 위치를 초기 추정으로 저장
+#                              RViz "2D Pose Estimate" 로 맵과 스캔을 맞춘 뒤 실행하면
+#                              다음 실행부터 그 위치에서 시작 (맵-스캔 어긋남 해소)
 #
 #  게인 튜닝은 ./tune.sh — race_script.yaml 을 열지 않고 값만 바꾼다.
 #    ./tune.sh                       현재 값 보기
@@ -196,6 +199,51 @@ case "$CMD" in
     else
       exec ros2 run race_stack gen_waypoints
     fi ;;
+  savepose)
+    # 지금 AMCL 이 믿고 있는 위치를 race_script.yaml 의 초기 추정으로 굳힌다.
+    #
+    # 왜 필요한가: amcl.yaml 은 recovery_alpha_slow/fast=0 (전역 복구 꺼짐)이라
+    # 초기 파티클은 init_x/y/yaw 주변에만 뿌려진다. 실제 출발 위치가 거기서 멀면
+    # 진짜 위치를 영원히 못 찾고 어긋난 채 국소 수렴한다 (RViz 에서 맵과 스캔이
+    # 겹치지 않는 증상). 한 번 맞춰서 저장해두면 다음 실행부터 자동 정렬된다.
+    #
+    # 사용 순서:
+    #   1) ./race.sh box   (또는 주행) 으로 스택을 띄운다
+    #   2) 노트북 RViz 에서 "2D Pose Estimate" 로 실제 차 위치·방향을 클릭
+    #      → 맵과 라이다 스캔이 겹칠 때까지 조정
+    #   3) 이 명령 실행
+    echo "[race.sh] /amcl_pose 수신 대기 (최대 15초)…"
+    POSE=$(timeout 15 ros2 topic echo /amcl_pose --once 2>/dev/null) || true
+    # 발행자가 없으면 echo 가 stdout 으로 "WARNING: ... not ... published yet" 만
+    # 뱉고 exit 0 으로 끝난다. 빈 문자열 검사만으로는 못 걸러진다.
+    if ! printf '%s' "$POSE" | grep -q 'position:'; then
+      echo "[race.sh] /amcl_pose 를 못 받았습니다. 스택이 떠 있는지 확인하세요"
+      echo "          (./race.sh box 로 띄운 뒤 RViz 에서 2D Pose Estimate)"
+      exit 1
+    fi
+    python3 - "$SCRIPT_DIR" <<PYEOF
+import math, re, subprocess, sys
+raw = """$POSE"""
+# position 이 x,y,z 를, orientation 이 x,y,z,w 를 순서대로 갖는다.
+# 따라서 x[0]/y[0] 가 위치, z[1]/w[0] 이 방향 쿼터니언이다.
+nums = {k: [float(v) for v in re.findall(rf'^\s*{k}:\s*(-?[\d.eE+-]+)\s*$', raw, re.M)]
+        for k in ('x', 'y', 'z', 'w')}
+try:
+    px, py = nums['x'][0], nums['y'][0]
+    qz, qw = nums['z'][1], nums['w'][0]
+except (IndexError, KeyError):
+    print('[race.sh] /amcl_pose 파싱 실패 — 형식이 예상과 다릅니다'); sys.exit(1)
+yaw = math.atan2(2.0 * qw * qz, 1.0 - 2.0 * qz * qz)
+print(f'[race.sh] 현재 AMCL 위치: ({px:.3f}, {py:.3f})  '
+      f'{math.degrees(yaw):.1f}deg', flush=True)   # tune.sh 출력보다 먼저 나오도록
+# tune.py 로 기록 — 주석·정렬이 보존되고 변경 이력도 남는다
+subprocess.run([f'$SCRIPT_DIR/tune.sh',
+                f'localization.init_x={px:.4f}',
+                f'localization.init_y={py:.4f}',
+                f'localization.init_yaw={yaw:.4f}'], check=True)
+PYEOF
+    echo "[race.sh] 저장 완료 — 다음 실행부터 이 위치로 시작합니다"
+    exit 0 ;;
   "" ) MODE=$(get_yaml mode); CTRL="" ;;
   mapping|mapping-joy) MODE=$CMD; CTRL="" ;;
   box)
