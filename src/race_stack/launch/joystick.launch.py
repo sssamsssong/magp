@@ -101,7 +101,12 @@ def generate_launch_description():
             'steer_deadzone':   float(joy_cfg.get('steer_deadzone',   0.08)),
             'arm_on_neutral':   bool( joy_cfg.get('arm_on_neutral',   True)),
             'debug':            bool( joy_cfg.get('debug',            False)),
-            'max_speed':        float(speed.get('mapping_max', 1.0)),
+            # ./race.sh joy 전용 최고속도. 없으면 mapping_max 로 폴백.
+            # (맵핑은 천천히 돌아야 품질이 좋아 값을 분리해 둔다. mapping 과
+            #  mapping-joy 는 race.sh 가 speed.mapping_max 를 직접 읽으므로
+            #  이 값에 영향받지 않는다)
+            'max_speed':        float(joy_cfg.get('max_speed',
+                                                  speed.get('mapping_max', 1.0))),
             'max_steer':        float(cfg.get('pure_pursuit', {}).get('max_steer', 0.36)),
         }])]))
 

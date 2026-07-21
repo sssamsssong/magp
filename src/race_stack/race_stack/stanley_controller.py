@@ -59,11 +59,25 @@ def _load_map(map_yaml_path: str):
     """Load map image + YAML → (map_array [H,W,3], (h,w,res,ox,oy))."""
     cfg  = yaml.safe_load(open(map_yaml_path))
     stem = os.path.splitext(map_yaml_path)[0]
+
+    # ★ YAML 의 image: 를 그대로 따른다 (map_server 와 동일한 규약).
+    #   예전엔 확장자를 ('.png', '.pgm') 순으로 추측했는데, maps/ 에는 같은 이름의
+    #   미리보기 PNG 가 함께 있다. track_2nd_clean.png 는 1300x900 인데 실제 맵
+    #   track_2nd_clean.pgm 은 170x154 다. PNG 를 집으면 map_meta 의 h/w 가
+    #   6.7배 커져 _world_to_img 좌표가 통째로 어긋나고, 경계 폴리곤(픽셀 좌표)
+    #   밖으로 떨어져 장애물이 단 하나도 감지되지 않는다. (2026-07-21 실차 확인)
     img_p = None
-    for ext in ('.png', '.pgm'):
-        if os.path.exists(stem + ext):
-            img_p = stem + ext
-            break
+    img_name = cfg.get('image')
+    if img_name:
+        cand = os.path.join(os.path.dirname(os.path.abspath(map_yaml_path)),
+                            img_name)
+        if os.path.exists(cand):
+            img_p = cand
+    if img_p is None:                      # image: 키가 없는 옛 맵 폴백
+        for ext in ('.pgm', '.png'):       # 순서도 pgm 우선으로
+            if os.path.exists(stem + ext):
+                img_p = stem + ext
+                break
     if img_p is None:
         raise FileNotFoundError(f'no image found for {stem}')
 
@@ -105,7 +119,38 @@ class StanleyController(Node):
         self.declare_parameter('stanley_ks',       1.3)
         self.declare_parameter('vel_scale',        1.0)
         self.declare_parameter('obstacle_decel',   0.85)
-        self.declare_parameter('obs2lane_dist',    0.25)
+        # ★ 실제 진로(예측 원호) 통로 반폭(m). 차 반폭 + 여유.
+        #   웨이포인트 기준만 보면 "레이싱라인 위" 장애물만 잡힌다. 실주행 궤적은
+        #   추종 오차 때문에 라인에서 벌어지므로(특히 코너 직후), 실제로 부딪힐
+        #   위치에 놓인 장애물이 obs2lane 밖이라 통째로 무시됐다. (2026-07-21 실차)
+        self.declare_parameter('obs_corridor_half_width', 0.30)
+        # 회피 중 통로를 이 배로 넓혀 본다 (해제 조건 완화). 1.0 = 히스테리시스 없음.
+        self.declare_parameter('obs_release_scale',       1.6)
+        # ★ 회피량은 "장애물 폭 = 내 차 폭" 으로 가정해 계산한다.
+        #   1:1 레이싱에서 장애물은 곧 상대 차량이다. 작은 콘에도 같은 기준을
+        #   쓰면 넉넉하게 비껴가므로 안전하다.
+        #     중심간 필요 간격 = 내 반폭 + 상대 반폭 = car_width
+        #     여기에 여유를 더한 만큼 목표점을 옆으로 민다.
+        self.declare_parameter('car_width',        0.30)   # 차 폭 (m)
+        self.declare_parameter('obstacle_margin',  0.12)   # 스치지 않을 여유 (m)
+        # 기준선을 옮기는 속도(m/s). 계단으로 옮기면 CTE 가 튀어 조향이 포화된다.
+        self.declare_parameter('obstacle_shift_rate', 0.9)
+        # 장애물이 "앞을 막았다"고 볼 전방 경로 구간 — 속도에 비례한다.
+        #   horizon = clip(min + sec × speed, min, max)
+        # 고정 3m 는 1.8m/s 에서 1.7초 앞까지 보는 셈이라, 아직 한참 남은 장애물에
+        # 미리 반응해 라인을 벗어난다. 회피에 필요한 거리는 속도에 비례한다.
+        self.declare_parameter('obs_horizon_sec',  0.3)
+        self.declare_parameter('obs_horizon_min',  0.5)
+        self.declare_parameter('obs_horizon_max',  3.0)
+        # 차단 판정 투표 창(프레임). 과반이 차단이면 회피.
+        # 라이다 40Hz 기준 5프레임 = 125ms = 1.8m/s 에서 0.23m 주행.
+        # 예전 10프레임(250ms=0.45m)은 감시거리 1.04m 의 절반을 판정에 썼다.
+        self.declare_parameter('obs_vote_frames',  5)
+        # 라이다 장착 오프셋 (base_link → laser). 격자 점유 판정에 필수.
+        # ★ f1tenth_stack/launch/bringup_launch.py 의 static_baselink_to_laser
+        #   값과 반드시 일치해야 한다 (현재 x=0.27, y=0.0).
+        self.declare_parameter('laser_offset_x',   0.27)
+        self.declare_parameter('laser_offset_y',   0.0)
         self.declare_parameter('interp_scale',     20)
         self.declare_parameter('lookahead_min',    0.5)
         self.declare_parameter('lookahead_max',    2.0)
@@ -147,7 +192,18 @@ class StanleyController(Node):
         self.ks         = p('stanley_ks')
         self.vel_scale  = p('vel_scale')
         self.obs_decel  = p('obstacle_decel')
-        self.obs2lane   = p('obs2lane_dist')
+        self.obs_corr_hw = p('obs_corridor_half_width')
+        self.obs_release_scale = p('obs_release_scale')
+        self.car_width  = p('car_width')
+        self.obs_margin = p('obstacle_margin')
+        # 장애물을 내 차 폭으로 보고: 중심간 car_width + 여유
+        self.obs_shift  = self.car_width + self.obs_margin
+        self.obs_shift_rate = p('obstacle_shift_rate')
+        self.laser_dx   = p('laser_offset_x')
+        self.laser_dy   = p('laser_offset_y')
+        self.obs_h_sec  = p('obs_horizon_sec')
+        self.obs_h_min  = p('obs_horizon_min')
+        self.obs_h_max  = p('obs_horizon_max')
         self.interp     = int(p('interp_scale'))
         self.L_min      = p('lookahead_min')
         self.L_max      = p('lookahead_max')
@@ -195,8 +251,16 @@ class StanleyController(Node):
         self.yaw            = 0.0
         self.speed          = 0.0
         self.lane_free      = True
-        self.free_votes: list[bool] = []
-        self.all_on_track: list[np.ndarray] = []
+        self.yaw_rate       = 0.0
+        self._shift_side    = 0      # 회피 방향 래치 (+1 좌 / -1 우 / 0 없음)
+        self._shift_cur     = 0.0    # 현재 적용 중인 기준선 이동량 (램프)
+        self._shift_vec     = None
+        # 마지막 N 프레임 투표만 쓰므로 deque 로 자동 폐기.
+        # (list 로 두면 스캔마다 append 되어 40Hz × 주행시간 만큼 무한히 쌓였다)
+        self.free_votes: deque[bool] = deque(
+            maxlen=max(1, int(p('obs_vote_frames'))))
+        # "전방 경로를 막고 있는" 장애물 점들. 회피 방향 계산과 마커 표시에 쓴다.
+        self.blocking_pts: list[np.ndarray] = []
 
         # ── pose 융합 상태 ─────────────────────────────────────────────
         # /amcl_pose 는 느리고(이동해야 갱신) /odom 은 빠르지만 드리프트.
@@ -237,6 +301,8 @@ class StanleyController(Node):
                     self.get_logger().warn(
                         f'{fname} not found in {bound_dir} — '
                         'obstacle avoidance will run without polygon test')
+
+            self._build_track_mask(float(p('bound_ignore_px')))
 
         # ── subscriptions / publishers ─────────────────────────────────
         self.create_subscription(Bool,
@@ -303,6 +369,7 @@ class StanleyController(Node):
 
     def _odom_cb(self, msg: Odometry):
         self.speed = msg.twist.twist.linear.x
+        self.yaw_rate = msg.twist.twist.angular.z   # 진로 예측(원호) 용
         p = msg.pose.pose
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         entry = (t, p.position.x, p.position.y, _yaw(p.orientation))
@@ -365,7 +432,14 @@ class StanleyController(Node):
             target = self._obstacle_shift(target, px, py, yaw)
 
         # ── Stanley steering ───────────────────────────────────────────
-        closest  = wps[nearest, :2]
+        # ★ 회피 중에는 기준선(CTE 를 재는 대상)도 같이 옮긴다.
+        #   목표점만 밀고 closest 를 원래 라인에 두면, CTE 항이 "라인에서
+        #   벗어났다"며 되당겨 회피 조향을 상쇄한다. 그래서 회피가 둔했다.
+        #   회피 중 우리가 추종하는 경로는 "라인을 옆으로 민 것" 이므로
+        #   기준선도 같이 밀어야 Stanley 가 저항 없이 그 쪽으로 조향한다.
+        closest = wps[nearest, :2]
+        if self.mode == 'q2' and getattr(self, '_shift_vec', None) is not None:
+            closest = closest + self._shift_vec
 
         # path_yaw = 경로의 "국소 접선" 방향 (교과서 Stanley).
         # 이전엔 최근접점→lookahead 목표의 현(chord)을 썼는데, 곡선에서 현은
@@ -448,18 +522,205 @@ class StanleyController(Node):
 
     def _obstacle_shift(self, target: np.ndarray,
                         px: float, py: float, yaw: float) -> np.ndarray:
-        # update lane_free: need 5+ free votes in last 10
-        if len(self.free_votes) > 10:
-            self.lane_free = sum(self.free_votes[-10:]) >= 5
+        # 창이 다 찼을 때만 판정 (과반). 히스테리시스로 깜빡임을 막는다.
+        if len(self.free_votes) == self.free_votes.maxlen:
+            was_free = self.lane_free
+            self.lane_free = sum(self.free_votes) * 2 >= self.free_votes.maxlen
+            # 상태가 바뀔 때만 찍는다 — 회피가 발동했는지/언제 풀렸는지 판별용.
+            # "감지는 됐는데 반응이 약했나" vs "아예 못 봤나" 를 이걸로 가른다.
+            if was_free != self.lane_free:
+                if self.lane_free:
+                    self.get_logger().info('[obstacle] 경로 확보 — 회피 해제')
+                else:
+                    # 차량 좌표계 위치까지 찍는다. 진짜 장애물인지(전방 0.5~1m,
+                    # 횡 0 근처) 차 근처 노이즈인지 이걸로 갈린다.
+                    if self.blocking_pts:
+                        b = np.asarray(self.blocking_pts)
+                        dx, dy = b[:, 0] - px, b[:, 1] - py
+                        c, s = math.cos(-yaw), math.sin(-yaw)
+                        fx = c * dx - s * dy          # 전방(+)
+                        fy = s * dx + c * dy          # 좌측(+)
+                        i = int(np.argmin(np.hypot(fx, fy)))
+                        info = (f'최근접 전방 {fx[i]:+.2f}m 횡 {fy[i]:+.2f}m, '
+                                f'전방범위 {fx.min():+.2f}~{fx.max():+.2f}m')
+                    else:
+                        info = '(점 없음)'
+                    self.get_logger().warn(
+                        f'[obstacle] 경로 차단! 점 {len(self.blocking_pts)}개, '
+                        f'{info}, horizon {self._obs_horizon():.2f}m '
+                        f'→ 목표점 {self.obs_shift}m 이동')
 
-        if not self.lane_free and self.all_on_track:
-            fwd  = np.array([math.cos(yaw), math.sin(yaw)])
-            left = np.array([-fwd[1], fwd[0]])
-            obs_c   = np.mean(self.all_on_track, axis=0)
-            lateral = float((obs_c - np.array([px, py])) @ left)
-            sign    = -np.sign(lateral) if abs(lateral) > 0.05 else -1.0
-            target  = target + sign * 0.2 * left
+        # ── 회피 기준 방향은 "경로 법선" 으로 잡는다 ────────────────────
+        # 차량 헤딩 법선을 쓰면 회피 조향으로 차가 돌 때마다 시프트 방향까지
+        # 같이 돌아 되먹임이 생긴다. 경로 법선은 map 상에서 안정적이다.
+        n_wp = len(self.wps)
+        near = int(np.argmin(np.hypot(self.wps[:, 0] - px, self.wps[:, 1] - py)))
+        m_t = max(1, int(round(0.1 / self._wp_ds)))
+        tf = self.wps[(near + m_t) % n_wp, :2]
+        tb = self.wps[(near - m_t) % n_wp, :2]
+        tang = tf - tb
+        tn = float(np.hypot(*tang))
+        left = (np.array([-tang[1], tang[0]]) / tn if tn > 1e-6
+                else np.array([-math.sin(yaw), math.cos(yaw)]))
+
+        if not self.lane_free and self.blocking_pts:
+            # ── 방향 래치 ──────────────────────────────────────────────
+            # 한 번 "왼쪽으로 피한다" 고 정하면 그 장애물을 지나칠 때까지 유지.
+            # 매 프레임 다시 정하면, 피하느라 차가 돌면서 장애물이 반대편으로
+            # 보여 부호가 뒤집히고 좌우로 크게 휘청인다.
+            if self._shift_side == 0:
+                obs_c = np.mean(self.blocking_pts, axis=0)
+                lateral = float((obs_c - np.array([px, py])) @ left)
+                self._shift_side = -1.0 if lateral > 0 else 1.0
+            goal = self._shift_side * self.obs_shift
+        else:
+            self._shift_side = 0
+            goal = 0.0
+
+        # ── 램프 ───────────────────────────────────────────────────────
+        # 기준선을 계단으로 0.42m 옮기면 CTE 가 그만큼 튀어 조향이 22.6도로
+        # 포화된다(max_steer 20.6도). 해제 때는 반대 방향으로 같은 킥이 난다.
+        # 이 왕복이 "휘청휘청" 의 정체다. 속도 제한을 걸어 부드럽게 옮긴다.
+        step = self.obs_shift_rate / 50.0        # _cmd_tick 이 50Hz
+        self._shift_cur += float(np.clip(goal - self._shift_cur, -step, step))
+
+        if abs(self._shift_cur) > 1e-3:
+            self._shift_vec = self._shift_cur * left
+            target = target + self._shift_vec
+        else:
+            self._shift_vec = None
         return target
+
+    def _build_track_mask(self, ign: float):
+        """경계 안쪽 판정을 픽셀 마스크로 사전계산 (기동 시 1회).
+
+        ★ 왜 필요한가 — 측정으로 드러난 병목
+          예전엔 스캔마다 점유 셀 하나하나에 cv2.pointPolygonTest 를 2번씩
+          파이썬 루프로 돌렸다. 실제 트랙(벽 포함) 스캔에서 점유 셀이 2505개라
+          호출이 5010회/스캔, _scan_cb 가 44.5ms(22.5Hz) 걸렸다. 라이다는 40Hz
+          이므로 따라가지 못하고, 10프레임 투표에 445ms = 0.80m 주행이 걸렸다.
+          감시거리가 1.04m 인데 판정에 0.80m 를 쓰면 피할 거리가 남지 않는다.
+
+          거리변환으로 마스크를 한 번 만들어 두면 판정이 배열 인덱싱 한 번이 된다.
+          (io > ign) ⟺ 외곽 폴리곤 내부에서 경계까지 거리 > ign
+          (ii < -ign) ⟺ 내곽 폴리곤 외부에서 경계까지 거리 > ign
+        """
+        self.track_mask = None
+        if (self.inner_bound is None or self.outer_bound is None
+                or self.map_meta is None):
+            return
+        h, w = self.map_meta[0], self.map_meta[1]
+        outer_m = np.zeros((h, w), np.uint8)
+        inner_m = np.zeros((h, w), np.uint8)
+        cv2.fillPoly(outer_m, [self.outer_bound.astype(np.int32)], 1)
+        cv2.fillPoly(inner_m, [self.inner_bound.astype(np.int32)], 1)
+        d_out = cv2.distanceTransform(outer_m, cv2.DIST_L2, 5)
+        d_in = cv2.distanceTransform((1 - inner_m).astype(np.uint8),
+                                     cv2.DIST_L2, 5)
+        self.track_mask = (d_out > ign) & (d_in > ign)
+        self.get_logger().info(
+            f'track mask built: {int(self.track_mask.sum())} / {h*w} px '
+            f'(bound_ignore {ign}px)')
+
+    def _predicted_track_path(self, horizon: float) -> np.ndarray:
+        """앞으로 지나갈 경로를 "레이싱라인 + 현재 횡오차"로 예측 (map 좌표).
+
+        ★ 왜 원호만으로는 부족한가
+          원호 예측은 "지금 조향을 유지한다" 가정이라 코너 전후에서 실제 경로와
+          어긋난다. 진입 직전엔 yaw rate 가 아직 안 붙어 직선에 가깝고, 탈출
+          직후엔 아직 커서 과하게 안쪽으로 휜다. 그 사이 코너 안쪽 장애물을 놓친다.
+
+          이 차는 Stanley 로 라인을 추종하므로 미래 경로는 "라인을 현재 횡오차만큼
+          평행이동한 것" 에 가깝다. 라인의 곡률을 그대로 따르니 코너 기하가 자동으로
+          반영된다. 라인을 판정 기준으로 쓰는 게 아니라 내 진로를 예측하는 데 쓴다.
+        """
+        wps = self.wps
+        if wps is None or len(wps) < 3:
+            return np.zeros((0, 2))
+        n = len(wps)
+        px, py = float(self.pos[0]), float(self.pos[1])
+        near = int(np.argmin(np.hypot(wps[:, 0] - px, wps[:, 1] - py)))
+
+        m = max(1, int(round(horizon / max(self._wp_ds, 1e-3))))
+        m = min(m, n - 1)
+        idx = (near + np.arange(m + 1)) % n
+        seg = wps[idx, :2]
+
+        # 현재 횡오차(부호 포함)를 라인 법선 방향으로 잰다
+        j_f = (near + 1) % n
+        tang = wps[j_f, :2] - wps[near, :2]
+        nt = float(np.hypot(*tang))
+        if nt < 1e-6:
+            return seg
+        tang = tang / nt
+        left = np.array([-tang[1], tang[0]])
+        cte = float((np.array([px, py]) - wps[near, :2]) @ left)
+
+        return seg + left * cte           # 라인을 내 오차만큼 평행이동
+
+    def _in_predicted_corridor(self, pts_world: np.ndarray) -> np.ndarray:
+        """차가 실제로 지나갈 통로 안에 있는 점인가 (bool 배열).
+
+        두 예측의 합집합이다 — 어느 하나만으로는 구간에 따라 빗나간다:
+          (1) 순간 원호  : /odom yaw rate 로 R=v/w. 지금 조향 기준.
+          (2) 라인+횡오차: 코너 기하를 따르는 예측 (_predicted_track_path).
+        """
+        if len(pts_world) == 0:
+            return np.zeros(0, bool)
+
+        d = pts_world - self.pos
+        c, s = math.cos(-self.yaw), math.sin(-self.yaw)
+        fx = c * d[:, 0] - s * d[:, 1]        # 전방(+)
+        fy = s * d[:, 0] + c * d[:, 1]        # 좌측(+)
+
+        # ★ 슈미트 트리거 — 회피 중에는 통로를 넓혀서 본다.
+        #   좁은 통로만 보면 회피 조향을 시작하는 순간 장애물이 통로 밖으로
+        #   나가 감지가 풀리고, 라인으로 복귀하다 다시 감지되는 진동이 생긴다.
+        #   해제 조건을 진입보다 느슨하게 두어 장애물을 지나칠 때까지 붙잡는다.
+        scale = 1.0 if self.lane_free else self.obs_release_scale
+        hw = self.obs_corr_hw * scale
+        horizon = self._obs_horizon() * scale
+        v, w = abs(self.speed), self.yaw_rate
+
+        R = None
+        if abs(w) > 1e-3 and v > 1e-3:
+            R = v / w if self.speed >= 0 else -v / w
+            if abs(R) > 1e3:
+                R = None
+
+        # (1) 순간 원호 통로
+        if R is None:                          # 직진
+            arc_in = (fx > 0.0) & (fx < horizon) & (np.abs(fy) < hw)
+        else:
+            dist = np.hypot(fx, fy - R)
+            lateral = np.abs(dist - abs(R)) < hw
+            sr = math.copysign(1.0, R)
+            phi = np.mod(np.arctan2(sr * fx, sr * (R - fy)), 2.0 * math.pi)
+            arc_in = lateral & (abs(R) * phi < horizon)
+
+        # (2) 라인+횡오차 예측 경로 통로 — 코너 기하를 따라간다
+        path = self._predicted_track_path(horizon)
+        if len(path) == 0:
+            return arc_in
+        # 뒤쪽 점은 제외 (이미 지나친 장애물에 반응하지 않도록)
+        ahead = fx > -0.05
+        path_in = np.zeros(len(pts_world), bool)
+        if ahead.any():
+            dmin = scipy.spatial.distance.cdist(
+                path, pts_world[ahead]).min(axis=0)
+            path_in[ahead] = dmin < hw
+
+        return arc_in | path_in
+
+    def _obs_horizon(self) -> float:
+        """속도에 비례하는 전방 감시 거리(m).
+
+        회피에 필요한 거리는 속도에 비례한다. 고정값(구 3m)은 1.8m/s 에서
+        1.7초 앞까지 보는 셈이라 아직 한참 남은 장애물에 미리 반응했다.
+        저속에서도 최소 obs_horizon_min 은 확보한다 (0 이면 아무것도 못 본다).
+        """
+        return float(np.clip(self.obs_h_min + self.obs_h_sec * abs(self.speed),
+                             self.obs_h_min, self.obs_h_max))
 
     def _wall_avoid_steer(self) -> float:
         """다가오는 벽면에서 멀어지는 방향의 보정 조향(rad). +는 좌회전.
@@ -557,8 +818,16 @@ class StanleyController(Node):
         gy = np.linspace(ymin, ymax, ny)
         gy, gx = np.meshgrid(gy, gx)
 
-        rho = np.sqrt(gx**2 + gy**2)
-        phi = np.arctan2(gy, gx)
+        # ★ 격자는 base_link 기준인데 ranges 는 laser 원점에서 잰 값이다.
+        #   라이다가 base_link 보다 0.27m 앞에 있으므로(bringup_launch.py 의
+        #   static_baselink_to_laser) 그 차이만큼 빼고 비교해야 한다.
+        #   빼지 않으면 |rho - range| 에 0.27m 의 계통 오차가 생긴다. safe 가
+        #   0.3 이라 정면에선 간신히 걸쳐 셀 1~2 개만 살아남고, 옆으로 갈수록
+        #   오차가 커져 아예 안 잡힌다 — 실차에서 "점 1개"로 나타난 원인.
+        lx = gx - self.laser_dx
+        ly = gy - self.laser_dy
+        rho = np.sqrt(lx**2 + ly**2)
+        phi = np.arctan2(ly, lx)
         idx = np.clip(
             ((phi - msg.angle_min) / msg.angle_increment).astype(int),
             0, len(ranges) - 1)
@@ -568,7 +837,7 @@ class StanleyController(Node):
         gyf = gy.ravel()[occ]
 
         if len(gxf) == 0:
-            self.all_on_track = []
+            self.blocking_pts = []
             self.free_votes.append(True)
             return
 
@@ -580,40 +849,41 @@ class StanleyController(Node):
         self._classify_obstacles(pts_world, ign)
 
     def _classify_obstacles(self, pts_world: np.ndarray, ign: float):
-        # without bound files → treat all grid hits as lane-blocking
-        if self.inner_bound is None or self.map_arr is None:
-            if len(pts_world) > 0:
-                d_min = float(scipy.spatial.distance.cdist(
-                    self.wps[:, :2], pts_world).min())
-                self.all_on_track = list(pts_world)
-                self.free_votes.append(d_min > self.obs2lane)
-            else:
-                self.all_on_track = []
-                self.free_votes.append(True)
-            return
-
-        h, w, res, ox, oy = self.map_meta
-        pts_img = _world_to_img(pts_world, h, res, ox, oy)
-
-        on_track = []
-        for i, (ix, iy) in enumerate(pts_img):
-            if not (0 <= ix < w and 0 <= iy < h):
-                continue
-            io = cv2.pointPolygonTest(self.outer_bound, (float(ix), float(iy)), True)
-            ii = cv2.pointPolygonTest(self.inner_bound, (float(ix), float(iy)), True)
-            if io > ign and ii < -ign:
-                on_track.append(pts_world[i])
-
-        self.all_on_track = on_track
+        # without bound files → treat all grid hits as candidates (벽도 섞인다)
+        if getattr(self, 'track_mask', None) is None:
+            on_track = list(pts_world)
+        else:
+            # 사전계산된 마스크 조회 — 예전의 점당 cv2.pointPolygonTest 2회
+            # 파이썬 루프를 대체한다 (_build_track_mask 주석 참조).
+            h, w = self.map_meta[0], self.map_meta[1]
+            res, ox, oy = self.map_meta[2], self.map_meta[3], self.map_meta[4]
+            pts_img = _world_to_img(pts_world, h, res, ox, oy)
+            ix, iy = pts_img[:, 0], pts_img[:, 1]
+            inb = (ix >= 0) & (ix < w) & (iy >= 0) & (iy < h)
+            keep = np.zeros(len(pts_world), bool)
+            keep[inb] = self.track_mask[iy[inb], ix[inb]]
+            on_track = list(pts_world[keep])
 
         if not on_track:
+            self.blocking_pts = []
             self.free_votes.append(True)
             return
 
-        d_min = float(scipy.spatial.distance.cdist(
-            self.wps[:, :2], np.array(on_track)).min())
-        self.free_votes.append(d_min > self.obs2lane)
-        self._pub_obstacle_markers(on_track)
+        #   그리고 "막고 있는 점"만 남겨 회피 방향·마커에 쓴다 — 예전엔 트랙 안의
+        #   모든 점 평균으로 방향을 정해서 엉뚱한 쪽으로 틀 수 있었다.
+        # ★ 판정 기준은 "내가 실제로 지나갈 자리를 막았는가" 하나다.
+        #   레이싱라인은 우리가 임의로 넣은 계획일 뿐이고, 충돌은 실제 진로에서만
+        #   일어난다. 라인 기준으로 보면 추종 오차만큼 벌어진 구간에서 실제로
+        #   부딪힐 장애물을 통째로 놓친다 (2026-07-21 실차: 두 번째 장애물).
+        #   라인은 "어디로 피할지"(_obstacle_shift 의 목표점)에만 쓴다.
+        blocking = [p for p, k in
+                    zip(on_track, self._in_predicted_corridor(np.asarray(on_track)))
+                    if k]
+
+        self.blocking_pts = blocking
+        self.free_votes.append(not blocking)
+        if blocking:
+            self._pub_obstacle_markers(blocking)
 
     # ── publishers / helpers ───────────────────────────────────────────────
 

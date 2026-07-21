@@ -200,7 +200,15 @@ def generate_launch_description():
                 'stanley_ks':      float(sc.get('ks',             1.3)),
                 'vel_scale':       float(sc.get('vel_scale',      1.0)),
                 'obstacle_decel':  float(sc.get('obstacle_decel', 0.85)),
-                'obs2lane_dist':   float(sc.get('obs2lane_dist',  0.25)),
+                'obs_corridor_half_width': float(sc.get('obs_corridor_half_width', 0.30)),
+                'obs_release_scale':       float(sc.get('obs_release_scale',       1.6)),
+                'car_width':       float(sc.get('car_width',       0.30)),
+                'obstacle_margin': float(sc.get('obstacle_margin', 0.12)),
+                'obstacle_shift_rate': float(sc.get('obstacle_shift_rate', 0.9)),
+                'obs_horizon_sec': float(sc.get('obs_horizon_sec', 0.3)),
+                'obs_horizon_min': float(sc.get('obs_horizon_min', 0.5)),
+                'obs_horizon_max': float(sc.get('obs_horizon_max', 3.0)),
+                'obs_vote_frames': int(  sc.get('obs_vote_frames',  5)),
                 'interp_scale':    int(  sc.get('interp_scale',   20)),
                 'lookahead_min':   float(sc.get('lookahead_min',  0.5)),
                 'lookahead_max':   float(sc.get('lookahead_max',  2.0)),
@@ -220,7 +228,10 @@ def generate_launch_description():
                 # Q2 obstacle detection
                 'map_yaml':        map_yaml,
                 'bound_dir':       bound_dir,
-                'grid_xmin':       0.0,  'grid_xmax':      5.0,
+                # xmin 은 라이다 위치(0.27) 뒤쪽을 제외한다. 그 안쪽 셀은
+                # 라이다 기준으로 "뒤"라 엉뚱한 빔을 참조하고, 어차피 그 거리의
+                # 장애물은 피할 수도 없다. (실차에서 차 앞 0.11m 노이즈 검출됨)
+                'grid_xmin':       0.35, 'grid_xmax':      5.0,
                 'grid_ymin':      -2.5,  'grid_ymax':      2.5,
                 'grid_res':        0.04, 'grid_safe_dist':  0.3,
                 'bound_ignore_px': 7.5,

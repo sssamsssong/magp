@@ -54,6 +54,7 @@ RANGES = {
     'speed.race_max':         (0.0, 8.0),
     'speed.min_speed':        (0.0, 3.0),
     'safety.ttc_threshold':   (0.05, 3.0),
+    'joystick.max_speed':     (0.0, 6.0),
 }
 
 # ./tune.sh status 가 보여줄 게인과 조절 우선순위.
