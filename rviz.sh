@@ -14,6 +14,13 @@
 #      ROS_DOMAIN_ID 를 바꿔놨다면 젯슨과 같은 값으로 맞출 것.
 #
 #  사용:  ./rviz.sh
+#
+#  ▶ 젯슨에서 직접 띄우기 (모니터 연결 시) — 초기 위치 정렬에 편하다
+#      SSH 로 들어와서 그냥 ./rviz.sh  (DISPLAY 는 자동으로 잡는다)
+#      터미널1:  ./race.sh box       스택 기동 (바퀴 안 돌아감)
+#      터미널2:  ./rviz.sh           젯슨 화면에 RViz → 2D Pose Estimate 로 정렬
+#      터미널3:  ./race.sh savepose  맞춘 위치 저장
+#      ※ 주행 중 관찰용이면 노트북 로컬 실행이 낫다 (젯슨 CPU 를 안 뺏김)
 # ============================================================
 set -e
 
@@ -27,13 +34,28 @@ source /opt/ros/humble/setup.bash
 export RACE_SCRIPT="$DIR/race_script.yaml"
 [ -f "$DIR/config/dds_env.sh" ] && source "$DIR/config/dds_env.sh"
 
-# SSH 세션이면 RViz 창이 젯슨 모니터에 뜬다 — 노트북에서 보려는 의도와 어긋난다.
-# rviz.sh 는 "노트북에서 네이티브 실행"이 전제다 (화면 전송이 아니라 토픽 구독).
+# SSH 세션이면 RViz 창은 이 명령을 받은 기기(젯슨) 화면에 뜬다.
+# 둘 다 정상적인 쓰임새라 막지 않고, 어느 쪽인지만 알려준다:
+#   - 노트북 로컬 실행  → 노트북 화면에서 관찰 (주행 중 권장. 젯슨 CPU 안 씀)
+#   - 젯슨에 SSH + 모니터 → 젯슨 화면에 뜸. 2D Pose Estimate 후 곧바로
+#                           ./race.sh savepose 할 수 있어 초기 정렬에 편하다.
 if [ -n "${SSH_CONNECTION:-}" ]; then
-    echo "⚠ SSH 세션에서 실행 중입니다."
-    echo "  RViz 창은 이 명령을 받은 기기(젯슨)의 화면에 뜹니다."
-    echo "  노트북에서 보려면 SSH 를 끊고 노트북 로컬 터미널에서 실행하세요."
-    echo "  (rviz.sh 는 화면을 전송하는 게 아니라, 노트북이 직접 토픽을 구독해 그립니다)"
+    # SSH 세션은 보통 DISPLAY 가 비어 있다. 로컬 X 세션이 있으면 그걸 잡아준다.
+    if [ -z "${DISPLAY:-}" ]; then
+        for sock in /tmp/.X11-unix/X*; do
+            [ -e "$sock" ] || continue
+            export DISPLAY=":${sock##*/X}"
+            break
+        done
+    fi
+    if [ -z "${DISPLAY:-}" ]; then
+        echo "✗ 젯슨에 그래픽 세션이 없습니다 (DISPLAY 미설정, /tmp/.X11-unix 비어 있음)."
+        echo "  젯슨에 모니터를 연결했는지 확인하거나, 노트북 로컬에서 ./rviz.sh 를 쓰세요."
+        exit 1
+    fi
+    echo "ℹ SSH 세션 — RViz 창은 젯슨 화면(DISPLAY=$DISPLAY)에 뜹니다."
+    echo "  초기 정렬 흐름:  RViz 에서 2D Pose Estimate  →  다른 터미널에서 ./race.sh savepose"
+    echo "  ※ 주행 중에는 젯슨 CPU 를 나눠 쓰므로, 관찰용이면 노트북 로컬 실행을 권장합니다."
     echo ""
 fi
 
