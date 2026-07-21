@@ -258,10 +258,13 @@ print(f'[race.sh] 현재 AMCL 위치: ({t.x:.3f}, {t.y:.3f})  '
 node.destroy_node(); rclpy.shutdown()
 
 # tune.py 로 기록 — 주석·정렬이 보존되고 변경 이력도 남는다
-subprocess.run([f'{script_dir}/tune.sh',
-                f'localization.init_x={t.x:.4f}',
-                f'localization.init_y={t.y:.4f}',
-                f'localization.init_yaw={yaw:.4f}'], check=True)
+r = subprocess.run([f'{script_dir}/tune.sh',
+                    f'localization.init_x={t.x:.4f}',
+                    f'localization.init_y={t.y:.4f}',
+                    f'localization.init_yaw={yaw:.4f}'])
+if r.returncode != 0:
+    print('[race.sh] 저장 실패 — 위 [tune] 메시지를 확인하세요.', flush=True)
+    sys.exit(1)
 PYEOF
     echo "[race.sh] 저장 완료 — 다음 실행부터 이 위치로 시작합니다"
     exit 0 ;;

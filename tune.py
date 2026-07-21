@@ -85,6 +85,16 @@ FORBID_ZERO = {'stanley.ff_gain'}
 # 한 번에 이 배수 이상 바꾸면 오타로 보고 막는다 (--force 로 무시)
 MAX_JUMP_RATIO = 5.0
 
+# ★ 배수 가드에서 제외할 키.
+#   배수는 "게인" 에나 의미가 있다. 맵 좌표·각도는 부호가 바뀌고 0 근처도 정상값이라
+#   3.78 → -0.15 같은 정상적인 갱신이 "0.0배 변경" 으로 걸려버린다.
+#   (./race.sh savepose 가 여기 키들을 기록한다)
+NO_RATIO_GUARD = {
+    'localization.init_x', 'localization.init_y', 'localization.init_yaw',
+    'mission.start_x', 'mission.start_y',
+    'sim.sx', 'sim.sy', 'sim.stheta',
+}
+
 C = {
     'dim':   '\033[2m',   'red':  '\033[31m', 'grn': '\033[32m',
     'ylw':   '\033[33m',  'cyn':  '\033[36m', 'bld': '\033[1m',
@@ -231,7 +241,8 @@ def check_guards(dotted, old, new, force):
         rng = RANGES.get(dotted)
         if rng and not (rng[0] <= float(new) <= rng[1]):
             problems.append(f'권장 범위 {rng[0]}~{rng[1]} 밖의 값: {new}')
-        if isinstance(old, (int, float)) and old and float(old) != 0:
+        if (dotted not in NO_RATIO_GUARD
+                and isinstance(old, (int, float)) and old and float(old) != 0):
             ratio = abs(float(new) / float(old))
             if ratio > MAX_JUMP_RATIO or ratio < 1.0 / MAX_JUMP_RATIO:
                 problems.append(
