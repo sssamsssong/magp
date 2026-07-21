@@ -68,6 +68,13 @@ if ! ip link show lo | head -1 | grep -q "MULTICAST"; then
     sudo ip link set dev lo multicast on
 fi
 
+# ---------- 1-2. 배터리 잔량 ----------
+# 방전으로 주행이 중간에 끊기는 일이 있어 기동 시 한 줄 띄운다.
+# --inline: 전압을 못 읽어도 exit 0 — 기동을 막지 않는다.
+# ★ bat.sh 는 스택 미실행 시 vesc_driver 를 잠깐 띄웠다 반드시 회수한다.
+#   남아 있으면 아래 2-1 중복 실행 가드가 오탐하고 VESC 시리얼도 물고 있다.
+[ -x "$SCRIPT_DIR/bat.sh" ] && "$SCRIPT_DIR/bat.sh" --inline || true
+
 # ---------- 2. 모드 결정 ----------
 export RACE_SCRIPT   # launch 파일이 이 env로 yaml 경로를 읽음
 CMD=${1:-}
