@@ -212,34 +212,55 @@ case "$CMD" in
     #   2) 노트북 RViz 에서 "2D Pose Estimate" 로 실제 차 위치·방향을 클릭
     #      → 맵과 라이다 스캔이 겹칠 때까지 조정
     #   3) 이 명령 실행
-    echo "[race.sh] /amcl_pose 수신 대기 (최대 15초)…"
-    POSE=$(timeout 15 ros2 topic echo /amcl_pose --once 2>/dev/null) || true
-    # 발행자가 없으면 echo 가 stdout 으로 "WARNING: ... not ... published yet" 만
-    # 뱉고 exit 0 으로 끝난다. 빈 문자열 검사만으로는 못 걸러진다.
-    if ! printf '%s' "$POSE" | grep -q 'position:'; then
-      echo "[race.sh] /amcl_pose 를 못 받았습니다. 스택이 떠 있는지 확인하세요"
-      echo "          (./race.sh box 로 띄운 뒤 RViz 에서 2D Pose Estimate)"
-      exit 1
-    fi
-    python3 - "$SCRIPT_DIR" <<PYEOF
-import math, re, subprocess, sys
-raw = """$POSE"""
-# position 이 x,y,z 를, orientation 이 x,y,z,w 를 순서대로 갖는다.
-# 따라서 x[0]/y[0] 가 위치, z[1]/w[0] 이 방향 쿼터니언이다.
-nums = {k: [float(v) for v in re.findall(rf'^\s*{k}:\s*(-?[\d.eE+-]+)\s*$', raw, re.M)]
-        for k in ('x', 'y', 'z', 'w')}
-try:
-    px, py = nums['x'][0], nums['y'][0]
-    qz, qw = nums['z'][1], nums['w'][0]
-except (IndexError, KeyError):
-    print('[race.sh] /amcl_pose 파싱 실패 — 형식이 예상과 다릅니다'); sys.exit(1)
-yaw = math.atan2(2.0 * qw * qz, 1.0 - 2.0 * qz * qz)
-print(f'[race.sh] 현재 AMCL 위치: ({px:.3f}, {py:.3f})  '
-      f'{math.degrees(yaw):.1f}deg', flush=True)   # tune.sh 출력보다 먼저 나오도록
+    # ★ /amcl_pose 토픽을 쓰지 않는다.
+    #   AMCL 은 파티클 필터가 "갱신"될 때만 amcl_pose 를 발행하는데, 갱신 조건이
+    #   update_min_d(2.5cm) / update_min_a(1.7도) 이동이다. box 모드는 속도가 0 이라
+    #   차가 안 움직이므로 영원히 발행되지 않고 echo --once 가 무한 대기한다.
+    #   TF map→base_link 는 tf_broadcast:true 라 정지 상태에서도 계속 방송되므로
+    #   이쪽을 읽는다. (RViz 에서 2D Pose Estimate 로 옮긴 결과도 즉시 반영된다)
+    echo "[race.sh] AMCL 위치 조회 중 — TF map→base_link (최대 15초)…"
+    python3 - "$SCRIPT_DIR" <<'PYEOF'
+import math, subprocess, sys, time
+
+import rclpy
+from rclpy.node import Node
+import tf2_ros
+
+script_dir = sys.argv[1]
+
+rclpy.init()
+node = Node('savepose_probe')
+buf = tf2_ros.Buffer()
+tf2_ros.TransformListener(buf, node)
+
+tf = None
+deadline = time.time() + 15.0
+while time.time() < deadline:
+    rclpy.spin_once(node, timeout_sec=0.2)
+    try:
+        tf = buf.lookup_transform('map', 'base_link', rclpy.time.Time())
+        break
+    except tf2_ros.TransformException:
+        pass
+
+if tf is None:
+    print('[race.sh] map→base_link TF 를 못 받았습니다.', flush=True)
+    print('          스택이 떠 있고 AMCL 이 active 인지 확인하세요:', flush=True)
+    print('            ./race.sh check        (토픽·TF 상태 표)', flush=True)
+    print('            ros2 topic echo /tf --once', flush=True)
+    node.destroy_node(); rclpy.shutdown(); sys.exit(1)
+
+t, q = tf.transform.translation, tf.transform.rotation
+yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+print(f'[race.sh] 현재 AMCL 위치: ({t.x:.3f}, {t.y:.3f})  '
+      f'{math.degrees(yaw):.1f}deg', flush=True)
+node.destroy_node(); rclpy.shutdown()
+
 # tune.py 로 기록 — 주석·정렬이 보존되고 변경 이력도 남는다
-subprocess.run([f'$SCRIPT_DIR/tune.sh',
-                f'localization.init_x={px:.4f}',
-                f'localization.init_y={py:.4f}',
+subprocess.run([f'{script_dir}/tune.sh',
+                f'localization.init_x={t.x:.4f}',
+                f'localization.init_y={t.y:.4f}',
                 f'localization.init_yaw={yaw:.4f}'], check=True)
 PYEOF
     echo "[race.sh] 저장 완료 — 다음 실행부터 이 위치로 시작합니다"
