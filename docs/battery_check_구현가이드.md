@@ -67,17 +67,18 @@ fi
 
 V=$(printf "%.1f" "$VOLT" 2>/dev/null || echo "$VOLT")
 
-# 전압 기준 (4S LiPo 14.8V 공칭)
-#   ≥ 14.8V  초록 — 충분
-#   ≥ 12.8V  노랑 — 주의 (곧 충전)
-#    < 12.8V  빨강 — 위험 (~11.8V 에서 젯슨 셧다운)
-if   awk "BEGIN{exit !($VOLT >= 14.8)}"; then COLOR="\033[32m"
-elif awk "BEGIN{exit !($VOLT >= 12.8)}"; then COLOR="\033[33m"
+# 전압 기준 (4S LiPo, 충전기 실측 기반 보정)
+#   실측: 3.78V/cell (15.12V) = 29% — 이 기준으로 임계값 설정
+#   ≥ 15.6V  초록 — 60%+ (충분)
+#   ≥ 14.8V  노랑 — ~20% (충전 권장)
+#    < 14.8V  빨강 — 위험 (~11.8V 에서 젯슨 셧다운)
+if   awk "BEGIN{exit !($VOLT >= 15.6)}"; then COLOR="\033[32m"
+elif awk "BEGIN{exit !($VOLT >= 14.8)}"; then COLOR="\033[33m"
 else                                           COLOR="\033[31m"
 fi
 RESET="\033[0m"
 
-echo -e "[bat] 배터리  ${COLOR}${V} V${RESET}  (충전: ~16.8V  주의: <12.8V  셧다운: ~11.8V)"
+echo -e "[bat] 배터리  ${COLOR}${V} V${RESET}  (충전: ~16.8V  주의: <15.6V  위험: <14.8V)"
 ```
 
 ---
@@ -125,7 +126,7 @@ fi
 ./bat.sh
 [bat] 배터리  13.1 V  (충전: ~16.8V  주의: <12.8V  셧다운: ~11.8V)
 ```
-노랑으로 출력되면 슬슬 충전 타이밍.
+노랑(~20%)이면 충전 권장, 빨강(<14.8V)이면 즉시 충전.
 
 ---
 
