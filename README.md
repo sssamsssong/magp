@@ -97,6 +97,15 @@ sudo systemctl daemon-reload && sudo systemctl enable roboracer
   `enabled: false` 고려
 
 ## 튜닝 가이드 (전부 race_script.yaml에서)
+
+값은 `./tune.sh` 로 바꾸면 오타 가드와 변경 이력이 붙는다 — 사용법은 `docs/tune_사용법.md`.
+`./tune.sh status` 로 현재 상태·조절 우선순위를 본다. (Stanley 게인 설명: `docs/stanley_gain_tuning.md`)
+
+```bash
+./tune.sh status                  # 지금 상태
+./tune.sh stanley.ff_gain+=0.3    # 조정 → 다음 ./race.sh 부터 적용 (재빌드 불필요)
+```
+
 | 증상 | 조치 |
 |---|---|
 | 코너에서 벽에 붙음 | `gap_follower.car_width` ↑, `steer_gain` ↑ |

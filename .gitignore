@@ -15,3 +15,7 @@ __pycache__/
 
 # Claude Code 로컬 전용 설정
 .claude/settings.local.json
+
+# tune.sh 로컬 상태 (튜닝 이력 · --undo 용 백업)
+.tune_history
+.tune_backup.yaml
