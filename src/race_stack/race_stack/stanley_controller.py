@@ -113,6 +113,18 @@ class StanleyController(Node):
         self.declare_parameter('ff_gain',          1.0)
         self.declare_parameter('ff_preview_sec',   0.10)
         self.declare_parameter('steer_lpf',        1.0)
+
+        # ── 벽 스침 회피 (wall avoidance) ──────────────────────────────
+        # 2시 방향 벽이 다가와 우측 전면이 스칠 것 같으면 살짝 왼쪽으로 튼다.
+        # AEB(정지)로는 못 막는, "부딪히진 않지만 스치는" 상황용.
+        self.declare_parameter('wall_avoid_enabled',   False)
+        self.declare_parameter('wall_avoid_half_width', 0.17)  # 차폭/2 (m)
+        self.declare_parameter('wall_avoid_clearance',  0.18)  # 추가 여유 (m)
+        self.declare_parameter('wall_avoid_lookahead',  1.2)   # 전방 감시 거리 (m)
+        self.declare_parameter('wall_avoid_gain',       0.6)   # 침범량(m)→조향(rad)
+        self.declare_parameter('wall_avoid_max',        0.10)  # 회피 조향 상한 (rad)
+        self.declare_parameter('wall_avoid_lpf',        0.4)   # 회피 조향 저역통과
+        self.declare_parameter('wall_avoid_min_range',  0.12)  # 차체 반사 제거 (m)
         # Q2 obstacle detection
         self.declare_parameter('map_yaml',         '')
         self.declare_parameter('bound_dir',        '')
@@ -144,6 +156,18 @@ class StanleyController(Node):
         self.ff_gain    = p('ff_gain')
         self.ff_prev_s  = p('ff_preview_sec')
         self.steer_lpf  = p('steer_lpf')
+
+        self.wa_on      = bool(p('wall_avoid_enabled'))
+        self.wa_hw      = p('wall_avoid_half_width')
+        self.wa_clear   = p('wall_avoid_clearance')
+        self.wa_look    = p('wall_avoid_lookahead')
+        self.wa_gain    = p('wall_avoid_gain')
+        self.wa_max     = p('wall_avoid_max')
+        self.wa_lpf     = p('wall_avoid_lpf')
+        self.wa_rmin    = p('wall_avoid_min_range')
+        self.latest_scan = None       # 벽 회피용 최신 스캔
+        self._wa_prev   = 0.0         # 회피 조향 LPF 상태
+        self._wa_warned = 0.0         # 로그 스로틀용 시각
 
         # ── waypoints ─────────────────────────────────────────────────
         self.wps = self._load_waypoints(p('waypoint_file'))
@@ -221,7 +245,8 @@ class StanleyController(Node):
             '/amcl_pose', self._pose_cb, 10)
         self.create_subscription(Odometry,
             '/odom', self._odom_cb, 10)
-        if self.mode == 'q2':
+        # Q2 는 장애물 격자 판정에, 그 외 모드는 벽 회피에 스캔이 필요하다.
+        if self.mode == 'q2' or self.wa_on:
             self.create_subscription(LaserScan,
                 '/scan', self._scan_cb, 10)
 
@@ -375,6 +400,14 @@ class StanleyController(Node):
         v_safe = max(speed, 0.5)   # avoid division by near-zero
         steer  = steer_ff + self.gain * (yaw_err
                               - math.atan2(self.k_cte * cte, v_safe + self.ks))
+
+        # ── 벽 스침 회피 보정 ──────────────────────────────────────────
+        # Stanley 의 CTE 항이 이 보정에 저항한다(레이싱라인에서 밀려나므로).
+        # 그래서 보정은 폭주하지 않고 유한한 횡변위에서 평형을 이룬다:
+        #   0.1rad 보정 ≈ 12cm 횡변위 (gain1.5/k1.8/v1.8/ks1.5 기준).
+        # 이 자기제한이 안전장치라, 일부러 없애지 말 것.
+        steer += self._wall_avoid_steer()
+
         steer  = float(np.clip(steer, -self.max_steer, self.max_steer))
 
         # ── 조향 저역통과 (steer_lpf=1.0 이면 비활성) ───────────────────
@@ -428,9 +461,86 @@ class StanleyController(Node):
             target  = target + sign * 0.2 * left
         return target
 
+    def _wall_avoid_steer(self) -> float:
+        """다가오는 벽면에서 멀어지는 방향의 보정 조향(rad). +는 좌회전.
+
+        예: 2시 방향 벽이 우측 전면으로 다가옴 → 오른쪽 침범량 > 0 → 왼쪽으로 보정.
+
+        핵심은 "가장 가까운 점"이 아니라 **침범량(encroachment)** 을 본다는 것.
+        나란한 벽은 원하는 여유(half_width+clearance) 밖에 있으면 침범량 0 이라
+        아무 보정도 안 나온다. 양쪽이 동시에 좁아지면(좁은 통로) 서로 상쇄돼
+        가운데를 유지하고, 조향 대신 AEB 가 담당한다.
+        """
+        scan = self.latest_scan
+        if not self.wa_on or scan is None:
+            return 0.0
+
+        ranges = np.asarray(scan.ranges, dtype=float)
+        n = len(ranges)
+        if n == 0:
+            return 0.0
+        ang = scan.angle_min + np.arange(n) * scan.angle_increment
+
+        ok = np.isfinite(ranges) & (ranges > self.wa_rmin) & \
+             (ranges < self.wa_look * 2.0)
+        if not ok.any():
+            return self._wa_smooth(0.0)
+        r, a = ranges[ok], ang[ok]
+        x, y = r * np.cos(a), r * np.sin(a)
+
+        # 전방 감시 창 안의 점만
+        fwd = (x > 0.0) & (x < self.wa_look)
+        if not fwd.any():
+            return self._wa_smooth(0.0)
+        x, y = x[fwd], y[fwd]
+
+        # 원하는 측면 여유를 얼마나 파고들었는가
+        want = self.wa_hw + self.wa_clear
+        enc = want - np.abs(y)
+        near = enc > 0.0
+        if not near.any():
+            return self._wa_smooth(0.0)
+
+        # ★ 전방거리로 가중하지 않는다.
+        #   차는 감시창(1.2m ≈ 0.7초)을 곧 통과하므로 창 안의 모든 x 가 임박한
+        #   상황이고, |y| 자체가 "그 지점에서의 측면 여유"다. 즉 창 안 최소 여유가
+        #   그대로 구속조건이다. 예전엔 (1-x/look) 로 가중했는데, 수렴하는 벽은
+        #   위험 지점이 앞쪽이라 정작 그곳을 0 으로 눌러 보정이 안 나왔다.
+        score = enc
+
+        right = float(score[near & (y < 0)].max()) if (near & (y < 0)).any() else 0.0
+        left = float(score[near & (y > 0)].max()) if (near & (y > 0)).any() else 0.0
+
+        # 오른쪽이 더 침범 → 왼쪽(+)으로
+        corr = self.wa_gain * (right - left)
+        corr = float(np.clip(corr, -self.wa_max, self.wa_max))
+
+        if abs(corr) > 0.02:
+            now = self.get_clock().now().nanoseconds * 1e-9
+            if now - self._wa_warned > 1.0:
+                self._wa_warned = now
+                side = '우측' if corr > 0 else '좌측'
+                self.get_logger().info(
+                    f'[wall_avoid] {side} 벽 접근 — '
+                    f'침범 R{right:.02f}/L{left:.02f}m → '
+                    f'보정 {math.degrees(corr):+.1f}°')
+        return self._wa_smooth(corr)
+
+    def _wa_smooth(self, corr: float) -> float:
+        """회피 조향 저역통과 — 스캔 노이즈로 조향이 튀지 않게."""
+        a = float(np.clip(self.wa_lpf, 0.0, 1.0))
+        self._wa_prev = a * corr + (1.0 - a) * self._wa_prev
+        return self._wa_prev
+
     def _scan_cb(self, msg: LaserScan):
+        # 벽 회피는 pose 없이도 (차량 좌표계만으로) 동작해야 한다 —
+        # AMCL 수렴 전에도 벽에 스치는 건 막아야 하므로 pose 검사보다 먼저 저장.
+        self.latest_scan = msg
+
         if self.pos is None:
             return
+        if self.mode != 'q2':
+            return          # 아래 격자 판정은 Q2 전용
 
         p = self.get_parameter
         xmin = p('grid_xmin').value;   xmax = p('grid_xmax').value

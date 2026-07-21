@@ -148,8 +148,17 @@ def generate_launch_description():
         nodes.append(Node(
             package='race_stack', executable='safety_node',
             name='safety_node', output='screen',
-            parameters=[{'ttc_threshold': float(s.get('ttc_threshold', 0.6)),
-                         'hold_sec': float(s.get('hold_sec', 1.0))}]))
+            parameters=[{
+                'ttc_threshold':       float(s.get('ttc_threshold',       0.15)),
+                'hold_sec':            float(s.get('hold_sec',            1.0)),
+                'corridor_half_width': float(s.get('corridor_half_width', 0.30)),
+                'brake_decel':         float(s.get('brake_decel',         3.0)),
+                'min_range':           float(s.get('min_range',           0.12)),
+                'max_lookahead':       float(s.get('max_lookahead',       6.0)),
+                'consec_frames':       int(  s.get('consec_frames',       3)),
+                'use_arc_corridor':    bool( s.get('use_arc_corridor',    True)),
+                'publish_debug':       bool( s.get('publish_debug',       True)),
+            }]))
 
     # ---------- 5. 컨트롤러 (AMCL 수렴 시간 확보를 위해 8초 지연 기동) ----------
     # lifecycle_manager 가 5초에 뜬 뒤 map_server→amcl 활성화까지 마쳐야 하므로
@@ -170,6 +179,7 @@ def generate_launch_description():
     elif controller == 'stanley':
         sc = cfg.get('stanley', {})
         pp = cfg.get('pure_pursuit', {})
+        wa = cfg.get('wall_avoid', {})
 
         # Q2: boundary files live in  maps/<map_name>/  subdirectory
         bound_dir = sc.get('bound_dir', '') or \
@@ -198,6 +208,15 @@ def generate_launch_description():
                 'ff_gain':         float(sc.get('ff_gain',        1.0)),
                 'ff_preview_sec':  float(sc.get('ff_preview_sec', 0.10)),
                 'steer_lpf':       float(sc.get('steer_lpf',      1.0)),
+                # 벽 스침 회피
+                'wall_avoid_enabled':    bool(wa.get('enabled',      False)),
+                'wall_avoid_half_width': float(wa.get('half_width',  0.17)),
+                'wall_avoid_clearance':  float(wa.get('clearance',   0.18)),
+                'wall_avoid_lookahead':  float(wa.get('lookahead',   1.2)),
+                'wall_avoid_gain':       float(wa.get('gain',        0.6)),
+                'wall_avoid_max':        float(wa.get('max_steer',   0.10)),
+                'wall_avoid_lpf':        float(wa.get('lpf',         0.4)),
+                'wall_avoid_min_range':  float(wa.get('min_range',   0.12)),
                 # Q2 obstacle detection
                 'map_yaml':        map_yaml,
                 'bound_dir':       bound_dir,
