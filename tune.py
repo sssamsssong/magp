@@ -69,6 +69,15 @@ TUNING_GUIDE = [
 ]
 GUIDE_DOC = 'docs/stanley_gain_tuning.md'
 
+# ./tune.sh status 속도 섹션 — 현재 모드 강조
+SPEED_GUIDE = [
+    ('speed.q1_max',    '예선1 — 장애물 없음, 고속 추종'),
+    ('speed.q2_max',    '예선2 — 장애물 회피'),
+    ('speed.q3_max',    '예선3 — 공격적'),
+    ('speed.race_max',  '1대1 경주'),
+    ('speed.min_speed', '코너 최저속도 (이 밑으로 감속 안 함)'),
+]
+
 # 0 으로 두면 안 되는 키 — yaml 주석에 "절대 0으로 두지 말 것" 으로 명시돼 있다.
 # 중심차분 접선은 무편향이라 곡률 FF 가 커브 조향을 전담한다. 0 이면 코너를 늦게 꺾는다.
 FORBID_ZERO = {'stanley.ff_gain'}
@@ -346,11 +355,42 @@ def show_status(cfg):
         print(f"   {C['dim']}{prio}{C['off']} {mark} {name:16s} {val}{pad}"
               f"{C['dim']}{hint}{C['off']}")
 
-    # 가이드에 없는 키가 바뀌었으면 따로 보여준다 (speed, gap_follower 등)
+    # 속도 섹션
+    mode = cfg.get('mode', '')
+    speed_shown = set()
+    print(f"\n  {C['cyn']}{C['bld']}모드별 속도{C['off']}"
+          f"   {C['dim']}(./tune.sh speed.q2_max=2.0){C['off']}")
+    for dotted, hint in SPEED_GUIDE:
+        try:
+            cur = get_nested(cfg, dotted)
+        except KeyError:
+            continue
+        name = dotted.split('.', 1)[1]
+        speed_shown.add(dotted)
+        is_active = (dotted == f'speed.{mode}_max')
+
+        mark, plain, val = ' ', str(cur), f'{C["bld"]}{cur}{C["off"]}'
+        if base is not None:
+            try:
+                old = get_nested(base, dotted)
+                if old != cur:
+                    mark = '*'
+                    plain = f'{cur}  ({old} → {cur})'
+                    val += f"  {C['ylw']}({old} → {cur}){C['off']}"
+                    changed_any.append(dotted)
+            except KeyError:
+                pass
+
+        active_tag = f"  {C['grn']}◀ 현재 모드{C['off']}" if is_active else ''
+        pad = ' ' * max(2, 22 - len(plain))
+        print(f"   {mark} {name:14s} {val}{pad}{C['dim']}{hint}{C['off']}{active_tag}")
+
+    # 가이드에 없는 키가 바뀌었으면 따로 보여준다 (gap_follower 등)
     if base is not None:
         others = []
+        shown_keys = {g[0] for g in TUNING_GUIDE} | speed_shown
         for k in all_keys(cfg):
-            if k in {g[0] for g in TUNING_GUIDE}:
+            if k in shown_keys:
                 continue
             try:
                 if get_nested(base, k) != get_nested(cfg, k):
