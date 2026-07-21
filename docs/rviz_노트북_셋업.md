@@ -1,75 +1,165 @@
 # 실시간 RViz 관찰 — 노트북 셋업 가이드
 
-> 작성일: 2026-07-17
-> 젯슨 주행을 노트북에서 실시간(맵+레이싱라인+차 위치/궤적+LiDAR+목표점)으로 보기 위한 정리.
+> 최초 작성: 2026-07-17 / CycloneDDS 전환 반영: 2026-07-21
 
-## 이번에 추가된 것 (이미 main 에 커밋/푸시됨)
-
-| 커밋 | 내용 |
-|------|------|
-| `491dc8c` | gen_waypoints 웨이포인트 생성 시 맵 오버레이 PNG 자동 저장 (`waypoints/<wp>.png`) |
-| `c111371` | 주행 중 실시간 RViz 시각화 — stanley_controller 시각화 토픽 발행 + `config/race.rviz` + jetson.sh 자동기동 |
-| `e0eecdd` | `rviz.sh` — 직접 SSH 워크플로우용 노트북 RViz 뷰어 |
-
-### 젯슨 주행 노드가 항상 발행하는 시각화 토픽
-- `/waypoints_path` — 전체 레이싱라인 (속도 컬러, 1Hz 재발행)
-- `/car_path` — 차가 지나온 궤적
-- `/waypoint` — 현재 목표점 / `/obstacle` — Q2 장애물
-- `/map`, `/scan`, `/amcl_pose` (+ TF) — 맵·라이다·차 위치
-> viz 값과 무관하게 발행되므로, **노트북에서 뷰어만 켜면 된다.**
+젯슨 주행을 노트북에서 실시간(맵 + 레이싱라인 + 차 위치/궤적 + LiDAR + 목표점)으로 보기 위한 설정.
 
 ---
 
-## 노트북에서 할 일 (우리 방식 = 직접 SSH)
+## 왜 CycloneDDS 인가 (기본 FastDDS 대신)
 
-> 노트북엔 repo 가 없다. **repo 전체를 clone 할 필요 없이** RViz 설정
-> 파일(`race.rviz`) 하나만 젯슨에서 받아오면 된다.
+WiFi 환경에서 `/map`(67 KB)과 `/tf_static`은 **TRANSIENT_LOCAL** QoS를 쓴다.
+늦게 접속한 구독자(노트북 RViz)에게 과거 발행분을 다시 보내줘야 하는데,
+기본 FastDDS + WiFi 조합에서 이 재전달이 자주 실패했다.
+→ `ros2 topic list`에는 토픽이 뜨는데 RViz 화면은 간헐적으로만 나오는 증상.
 
-### A. 최초 1회 준비
-1. **ROS 2 Humble + rviz2 설치**
-   ```bash
-   sudo apt install ros-humble-rviz2      # 또는 ros-humble-desktop
-   ```
-2. **RViz 설정 파일을 젯슨에서 scp 로 받기** (파일 1개)
-   ```bash
-   scp jetson@192.168.45.246:~/yax/config/race.rviz ~/race.rviz
-   ```
-   > 설정이 나중에 바뀌면 이 scp 만 다시 하면 된다.
-   > (git 으로 관리하고 싶으면 clone 해도 되지만 필수는 아님)
-3. **네트워크 / 도메인 확인**
-   - 노트북과 젯슨이 같은 네트워크(`192.168.45.x`)
-   - `ROS_DOMAIN_ID` 가 양쪽 동일해야 함 (기본 미설정=0).
-     노트북 `~/.bashrc` 에서 도메인을 바꿔놨다면 젯슨과 같은 값으로.
+**CycloneDDS + 유니캐스트 설정**으로 전환한 뒤 안정화됨.
 
-### B. 매번 주행할 때 (터미널 2개)
-**① 젯슨 터미널 (SSH):**
+> ★ 젯슨(`race.sh`)과 노트북(`rviz.sh`) 양쪽이 같은 RMW를 써야 한다.
+> RMW가 한쪽이라도 다르면 토픽이 **하나도** 안 보인다.
+
+---
+
+## 노트북 최초 1회 설정
+
+### 1. ROS 2 Humble + rviz2 설치
+
+```bash
+sudo apt install ros-humble-desktop   # 또는 ros-humble-rviz2
+```
+
+### 2. CycloneDDS RMW 설치
+
+```bash
+sudo apt install ros-humble-rmw-cyclonedds-cpp
+```
+
+### 3. repo clone
+
+```bash
+git clone git@github.com:lloes098/26-jetson-f1tenth.git ~/yax
+```
+
+> `rviz.sh`가 repo 안의 `config/dds_env.sh`와 `race_script.yaml`을 읽어
+> CycloneDDS 환경변수를 자동으로 설정한다. repo 없이 수동으로 맞추려면
+> 아래 [수동 설정](#수동-설정-repo-없이) 참조.
+
+---
+
+## 매번 주행할 때
+
+**터미널 ①** — 젯슨 SSH:
 ```bash
 ssh jetson@192.168.45.246
-cd ~/yax && ./race.sh q2        # 평소대로 주행 (q1/q2/q3/race)
+cd ~/yax && ./race.sh q2      # 평소대로 주행
 ```
 
-**② 노트북 로컬 터미널 (SSH 아님):**
+**터미널 ②** — 노트북 로컬 (SSH 아님):
+```bash
+cd ~/yax
+./rviz.sh                     # CycloneDDS 설정 + RViz 실행
+```
+
+기동 시 아래 메시지가 뜨면 정상:
+```
+[dds] CycloneDDS  |  인터페이스 192.168.45.xxx 고정  |  피어 1개
+```
+
+젯슨 주행이 돌고 있으면 RViz에 맵·레이싱라인·차 위치가 바로 나온다.
+주행 전에 먼저 띄워도 됨 — 주행 시작하면 자동으로 채워진다.
+
+---
+
+## 수동 설정 (repo 없이)
+
+`rviz.sh` 대신 직접 명령어를 입력하는 경우, **반드시** 아래 환경변수를 먼저 설정한다:
+
 ```bash
 source /opt/ros/humble/setup.bash
-rviz2 -d ~/race.rviz            # RViz 뷰어 실행
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+rviz2 -d ~/race.rviz          # race.rviz 는 젯슨에서 scp 로 받아둔 파일
 ```
-젯슨에서 주행이 돌고 있으면 맵·레이싱라인·차 위치/궤적이 바로 나타난다.
-(주행 전에 먼저 띄워둬도 됨 — 주행 시작하면 자동으로 채워짐)
 
-> `rviz.sh` 는 repo 를 clone 한 경우를 위한 편의 스크립트다. 파일만 scp
-> 받은 경우엔 위처럼 `rviz2 -d ~/race.rviz` 를 직접 쓰면 된다.
+race.rviz를 받는 법:
+```bash
+scp jetson@192.168.45.246:~/yax/config/race.rviz ~/race.rviz
+```
+
+> 단, 이 방법은 인터페이스 고정·유니캐스트 피어 설정이 빠진 상태라
+> 같은 네트워크에서도 discovery 가 느리거나 불안정할 수 있다.
+> 가능하면 repo clone + `rviz.sh` 사용을 권장한다.
 
 ---
 
 ## 문제 해결
-- **RViz 는 떴는데 아무것도 안 보임** → 젯슨에서 race.sh 주행이 실제로 돌고
-  있는지, 그리고 노트북·젯슨의 네트워크/`ROS_DOMAIN_ID` 가 같은지 확인.
-  노트북 터미널에서 `ros2 topic list | grep waypoints_path` 로 토픽 수신 점검.
-- **차 위치(빨간 화살표)가 안 움직임** → AMCL 수렴 전이거나 로컬라이제이션
-  문제. RViz 의 2D Pose Estimate 로 초기 위치를 잡아줄 수도 있음.
-- **rviz2 없음** → `sudo apt install ros-humble-rviz2`
+
+### RViz는 뜨는데 아무것도 안 보임
+
+**원인 1 — RMW 불일치 (가장 흔함)**
+
+젯슨은 CycloneDDS, 노트북은 FastDDS 로 뜨면 토픽이 완전히 0이 된다.
+노트북 터미널에서 확인:
+```bash
+echo $RMW_IMPLEMENTATION    # rmw_cyclonedds_cpp 가 나와야 함
+ros2 topic list             # /waypoints_path 등이 보여야 함
+```
+안 보이면 `export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` 후 재시도.
+
+**원인 2 — 네트워크 / ROS_DOMAIN_ID 불일치**
+
+노트북과 젯슨이 같은 네트워크(`192.168.45.x`)인지, `ROS_DOMAIN_ID`가 양쪽 동일한지 확인.
+`~/.bashrc`에 `ROS_DOMAIN_ID`를 다른 값으로 설정해둔 경우 주의.
+
+**원인 3 — 주행이 안 돌고 있음**
+
+젯슨에서 `./race.sh q2` 가 실제로 살아 있는지 확인.
+
+---
+
+### `[dds] ⚠ CycloneDDS 미설치` 메시지
+
+```bash
+sudo apt install ros-humble-rmw-cyclonedds-cpp
+```
+
+노트북·젯슨 **양쪽** 다 설치해야 한다.
+
+---
+
+### `[dds] CycloneDDS (자동 탐색)` 메시지 (인터페이스 고정 없음)
+
+주행 내부망(`192.168.45.x`) 에 노트북이 연결되지 않은 상태.
+→ 주행망 WiFi 에 먼저 접속한 뒤 `rviz.sh` 를 다시 실행.
+
+---
+
+### `/map` 이나 레이싱라인만 안 나옴
+
+TRANSIENT_LOCAL 래치 데이터를 못 받은 것.
+주행 시작 직후 RViz 를 열면 이미 발행된 래치 메시지를 못 받을 수 있다.
+RViz 를 재시작하거나 잠깐 기다리면 재전송된다.
+
+---
+
+## 젯슨에서 발행하는 시각화 토픽
+
+| 토픽 | 내용 |
+|------|------|
+| `/waypoints_path` | 전체 레이싱라인 (속도 컬러, 1 Hz 재발행) |
+| `/car_path` | 차가 지나온 궤적 |
+| `/waypoint` | 현재 목표점 |
+| `/obstacle` | Q2 장애물 위치 |
+| `/map` | 점유 격자 지도 |
+| `/scan` | LiDAR 포인트 클라우드 |
+| `/amcl_pose` + TF | 차 위치 |
+
+viz 설정값과 무관하게 항상 발행되므로, **노트북에서 뷰어만 켜면 된다.**
+
+---
 
 ## 참고
-- `jetson.sh` (노트북에서 원격 실행) + `race_script.yaml` 의 `viz: true` 는
-  **jetson.sh 를 쓸 때만** RViz 를 자동 기동한다. 우리처럼 직접 SSH 로
-  race.sh 를 돌리는 경우엔 `rviz.sh` 를 쓰면 되고 viz 값은 영향 없다.
+
+- `race_script.yaml` → `network:` 섹션에서 DDS 종류·대역·피어 IP 관리
+- 젯슨 IP 가 바뀌면 `race_script.yaml` 의 `network.peers` 값만 수정
+- `config/dds_env.sh` — 실행 시 자기 IP를 찾아 CycloneDDS XML 생성 후 환경변수 export
+- `config/cyclonedds.xml.in` — CycloneDDS 설정 템플릿 (유니캐스트·버퍼·단편화 설정)
