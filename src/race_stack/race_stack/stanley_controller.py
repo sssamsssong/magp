@@ -25,6 +25,7 @@ Boundary files (Q2):  inner_bound.npy, outer_bound.npy  — pixel coords (int32)
 import csv
 import math
 import os
+import time
 from collections import deque
 
 import cv2
@@ -41,6 +42,12 @@ from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, ColorRGBA
 from visualization_msgs.msg import Marker, MarkerArray
+
+# ── 저장소 루트 (주행 종료 시 실주행 로그 저장용, gen_waypoints.py와 동일한 관례) ──
+# 이 파일: <repo>/src/race_stack/race_stack/stanley_controller.py
+_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # <repo>/src/race_stack
+_REPO_ROOT = (os.path.expanduser(os.environ['RACE_WS']) if os.environ.get('RACE_WS')
+              else os.path.dirname(os.path.dirname(_PKG_DIR)))
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -326,6 +333,10 @@ class StanleyController(Node):
         self._car_path = Path()
         self._car_path.header.frame_id = 'map'
         self._last_trail = None
+        # 실주행 경로 로그 — RViz 표시용 self._car_path와 별개로, 주행 종료 시
+        # logs/ 에 CSV로 저장해 게인 튜닝 비교에 쓴다 (save_run_log 참조).
+        self._trail_log = []
+        self._run_t0 = self.get_clock().now()
         self.create_timer(1.0, self._publish_racing_line)   # 1Hz 재발행
 
         # ── 고정 주기 제어 루프 (50Hz) ─────────────────────────────────
@@ -923,9 +934,20 @@ class StanleyController(Node):
                 math.hypot(x - self._last_trail[0], y - self._last_trail[1]) < 0.1:
             return
         self._last_trail = (x, y)
+        now = self.get_clock().now()
+
+        # 파일 쓰기는 여기서 하지 않는다 — 50Hz 제어 루프 안이라 디스크 I/O를
+        # 매 포인트마다 넣으면 지연 위험 (예전 _scan_cb 44.5ms 지연 버그와
+        # 같은 종류). 메모리에만 쌓고, 실제 저장은 노드 종료 시 save_run_log()에서
+        # 한 번에 flush 한다.
+        t = (now - self._run_t0).nanoseconds / 1e9
+        self._trail_log.append((t, x, y, float(self.speed)))
+        if len(self._trail_log) > 3000:
+            self._trail_log.pop(0)
+
         ps = PoseStamped()
         ps.header.frame_id = 'map'
-        ps.header.stamp = self.get_clock().now().to_msg()
+        ps.header.stamp = now.to_msg()
         ps.pose.position.x = float(x)
         ps.pose.position.y = float(y)
         ps.pose.orientation.w = 1.0
@@ -934,6 +956,40 @@ class StanleyController(Node):
             self._car_path.poses.pop(0)
         self._car_path.header.stamp = ps.header.stamp
         self.carpath_pub.publish(self._car_path)
+
+    def save_run_log(self):
+        """주행 종료 시 1회만 호출 — 실주행 경로 + 그 시점 게인(race_script.yaml)을
+        logs/ 밑에 팀 공유 폴더로 저장한다 (개인용 chat_log/ 와 다름, gitignore 안 됨).
+
+        웨이포인트 CSV 자체는 복사하지 않는다 — gains.yaml 안에 이미
+        map_name/waypoints 필드로 "어떤 웨이포인트를 썼는지" 경로가 남으므로,
+        나중에 driven_path.csv 와 그 경로를 함께 읽어 비교하면 된다.
+        """
+        if not self._trail_log:
+            return
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        run_dir = os.path.join(_REPO_ROOT, 'logs', f'{ts}_{self.mode}')
+        try:
+            os.makedirs(run_dir, exist_ok=True)
+
+            with open(os.path.join(run_dir, 'driven_path.csv'), 'w', newline='') as f:
+                w = csv.writer(f)
+                w.writerow(['t', 'x', 'y', 'speed'])
+                for t, x, y, v in self._trail_log:
+                    w.writerow([f'{t:.3f}', f'{x:.4f}', f'{y:.4f}', f'{v:.3f}'])
+
+            race_script = os.environ.get('RACE_SCRIPT',
+                                          os.path.expanduser('~/race_script.yaml'))
+            if os.path.exists(race_script):
+                with open(race_script) as f:
+                    cfg_text = f.read()
+                with open(os.path.join(run_dir, 'gains.yaml'), 'w') as f:
+                    f.write(cfg_text)
+
+            self.get_logger().info(
+                f'[run_log] {len(self._trail_log)}점, {run_dir} 에 저장')
+        except Exception as e:
+            self.get_logger().warn(f'[run_log] 저장 실패: {e}')
 
     def _pub_wp_marker(self, target: np.ndarray):
         m = Marker()
@@ -995,6 +1051,7 @@ def main():
         pass
     finally:
         node._publish_cmd(0.0, 0.0)
+        node.save_run_log()
         node.destroy_node()
         rclpy.shutdown()
 
