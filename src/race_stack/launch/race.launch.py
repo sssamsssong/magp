@@ -163,27 +163,52 @@ def generate_launch_description():
     # ---------- 5. 컨트롤러 (AMCL 수렴 시간 확보를 위해 8초 지연 기동) ----------
     # lifecycle_manager 가 5초에 뜬 뒤 map_server→amcl 활성화까지 마쳐야 하므로
     # 그보다 뒤여야 한다. (앞서면 pose 가 None 이라 컨트롤러가 헛돈다)
+    # ★ Q2 장애물 회피 기하 파라미터(차폭/여유/통로폭 등)는 stanley 와
+    #   pure_pursuit 이 공유한다 (같은 트랙·같은 차라 튜닝을 하나로 유지).
+    #   경계 파일도 마찬가지로 maps/<map_name>/ 하나를 같이 본다.
+    sc = cfg.get('stanley', {})
+    bound_dir = sc.get('bound_dir', '') or \
+        os.path.join(race_data, 'maps', cfg['map_name'])
+
     if controller == 'pure_pursuit':
         pp = cfg['pure_pursuit']
         ctrl = Node(
             package='race_stack', executable='pure_pursuit',
             name='pure_pursuit', output='screen',
-            parameters=[{'waypoint_file': wp_csv,
+            parameters=[{'mode': mode,
+                         'waypoint_file': wp_csv,
                          'max_speed': max_speed, 'min_speed': min_speed,
                          'lookahead': float(pp['lookahead']),
                          'lookahead_speed_gain': float(pp['lookahead_speed_gain']),
                          'wheelbase': float(pp['wheelbase']),
                          'max_steer': float(pp['max_steer']),
-                         'curvature_slowdown': float(pp['curvature_slowdown'])}])
+                         'curvature_slowdown': float(pp['curvature_slowdown']),
+                         # ── Q2 장애물 회피 (옵션) ──────────────────────────
+                         # pp.obstacle_avoid_enabled 하나로 껐다/켠다
+                         # (race_script.yaml 의 pure_pursuit 절 참조).
+                         'obstacle_avoid_enabled':
+                             bool(pp.get('obstacle_avoid_enabled', False)),
+                         'map_yaml':        map_yaml,
+                         'bound_dir':       bound_dir,
+                         'car_width':       float(sc.get('car_width',       0.30)),
+                         'obstacle_margin': float(sc.get('obstacle_margin', 0.12)),
+                         'obstacle_decel':  float(sc.get('obstacle_decel',  0.85)),
+                         'obstacle_shift_rate': float(sc.get('obstacle_shift_rate', 0.9)),
+                         'obs_corridor_half_width': float(sc.get('obs_corridor_half_width', 0.30)),
+                         'obs_release_scale':       float(sc.get('obs_release_scale',       1.6)),
+                         'obs_horizon_sec': float(sc.get('obs_horizon_sec', 0.3)),
+                         'obs_horizon_min': float(sc.get('obs_horizon_min', 0.5)),
+                         'obs_horizon_max': float(sc.get('obs_horizon_max', 3.0)),
+                         'obs_vote_frames': int(  sc.get('obs_vote_frames',  5)),
+                         'laser_offset_x':  0.27, 'laser_offset_y': 0.0,
+                         'grid_xmin':       0.35, 'grid_xmax':      5.0,
+                         'grid_ymin':      -2.5,  'grid_ymax':      2.5,
+                         'grid_res':        0.04, 'grid_safe_dist':  0.3,
+                         'bound_ignore_px': 7.5}])
 
     elif controller == 'stanley':
-        sc = cfg.get('stanley', {})
         pp = cfg.get('pure_pursuit', {})
         wa = cfg.get('wall_avoid', {})
-
-        # Q2: boundary files live in  maps/<map_name>/  subdirectory
-        bound_dir = sc.get('bound_dir', '') or \
-            os.path.join(race_data, 'maps', cfg['map_name'])
 
         ctrl = Node(
             package='race_stack', executable='stanley_controller',

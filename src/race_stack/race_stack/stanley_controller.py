@@ -968,7 +968,10 @@ class StanleyController(Node):
         if not self._trail_log:
             return
         ts = time.strftime('%Y%m%d_%H%M%S')
-        run_dir = os.path.join(_REPO_ROOT, 'logs', f'{ts}_{self.mode}')
+        # ★ 폴더명에 컨트롤러까지 넣는다 — q2 를 stanley/pure_pursuit 둘 다로
+        #   돌리게 된 뒤로는 mode 만으론 어느 주행인지 구분이 안 된다.
+        #   gains.yaml 을 열어봐야 알던 정보를 폴더명만 보고 바로 알 수 있게.
+        run_dir = os.path.join(_REPO_ROOT, 'logs', f'{ts}_{self.mode}_stanley')
         try:
             os.makedirs(run_dir, exist_ok=True)
 
