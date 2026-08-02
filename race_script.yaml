@@ -21,8 +21,8 @@ mode: q2
 #    (주최측 배포 맵을 maps/ 폴더에 넣고 이름만 적으면 됨)
 #    웨이포인트: race_stack/waypoints/<waypoints>.csv  (x,y,speed)
 # ------------------------------------------------------------
-map_name: track_2nd_clean           # maps/track_2nd_clean.yaml
-waypoints: track_2nd_clean_wp       # waypoints/track_2nd_clean_wp.csv
+map_name: sohot_clean           # maps/track_2nd_clean.yaml
+waypoints: sohot_clean_wp       # waypoints/track_2nd_clean_wp.csv
 
 # ------------------------------------------------------------
 # 시뮬레이터 스폰 위치 (map 좌표계)
@@ -63,7 +63,7 @@ sim_vehicle:
 #    pure_pursuit = 강제로 Pure Pursuit
 #    gap_follower = 강제로 Gap Follower
 # ------------------------------------------------------------
-controller: stanley         # auto | stanley | pure_pursuit | gap_follower
+controller: gap_follower         # auto | stanley | pure_pursuit | gap_follower
 
 # ------------------------------------------------------------
 # 3-1. 실시간 시각화 (RViz)  — 맵+레이싱라인+차 위치/궤적+LiDAR+목표점
@@ -194,9 +194,9 @@ safety:
 # 9. 로컬라이제이션 (AMCL)
 # ------------------------------------------------------------
 localization:
-  init_x: -1.0848           # 시작 위치 초기 추정 (map 좌표)
-  init_y: -0.142
-  init_yaw: 0.0167          # 라디안
+  init_x: -0.2184           # 시작 위치 초기 추정 (map 좌표)
+  init_y: -2.3503
+  init_yaw: -0.0082          # 라디안
 
 # ------------------------------------------------------------
 # 10. 조이스틱 수동 조종 (./race.sh joy 로 실행)
