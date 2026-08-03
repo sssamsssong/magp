@@ -59,7 +59,7 @@ setup_dds () {
     fi
     export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
-    local subnet; subnet=$(_dds_yaml_get 'network.subnet' '192.168.45.')
+    local subnet; subnet=$(_dds_yaml_get 'network.subnet' '192.168.50.')
     local peers;  peers=$(_dds_yaml_get 'network.peers' '')
 
     # 주행망 대역에서 내 IP 찾기

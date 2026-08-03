@@ -8,7 +8,7 @@
 ## 0. SSH 연결 (노트북 → 젯슨)
 
 ```bash
-ssh jetson@192.168.45.246
+ssh jetson@192.168.50.57
 ```
 
 > 비밀번호 없이 접속하려면 (선택사항):
@@ -16,7 +16,7 @@ ssh jetson@192.168.45.246
 ```bash
 # 노트북에서 한 번만 실행
 ssh-keygen -t ed25519
-ssh-copy-id jetson@192.168.45.246
+ssh-copy-id jetson@192.168.50.57
 ```
 
 > 노트북에 이 repo를 클론했다면 `./jetson.sh q1|q2|savemap <이름>|log <이름>|stop|status|attach` 로
@@ -318,10 +318,10 @@ sudo apt-get install -y usbip
 sudo modprobe vhci-hcd
 
 # 젯슨에서 공유 중인 장치 확인
-usbip list -r 192.168.45.246
+usbip list -r 192.168.50.57
 
 # VESC 연결
-sudo usbip attach -r 192.168.45.246 -b 1-2.1
+sudo usbip attach -r 192.168.50.57 -b 1-2.1
 
 # 연결 확인
 ls /dev/ttyACM*
@@ -332,7 +332,7 @@ ls /dev/ttyACM*
 ```powershell
 # 관리자 PowerShell에서
 winget install usbipd
-usbipd attach --remote 192.168.45.246 --busid 1-2.1
+usbipd attach --remote 192.168.50.57 --busid 1-2.1
 # 장치 관리자에서 COMx 포트 확인 후 VESC Tool에서 해당 포트 선택
 ```
 
@@ -362,7 +362,7 @@ sudo usbip unbind -b 1-2.1
 ```
 [공유기]
    ├── 노트북 (Linux)
-   └── 젯슨  (192.168.45.246)
+   └── 젯슨  (192.168.50.57)
 ```
 
 ### 최초 1회 — 패키지 설치 및 비밀번호 설정 (젯슨에서)
@@ -408,7 +408,7 @@ x11vnc -display :1 -forever -noxdamage -rfbauth ~/.vnc/passwd -rfbport 5900 -sha
 #### 노트북(Linux)에서
 
 ```bash
-vncviewer 192.168.45.246:5900
+vncviewer 192.168.50.57:5900
 ```
 
 ---
@@ -450,7 +450,7 @@ pkill x11vnc; pkill openbox; pkill Xvfb
 ### 1단계 — 맵 따기
 
 ```bash
-ssh jetson@192.168.45.246
+ssh jetson@192.168.50.57
 cd ~/yax   # race.sh 있는 경로
 
 # 조이스틱으로 맵핑 (bringup + SLAM + joystick 한번에)

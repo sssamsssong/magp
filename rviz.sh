@@ -9,7 +9,7 @@
 #  전제:
 #    - 노트북에 ROS 2 Humble + rviz2 설치
 #      (sudo apt install ros-humble-desktop  또는  ros-humble-rviz2)
-#    - 노트북과 젯슨이 같은 네트워크(192.168.45.x)
+#    - 노트북과 젯슨이 같은 네트워크(192.168.50.x)
 #    - 양쪽 ROS_DOMAIN_ID 동일 (기본 미설정=0). 노트북 ~/.bashrc 에서
 #      ROS_DOMAIN_ID 를 바꿔놨다면 젯슨과 같은 값으로 맞출 것.
 #

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-JETSON_HOST="${JETSON_HOST:-jetson@192.168.45.246}"
+JETSON_HOST="${JETSON_HOST:-jetson@192.168.50.57}"
 JETSON_WS="${JETSON_WS:-/home/jetson/f1tenth_ws}"
 JETSON_REPO="${JETSON_REPO:-/home/jetson/yax}"   # race_script.yaml 원본 위치
 SESSION="${ROBORACER_SESSION:-roboracer}"
