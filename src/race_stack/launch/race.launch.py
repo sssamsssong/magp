@@ -96,8 +96,27 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(f1tenth_share, 'launch', 'bringup_launch.py'))))
 
-    # ---------- 2. 맵 서버 + AMCL + lifecycle ----------
+    # ---------- 1-1. odom TF 발행자 (IMU yaw 융합) ----------
+    # ★ vesc.yaml 에서 vesc_to_odom_node.publish_tf: false 로 껐기 때문에
+    #   odom→base_link TF 는 이 노드만 발행한다. 빠지면 AMCL 이 전부 멈춘다.
+    #   imu_yaw: false 면 들어온 odom 을 그대로 중계해 기존 동작과 동일해진다.
     loc = cfg.get('localization', {})
+    nodes.append(Node(
+        package='race_stack', executable='imu_odom', name='imu_odom',
+        output='screen',
+        parameters=[{
+            'imu_yaw':             bool( loc.get('imu_yaw',             True)),
+            'imu_topic':           str(  loc.get('imu_topic',           '/sensors/imu/raw')),
+            'gyro_units':          str(  loc.get('imu_gyro_units',      'deg')),
+            'yaw_axis':            str(  loc.get('imu_yaw_axis',        'z')),
+            'yaw_sign':            float(loc.get('imu_yaw_sign',        1.0)),
+            'bias_warmup_sec':     float(loc.get('imu_bias_warmup_sec', 3.0)),
+            'bias_alpha':          float(loc.get('imu_bias_alpha',      0.002)),
+            'stationary_speed':    float(loc.get('imu_stationary_speed', 0.05)),
+            'stationary_rate_deg': float(loc.get('imu_stationary_rate_deg', 2.0)),
+        }]))
+
+    # ---------- 2. 맵 서버 + AMCL + lifecycle ----------
     nodes.append(Node(
         package='nav2_map_server', executable='map_server', name='map_server',
         output='screen',

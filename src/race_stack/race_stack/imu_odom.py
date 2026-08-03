@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""
+imu_odom.py — odom 의 yaw 를 VESC IMU 자이로로 갈아끼운다.
+
+왜 필요한가
+───────────
+`vesc_to_odom` 은 `use_servo_cmd_to_calc_angular_velocity: true` 라서 각속도를
+**서보 명령값**으로 계산한다 (ω = v·tan(δ)/L). 명령은 목표값이라 실제 바퀴보다
+앞서고, 기구학 자전거 모델은 타이어 슬립각을 0 으로 가정한다. 둘 다 yaw 를
+과대 추정하는 방향이라, 트랙이 커지자 AMCL 이 누적 오차로 발산했다 (2026-08-02).
+
+자이로의 yaw rate 는 서보 지연·슬립과 무관한 **실측**이다. 병진 속도는 휠
+오도메트리가 정확하므로 그대로 두고, **회전만** 자이로로 바꾼다.
+
+★ AMCL 은 `/odom` 토픽이 아니라 `odom→base_link` TF 를 본다.
+  그래서 이 노드가 TF 발행을 맡고, `config/vesc.yaml` 에서
+  `vesc_to_odom_node.publish_tf: false` 로 원래 발행자를 끈다.
+  **이 노드가 안 뜨면 odom TF 자체가 없다** — AMCL·SLAM 이 전부 멈춘다.
+  그래서 `imu_yaw: false` 여도 노드는 항상 뜨고, 그때는 들어온 odom 을
+  그대로 중계(pass-through)해 기존 동작과 동일해진다.
+
+바이어스
+────────
+자이로는 정지 상태에서도 0 이 아닌 값을 낸다(zero-rate output). 상수 오차라
+적분하면 시간에 비례해 yaw 가 샌다 — 실측 0.11 deg/s 면 118초 랩에 13.3°.
+그런데 이 값은 **부팅할 때마다 다르고 보드가 데워지면 또 변한다.** 그래서
+상수로 박지 않고 **정지할 때마다 직접 잰다**:
+  - 기동 직후 정지 구간에서 warmup_sec 동안 평균 → 초기 바이어스
+  - 이후에도 정지가 감지되면 느린 지수평균(alpha)으로 계속 갱신
+
+축 매핑 (2026-08-02 `imu_axis_check.py` 실측)
+──────────────────────────────────────────────
+    차량 전방 = IMU -y,  차량 좌측 = IMU +x,  차량 위 = IMU +z
+    → 순수 z축 90° 회전. yaw 축은 z 그대로, 좌회전 = +z 로 부호까지 일치.
+    회전축이 z 라 x/y 스왑은 yaw 에 영향이 없다. 그래서 기본값이 axis=z, sign=+1.
+    (가속도까지 쓸 일이 생기면 그때 x/y 스왑이 필요하다)
+
+발행
+────
+  /odom_imu (nav_msgs/Odometry)  — 보정된 오도메트리
+  TF odom→base_link              — AMCL·SLAM 이 실제로 보는 것
+"""
+import math
+
+import numpy as np
+import rclpy
+from geometry_msgs.msg import TransformStamped
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Imu
+from tf2_ros import TransformBroadcaster
+
+AXIS_IDX = {'x': 0, 'y': 1, 'z': 2}
+
+
+def yaw_from_quat(q):
+    siny = 2.0 * (q.w * q.z + q.x * q.y)
+    cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    return math.atan2(siny, cosy)
+
+
+def quat_from_yaw(yaw):
+    return (0.0, 0.0, math.sin(yaw * 0.5), math.cos(yaw * 0.5))
+
+
+class ImuOdom(Node):
+    def __init__(self):
+        super().__init__('imu_odom')
+
+        self.declare_parameter('imu_yaw', True)          # False = 그대로 중계
+        self.declare_parameter('imu_topic', '/sensors/imu/raw')
+        self.declare_parameter('odom_topic', '/odom')
+        self.declare_parameter('out_topic', '/odom_imu')
+        self.declare_parameter('odom_frame', 'odom')
+        self.declare_parameter('base_frame', 'base_link')
+        self.declare_parameter('publish_tf', True)
+        # 자이로 원본 단위 — VESC 는 deg/s 로 준다 (vesc_packet.cpp:627)
+        self.declare_parameter('gyro_units', 'deg')      # deg | rad
+        self.declare_parameter('yaw_axis', 'z')
+        self.declare_parameter('yaw_sign', 1.0)
+        # 바이어스 추정
+        self.declare_parameter('bias_warmup_sec', 3.0)
+        self.declare_parameter('bias_alpha', 0.002)      # 정지 중 갱신 속도
+        self.declare_parameter('stationary_speed', 0.05)     # m/s
+        self.declare_parameter('stationary_rate_deg', 2.0)   # deg/s
+
+        self.use_imu = self.p('imu_yaw')
+        self.axis = AXIS_IDX.get(str(self.p('yaw_axis')).lower(), 2)
+        self.sign = float(self.p('yaw_sign'))
+        self.to_rad = (math.pi / 180.0
+                       if str(self.p('gyro_units')).lower().startswith('deg') else 1.0)
+
+        # 적분 상태
+        self.x = 0.0
+        self.y = 0.0
+        self.yaw = 0.0
+        self.speed = 0.0
+        self.last_t = None
+
+        # 바이어스 상태
+        self.bias = 0.0
+        self.bias_ready = False
+        self.warm = []
+        self.warm_t0 = None
+        self.last_odom = None
+        self.last_report = None
+
+        self.pub = self.create_publisher(Odometry, self.p('out_topic'), 10)
+        self.tfb = TransformBroadcaster(self) if self.p('publish_tf') else None
+        self.create_subscription(Odometry, self.p('odom_topic'), self.odom_cb, 20)
+        self.create_subscription(Imu, self.p('imu_topic'), self.imu_cb,
+                                 qos_profile_sensor_data)
+
+        mode = 'IMU yaw 사용' if self.use_imu else 'pass-through (기존 odom 그대로)'
+        self.get_logger().info(
+            f'ImuOdom 시작 — {mode}, 축={self.p("yaw_axis")}({self.sign:+.0f}), '
+            f'단위={self.p("gyro_units")}')
+        if not self.use_imu:
+            self.get_logger().warn(
+                'imu_yaw=false — TF 만 중계합니다. yaw 는 여전히 서보 명령 기반입니다.')
+
+    def p(self, name):
+        return self.get_parameter(name).value
+
+    # ── 휠 오도메트리: 병진 속도만 가져온다 ────────────────────
+    def odom_cb(self, msg: Odometry):
+        self.speed = msg.twist.twist.linear.x
+        self.last_odom = msg
+        if not self.use_imu:
+            # 중계 모드: 들어온 그대로 내보낸다 (기존 동작과 동일)
+            self.publish(msg.header.stamp,
+                         msg.pose.pose.position.x,
+                         msg.pose.pose.position.y,
+                         yaw_from_quat(msg.pose.pose.orientation),
+                         msg.twist.twist.angular.z)
+
+    # ── IMU: yaw 적분 + 위치 추측항법 ──────────────────────────
+    def imu_cb(self, msg: Imu):
+        if not self.use_imu:
+            return
+
+        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if t <= 0.0:
+            t = self.get_clock().now().nanoseconds * 1e-9
+
+        w_raw = (msg.angular_velocity.x, msg.angular_velocity.y,
+                 msg.angular_velocity.z)[self.axis] * self.sign * self.to_rad
+
+        # 정지 판정 — 바퀴가 안 돌고 자이로도 잠잠할 때만 바이어스를 건드린다.
+        # 속도만 보면 제자리에서 밀리는 경우를 놓치고, 자이로만 보면 등속
+        # 직진 주행을 정지로 오인한다. 둘 다 만족해야 한다.
+        rate_thr = math.radians(float(self.p('stationary_rate_deg')))
+        still = (abs(self.speed) < float(self.p('stationary_speed'))
+                 and abs(w_raw - self.bias) < rate_thr)
+
+        if still:
+            if not self.bias_ready:
+                if self.warm_t0 is None:
+                    self.warm_t0 = t
+                self.warm.append(w_raw)
+                if t - self.warm_t0 >= float(self.p('bias_warmup_sec')) and len(self.warm) > 20:
+                    self.bias = float(np.mean(self.warm))
+                    self.bias_ready = True
+                    self.get_logger().info(
+                        f'자이로 바이어스 확정: {math.degrees(self.bias):+.4f} deg/s '
+                        f'({len(self.warm)}샘플) — 정지 시마다 갱신됩니다')
+            else:
+                a = float(self.p('bias_alpha'))
+                self.bias += a * (w_raw - self.bias)
+        elif not self.bias_ready:
+            # 바이어스도 못 잰 채 움직이기 시작했다 — 적분은 하되 경고
+            self.warm.clear()
+            self.warm_t0 = None
+            if self.last_report is None or t - self.last_report > 5.0:
+                self.last_report = t
+                self.get_logger().warn(
+                    '정지 구간 없이 주행 시작 — 자이로 바이어스 미보정 상태입니다. '
+                    '출발 전 몇 초 세워두면 자동으로 잡힙니다.')
+
+        w = w_raw - self.bias
+
+        if self.last_t is None:
+            self.last_t = t
+            return
+        dt = t - self.last_t
+        self.last_t = t
+        if dt <= 0.0 or dt > 0.5:      # 시계 점프·끊김 방어
+            return
+
+        # 추측항법: 회전은 자이로, 병진은 휠 오도메트리
+        self.yaw = math.atan2(math.sin(self.yaw + w * dt), math.cos(self.yaw + w * dt))
+        self.x += self.speed * math.cos(self.yaw) * dt
+        self.y += self.speed * math.sin(self.yaw) * dt
+
+        self.publish(msg.header.stamp, self.x, self.y, self.yaw, w)
+
+    # ── 발행 ───────────────────────────────────────────────────
+    def publish(self, stamp, x, y, yaw, w):
+        qx, qy, qz, qw = quat_from_yaw(yaw)
+
+        od = Odometry()
+        od.header.stamp = stamp
+        od.header.frame_id = self.p('odom_frame')
+        od.child_frame_id = self.p('base_frame')
+        od.pose.pose.position.x = x
+        od.pose.pose.position.y = y
+        od.pose.pose.orientation.x = qx
+        od.pose.pose.orientation.y = qy
+        od.pose.pose.orientation.z = qz
+        od.pose.pose.orientation.w = qw
+        od.twist.twist.linear.x = self.speed
+        od.twist.twist.angular.z = w
+        self.pub.publish(od)
+
+        if self.tfb is not None:
+            tf = TransformStamped()
+            tf.header.stamp = stamp
+            tf.header.frame_id = self.p('odom_frame')
+            tf.child_frame_id = self.p('base_frame')
+            tf.transform.translation.x = x
+            tf.transform.translation.y = y
+            tf.transform.rotation.x = qx
+            tf.transform.rotation.y = qy
+            tf.transform.rotation.z = qz
+            tf.transform.rotation.w = qw
+            self.tfb.sendTransform(tf)
+
+
+def main():
+    rclpy.init()
+    node = ImuOdom()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

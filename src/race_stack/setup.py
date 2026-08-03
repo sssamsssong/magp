@@ -42,6 +42,7 @@ setup(
             'waypoint_logger    = race_stack.waypoint_logger:main',
             'gen_waypoints      = race_stack.gen_waypoints:main',
             'sim_bridge         = race_stack.sim_bridge:main',
+            'imu_odom           = race_stack.imu_odom:main',
         ],
     },
 )

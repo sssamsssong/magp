@@ -33,8 +33,14 @@ vesc_to_odom_node:
   ros__parameters:
     odom_frame: odom
     base_frame: base_link
-    # publish odom to base link tf
-    publish_tf: true
+    # ★ 2026-08-03: odom→base_link TF 발행을 race_stack 의 imu_odom 노드로 넘겼다.
+    #   AMCL·slam_toolbox 는 /odom 토픽이 아니라 이 TF 를 본다. 여기서 true 로 두면
+    #   같은 transform 을 두 노드가 발행해 TF 트리가 깨진다 (둘이 번갈아 이겨서
+    #   위치가 튄다). imu_odom 은 이 노드의 /odom 을 받아 yaw 만 자이로로 바꿔
+    #   다시 발행한다.
+    #   ※ 이 값이 false 인 상태에서 imu_odom 없이 bringup 만 띄우면 odom TF 가
+    #     아예 없다. race.launch.py / mapping.launch.py 는 항상 같이 띄운다.
+    publish_tf: false
     use_servo_cmd_to_calc_angular_velocity: true
     # measured axle-to-axle on this car: 33cm
     wheelbase: 0.33
