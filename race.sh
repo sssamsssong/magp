@@ -46,6 +46,23 @@ PKG_SHARE_WP="$WS/src/race_stack/waypoints"
 source /opt/ros/humble/setup.bash
 source "$WS/install/setup.bash"
 
+# ★ 다른 워크스페이스가 race_stack 을 가로채지 않는지 확인 (2026-08-03 실제로 겪음)
+#   colcon 은 빌드 시점에 소싱돼 있던 prefix 를 install/setup.sh 에 부모로 기록한다.
+#   ~/yax 에서 한 번 colcon build 하고 그 상태로 f1tenth_ws 를 빌드했더니
+#   f1tenth_ws/install/setup.sh 가 ~/yax/install 을 먼저 소싱하게 됐고, 그래서
+#   여기서 $WS 를 source 해도 한 달 전 스냅샷이 이겨서 새 노드를 "not found" 로
+#   죽었다. 조용히 옛 코드가 도는 쪽이 더 위험하므로 명시적으로 막는다.
+ACTUAL_PREFIX="$(ros2 pkg prefix race_stack 2>/dev/null || true)"
+if [ -n "$ACTUAL_PREFIX" ] && [ "$ACTUAL_PREFIX" != "$WS/install/race_stack" ]; then
+    echo "[race.sh] ✗ race_stack 이 엉뚱한 워크스페이스에서 로드됩니다."
+    echo "          기대: $WS/install/race_stack"
+    echo "          실제: $ACTUAL_PREFIX"
+    echo "          → 그 경로의 install/build 를 치우고, 깨끗한 셸에서 재빌드하세요:"
+    echo "             env -i HOME=\$HOME PATH=\$PATH bash -c 'source /opt/ros/humble/setup.bash; \\"
+    echo "               cd $WS && colcon build --packages-select race_stack --symlink-install'"
+    exit 1
+fi
+
 # DDS 설정 (race_script.yaml 의 network: 섹션). 노트북에서 RViz 로 관찰할 때
 # 통신 안정성을 좌우한다 — rviz.sh 도 같은 파일을 source 해서 양쪽을 맞춘다.
 export RACE_SCRIPT="$SCRIPT_DIR/race_script.yaml"
