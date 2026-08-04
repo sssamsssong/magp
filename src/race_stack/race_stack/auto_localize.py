@@ -39,9 +39,9 @@ import yaml
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from PIL import Image
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32
 
 
 class AutoLocalize(Node):
@@ -83,6 +83,11 @@ class AutoLocalize(Node):
 
         self.pub = self.create_publisher(PoseWithCovarianceStamped,
                                          '/initialpose', 10)
+        # 정합 결과(평균오차 m)를 알려 mission_manager 가 "출발 준비" 판정에 쓴다.
+        # 늦게 뜨는 구독자도 받도록 래치.
+        self.fit_pub = self.create_publisher(
+            Float32, '/race/localized',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(LaserScan, str(gp('scan_topic')),
                                  self._scan_cb, qos_profile_sensor_data)
         self.create_subscription(Bool, '/race/relocalize', self._redo_cb, 10)
@@ -211,6 +216,7 @@ class AutoLocalize(Node):
         cov[35] = (2.0 * math.radians(float(gp('step_yaw_deg')))) ** 2
         msg.pose.covariance = cov
         self.pub.publish(msg)
+        self.fit_pub.publish(Float32(data=float(fit)))
         self.get_logger().info('/initialpose 발행 — AMCL 이 이 자리로 재시드합니다')
 
 

@@ -15,8 +15,9 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from geometry_msgs.msg import PoseWithCovarianceStamped
+from ackermann_msgs.msg import AckermannDriveStamped
 from sensor_msgs.msg import Joy
-from std_msgs.msg import Bool, Int32
+from std_msgs.msg import Bool, Float32, Int32
 
 
 class MissionManager(Node):
@@ -61,19 +62,33 @@ class MissionManager(Node):
         self._amcl_last = None            # (x, y, 공분산 대각합)
         self._prev_btn = 0
         self._go_lock = threading.Lock()
+        # ── 출발 준비 판정 ─────────────────────────────────────────────
+        # "노드가 떴다" 와 "출발해도 된다" 는 다르다. 셋이 다 되어야 준비 완료:
+        #   1) auto_localize 가 스캔을 맵에 맞춰 /initialpose 를 쐈나
+        #   2) 그 결과로 AMCL 이 /amcl_pose 를 내고 있나
+        #   3) 컨트롤러가 살아서 /drive 를 발행하고 있나
+        # 하나라도 빠진 채 출발하면 초반 몇 미터를 틀린 위치로 달린다.
+        self._fit = None                  # 정합 평균오차 (m)
+        self._drive_ok = False            # 컨트롤러가 /drive 를 내고 있나
+        self._ready = False               # 준비 완료 배너를 띄웠나
+        self._force_t = None              # 미준비 상태에서 버튼 누른 시각
 
         self.set_enabled(self.started)
         self.create_timer(0.5, self.check_time)
 
         if self.gate:
+            latched_in = QoSProfile(depth=1,
+                                    durability=DurabilityPolicy.TRANSIENT_LOCAL)
             self.create_subscription(Joy, '/joy', self.joy_cb, 10)
             self.create_subscription(Bool, '/race/go', self.go_cb, 10)
+            self.create_subscription(Float32, '/race/localized',
+                                     self.fit_cb, latched_in)
+            self.create_subscription(AckermannDriveStamped, '/drive',
+                                     self.drive_cb, 10)
             self.create_timer(2.0, self._wait_banner)
             if bool(self.p('start_key')):
                 threading.Thread(target=self._key_thread, daemon=True).start()
-            self.get_logger().info(
-                '════════ 출발 대기 ════════  '
-                f"Enter / 조이스틱 버튼{self.p('start_button')} / ./race.sh go")
+            self.get_logger().info('초기화 중 — 위치 정렬을 기다립니다…')
         self.get_logger().info(
             f"MissionManager: laps={self.p('laps')}, "
             f"time_limit={self.p('time_limit_sec')}s, "
@@ -81,21 +96,52 @@ class MissionManager(Node):
 
     # ── 출발 게이트 ────────────────────────────────────────────────────────
 
-    def _wait_banner(self):
-        """대기 중 상태를 2초마다 보여준다.
+    def _missing(self):
+        """아직 안 된 준비 항목 목록."""
+        m = []
+        if self._fit is None:
+            m.append('위치 정렬(auto_localize)')
+        if not self._amcl_ok:
+            m.append('AMCL pose')
+        if not self._drive_ok:
+            m.append('컨트롤러(/drive)')
+        return m
 
-        여기서 AMCL 수렴 여부를 같이 찍는 게 핵심이다. 예전엔 출발과 동시에
-        AMCL 이 수렴을 시작해서, 초반 몇 미터를 틀린 위치로 달렸다.
-        게이트로 잡아두는 동안 RViz 에서 스캔-맵 정합을 확인하고 출발하면 된다.
-        """
+    def _wait_banner(self):
+        """준비될 때까지 남은 항목을 2초마다 보여주고, 다 되면 한 번만 크게 알린다."""
         if self.started:
             return
-        if self._amcl_last is None:
-            amcl = '✗ 미수신 (정지 중엔 안 나올 수 있음 — RViz 2D Pose Estimate 로 한 번 찍어볼 것)'
+        missing = self._missing()
+        if missing:
+            self.get_logger().info(f'초기화 중 — 남은 항목: {", ".join(missing)}')
+            return
+        if not self._ready:
+            self._ready = True
+            x, y, cov = self._amcl_last
+            btn = self.p('start_button')
+            self.get_logger().info(
+                '\n'
+                '╔══════════════════════════════════════════════════════╗\n'
+                '║              출  발  준  비  완  료                  ║\n'
+                '╠══════════════════════════════════════════════════════╣\n'
+                f'║  위치 정합  평균오차 {self._fit*100:5.1f} cm                      ║\n'
+                f'║  AMCL       ({x:+.2f}, {y:+.2f})  공분산합 {cov:.3f}          ║\n'
+                '║  컨트롤러   OK                                       ║\n'
+                '╠══════════════════════════════════════════════════════╣\n'
+                f'║  조이스틱 버튼{btn} 을 누르면 출발합니다              ║\n'
+                '╚══════════════════════════════════════════════════════╝')
         else:
             x, y, cov = self._amcl_last
-            amcl = f'✓ ({x:+.2f}, {y:+.2f})  공분산합 {cov:.3f}'
-        self.get_logger().info(f'[출발 대기] AMCL {amcl}')
+            self.get_logger().info(
+                f'[출발 대기] 정합 {self._fit*100:.1f}cm | AMCL ({x:+.2f}, {y:+.2f}) '
+                f'공분산합 {cov:.3f} — 버튼을 누르세요')
+
+    def fit_cb(self, msg: Float32):
+        self._fit = float(msg.data)
+        self.get_logger().info(f'위치 정렬 완료 — 평균오차 {self._fit*100:.1f}cm')
+
+    def drive_cb(self, msg: AckermannDriveStamped):
+        self._drive_ok = True
 
     def _key_thread(self):
         """터미널 Enter 대기.
@@ -127,6 +173,21 @@ class MissionManager(Node):
             self.go('./race.sh go')
 
     def go(self, src: str):
+        # 준비가 안 됐으면 한 번은 막는다 — 무엇이 빠졌는지 알려주는 게 목적이다.
+        # 다만 대회에서 못 나가는 것이 최악이므로, 3초 안에 다시 누르면 강행한다.
+        missing = self._missing()
+        if missing and not self.started:
+            now = self.get_clock().now()
+            recent = (self._force_t is not None
+                      and (now - self._force_t).nanoseconds * 1e-9 < 3.0)
+            if not recent:
+                self._force_t = now
+                self.get_logger().warn(
+                    f'⚠ 아직 준비 안 됨: {", ".join(missing)} — '
+                    '그래도 출발하려면 3초 안에 한 번 더 누르세요')
+                return
+            self.get_logger().warn(f'⚠ 강제 출발 ({", ".join(missing)} 미완료)')
+
         with self._go_lock:
             if self.started:
                 return
