@@ -24,6 +24,148 @@ ssh-copy-id jetson@192.168.50.57
 
 ---
 
+## 0-1. `./race.sh` 명령어 전체 목록
+
+`~/yax` 에서 실행한다. **모든 모드는 Ctrl+C 로 끝낼 것** — `ros2 launch` 는 SIGINT
+에만 종료를 자식에게 전파해서, 터미널을 그냥 닫거나 pkill 하면 urg_node·map_server
+같은 자식이 고아로 남아 다음 실행 때 LiDAR/VESC 를 선점한다.
+
+### 주행
+
+| 명령 | 설명 |
+|------|------|
+| `./race.sh` | `race_script.yaml` 의 `mode` 값대로 실행 |
+| `./race.sh q1 [컨트롤러]` | 예선1 — 장애물 없음, 레이싱라인 고속 추종 |
+| `./race.sh q2 [컨트롤러]` | 예선2 — 정적 장애물 회피 |
+| `./race.sh q3 [컨트롤러]` | 예선3 — 최소 랩타임 (제한시간 미설정 시 자동 120초) |
+| `./race.sh race [컨트롤러]` | 1대1 경주 |
+
+컨트롤러 인자는 `auto` \| `stanley` \| `pure_pursuit` \| `gap_follower`.
+**생략하면 yaml 의 `controller` 값**을 쓴다. yaml 을 안 고치고 한 번만 바꿔볼 때 유용:
+`./race.sh q1 pure_pursuit`
+
+### 맵 만들기
+
+| 명령 | 설명 |
+|------|------|
+| `./race.sh mapping` | SLAM + 키보드 텔레옵 |
+| `./race.sh mapping-joy` | SLAM + 조이스틱 (추천) |
+| `./race.sh savemap <이름>` | 맵 저장. **맵핑 창을 끄기 전에** 실행할 것 |
+| `./race.sh waypoints [맵]` | SLAM 맵에서 레이싱라인 생성 (GUI — 디스플레이 필요) |
+| `./race.sh log <이름>` | 수동 주행하며 웨이포인트 녹화 → `waypoints/<이름>.csv` |
+
+> `savemap` 은 `slam_toolbox` 가 **메모리에 들고 있는** 맵을 꺼내는 것이다.
+> 맵핑을 먼저 Ctrl+C 로 끄면 맵이 사라진다 — 실제로 자주 겪는 실수라
+> race.sh 가 `/map` 발행자가 없으면 이유를 알려주고 멈춘다.
+
+### 점검 · 정리
+
+| 명령 | 설명 |
+|------|------|
+| `./race.sh box [모드]` | ★ **박스 위 벤치 테스트.** 실주행과 동일한 스택을 띄우되 속도만 0, 자동정지 없음. 토픽·RViz·조향 확인용 |
+| `./race.sh check` | 10개 토픽의 발행자 수 + **실제 수신 여부**를 표로 (주행 중 별도 터미널) |
+| `./race.sh stop` | 돌고 있는 스택 + 고아 프로세스 전부 정리 |
+| `./race.sh savepose` | ★ 지금 AMCL 위치를 `localization.init_*` 로 저장 |
+
+> `check` 가 `ros2 topic list` 보다 나은 이유: `topic list` 는 discovery 만 되면
+> 뜨므로 "보이는데 데이터는 안 오는" 상태를 못 가른다. `check` 는 발행자 수와
+> `echo --once` 실수신을 둘 다 본다. **노트북에서 돌리면 젯슨↔노트북 DDS 까지 검증된다.**
+
+> `box` 모드에서 **바퀴를 돌리면 안 된다.** odom 은 "전진 중"이라 하고 LiDAR 는
+> "제자리"라 해서 AMCL 이 요동친다 — 정작 확인하려던 RViz 위치가 무의미해진다.
+
+### 수동 조종
+
+| 명령 | 설명 |
+|------|------|
+| `./race.sh joy` | 조이스틱 수동 조종 (브링업 포함). 속도는 `joystick.max_speed` |
+| `./race.sh teleop` | 키보드 텔레옵만 단독 실행. 속도는 `speed.mapping_max` |
+
+### 그 밖
+
+- 게인 튜닝은 `./tune.sh` — `race_script.yaml` 을 열지 않고 값만 바꾼다
+  (`./tune.sh status`, `./tune.sh stanley.gain=1.2`, `./tune.sh --undo`)
+- 노트북에서 관찰은 `./rviz.sh`
+
+---
+
+## 0-2. 좌표계와 "시작 지점" — 헷갈리는 다섯 가지
+
+**"시작 지점"이라는 말이 다섯 군데에 나오는데 서로 다른 것이다.** 이걸 섞으면
+"어디에 차를 놓아야 하지?" 에서 막힌다.
+
+| # | 무엇 | 언제 정해지나 | 물리적 제약 |
+|---|------|--------------|------------|
+| 1 | **SLAM 시작 위치** | `./race.sh mapping` 을 누른 순간 차가 있던 자리 | ❌ 맵 좌표계의 원점을 정할 뿐 |
+| 2 | **웨이포인트 0번** | `gen_waypoints` 가 경로를 만들 때 | ❌ **아무 의미 없음** |
+| 3 | `localization.init_x/y/yaw` | 사람이 yaml 에 입력 | ✅ **실제 차 위치와 맞아야 함** |
+| 4 | `mission.start_x/y` | 사람이 yaml 에 입력 | ✅ 랩 카운트 기준선 |
+| 5 | `sim.sx/sy/stheta` | 사람이 yaml 에 입력 | 시뮬 전용 |
+
+### 1번과 2번은 아무것도 강제하지 않는다
+
+- **SLAM 시작 위치**는 "맵 좌표계의 (0,0) 을 어디로 둘 것인가"만 정한다. 그때 차가
+  보던 방향이 **+x 축**이 된다. 다음에 주행할 때 **차를 거기 놓을 필요가 전혀 없다.**
+- **웨이포인트 0번**은 배열의 시작 인덱스일 뿐이다. 컨트롤러는 매 틱 **최근접
+  웨이포인트**를 찾아 따라가므로 0번이 어디든 무관하고, 랩도 이걸로 세지 않는다
+  (`mission_manager` 가 `start_x/y` 반경으로 센다).
+
+### 신경 쓸 건 3번 하나다
+
+`amcl.yaml` 이 `recovery_alpha_slow/fast: 0` (전역 복구 꺼짐)이라 초기 파티클은
+`init_x/y/yaw` 주변에만 뿌려진다. **실제 출발 위치가 거기서 멀면 진짜 위치를 영원히
+못 찾고 어긋난 채 국소 수렴한다** (RViz 에서 맵과 스캔이 안 겹치는 증상).
+
+### "원점"이 두 곳에 나온다 — 다른 것이다
+
+```yaml
+# maps/<이름>.yaml   ← SLAM 이 자동 생성. 손대지 말 것
+origin:
+- -4.83      # 차 시작 위치가 아니라, "이미지 좌하단 픽셀"이 map 좌표로 어디인가
+- -5.58
+- 0
+```
+
+```yaml
+# race_script.yaml   ← 사람이 쓰는 파일
+localization:
+  init_x: -0.2184    # 이번 주행에서 차를 놓을 자리 (직접 입력, 자동 기록 아님)
+  init_y: -2.3503
+  init_yaw: -0.0082
+```
+
+### 새 맵을 뜨면 좌표계가 통째로 바뀐다
+
+기존 `init_x/y`, `mission.start_x/y`, **그리고 웨이포인트 CSV 까지 전부 무효**다.
+웨이포인트는 새 맵 기준으로 다시 만들어야 한다.
+
+### 권장 절차
+
+**SLAM 을 "출발선으로 쓸 자리"에서 시작하면 제일 덜 헷갈린다.** 필수는 아니지만
+맵 원점 ≈ 출발선이 되어 좌표를 눈으로 읽기 쉽다.
+
+```bash
+# 1) 맵 뜨기 — 출발선에 차를 놓고 시작
+./race.sh mapping-joy         # 트랙 1~2바퀴 천천히 → Ctrl+C 전에!
+./race.sh savemap <새이름>
+
+# 2) race_script.yaml 의 map_name / waypoints 를 새 이름으로 바꾼 뒤 경로 생성
+./race.sh waypoints
+
+# 3) 차를 실제 출발 위치에 놓고 초기 포즈 확정
+./race.sh box                 # 스택 기동 (바퀴 안 돎)
+#   → 노트북 RViz 에서 "2D Pose Estimate" 로 스캔이 맵 벽에 겹치게 맞춘다
+./race.sh savepose            # ← init_x/y/yaw 자동 기록
+
+# 4) 랩 카운트 기준선도 같은 자리로
+python3 set_init_pose.py --x <값> --y <값> --yaw <값> --also-start --write
+```
+
+> 맵을 뜬 직후 `python3 set_init_pose.py` 를 인자 없이 돌리면 1m 격자 미리보기가
+> 저장된다. **(0,0) 이 트랙 어디인지** = SLAM 을 어디서 시작했는지 확인하는 가장 빠른 방법.
+
+---
+
 ## 1. 폴더 이동 (한 번만)
 
 ```bash
