@@ -521,6 +521,7 @@ class StanleyController(Node):
             self.get_logger().info(
                 f'AMCL pose 첫 수신 ({px:.3f}, {py:.3f}) — 시드 가정 해제. '
                 f'시드와의 차이 {math.hypot(px - sx, py - sy):.2f}m')
+            self._report_start_alignment(px, py, yaw)
 
         # amcl 측정 시각과 가장 가까운 odom 샘플 기준으로 보정 계산
         # (amcl 은 그 시각의 pose 이므로, 그 시각의 odom 과 짝지어야 정확)
@@ -533,6 +534,36 @@ class StanleyController(Node):
         th = _normalize(yaw - oyaw)
         c, s = math.cos(th), math.sin(th)
         self._map_from_odom = (th, px - (c * ox - s * oy), py - (s * ox + c * oy))
+
+    def _report_start_alignment(self, px: float, py: float, yaw: float):
+        """출발 자세가 레이싱라인과 얼마나 어긋났는지 알린다.
+
+        ★ 왜 (2026-08-04 실차)
+          "출발이 불안정하다" 의 원인은 위치추정이 아니라 **차를 비스듬히 놓은
+          것**이었다. auto_localize 는 ±15° 를 탐색해 놓인 각도를 정확히 찾아내고,
+          Stanley 는 출발하자마자 그 오차를 잡느라 크게 꺾는다. 실제 6회 주행의
+          출발 방향이 -6° ~ -25° 로 흩어져 있었다.
+          숫자로 보여주면 **버튼을 누르기 전에** 차를 바로 놓을 수 있다.
+        """
+        if self.wps is None or len(self.wps) < 3:
+            return
+        n = len(self.wps)
+        i = int(np.argmin(np.hypot(self.wps[:, 0] - px, self.wps[:, 1] - py)))
+        tang = self.wps[(i + 1) % n, :2] - self.wps[(i - 1) % n, :2]
+        path_yaw = math.atan2(tang[1], tang[0])
+        dyaw = math.degrees(_normalize(yaw - path_yaw))
+        tn = float(np.hypot(*tang))
+        left = (np.array([-tang[1], tang[0]]) / tn if tn > 1e-6
+                else np.array([-math.sin(yaw), math.cos(yaw)]))
+        cte = float((np.array([px, py]) - self.wps[i, :2]) @ left)
+
+        msg = (f'출발 정렬: 라인과 방향차 {dyaw:+.1f}°, 횡오차 {cte*100:+.0f}cm '
+               f'(최근접 wp {i})')
+        if abs(dyaw) > 10.0 or abs(cte) > 0.25:
+            self.get_logger().warn(
+                msg + ' — 출발 직후 크게 꺾습니다. 차를 라인 방향으로 다시 놓는 것을 권합니다')
+        else:
+            self.get_logger().info(msg + ' — 양호')
 
     # ── main control loop (50Hz, _cmd_tick 에서 호출) ──────────────────────
 
