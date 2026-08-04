@@ -84,6 +84,7 @@ class MissionManager(Node):
 
         self.set_enabled(self.started)
         self.create_timer(0.5, self.check_time)
+        self.create_timer(0.5, self._republish_enabled)
 
         if self.gate:
             latched_in = QoSProfile(depth=1,
@@ -234,7 +235,17 @@ class MissionManager(Node):
         return self.get_parameter(name).value
 
     def set_enabled(self, val: bool):
+        self._enabled_state = val
         self.enabled_pub.publish(Bool(data=val))
+
+    def _republish_enabled(self):
+        """현재 상태를 주기적으로 다시 쏜다 (0.5s).
+
+        구독자는 래치로 받게 고쳤지만, 그래도 한 겹 더 둔다 — 컨트롤러가
+        늦게 뜨거나 재시작해도 몇백 ms 안에 올바른 상태로 수렴한다.
+        상태를 새로 만드는 게 아니라 이미 정해진 값을 반복할 뿐이라 부작용이 없다.
+        """
+        self.enabled_pub.publish(Bool(data=getattr(self, '_enabled_state', False)))
 
     def check_time(self):
         tl = self.p('time_limit_sec')
@@ -285,7 +296,10 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        node.set_enabled(False)
+        # Ctrl-C 로 컨텍스트가 이미 닫힌 뒤면 발행이 예외를 던진다.
+        # 종료 경로에서만 나는 노이즈라 조건을 두고 조용히 넘긴다.
+        if rclpy.ok():
+            node.set_enabled(False)
         node.destroy_node()
         rclpy.shutdown()
 

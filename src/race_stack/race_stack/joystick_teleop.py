@@ -267,7 +267,10 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        node._publish(0.0, 0.0)
+        # Ctrl-C 로 컨텍스트가 이미 닫힌 뒤면 발행이 예외를 던진다.
+        # 종료 경로에서만 나는 노이즈라 조건을 두고 조용히 넘긴다.
+        if rclpy.ok():
+            node._publish(0.0, 0.0)
         node.destroy_node()
         rclpy.shutdown()
 

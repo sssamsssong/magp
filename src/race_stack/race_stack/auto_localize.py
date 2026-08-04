@@ -37,6 +37,7 @@ import numpy as np
 import rclpy
 import yaml
 from geometry_msgs.msg import PoseWithCovarianceStamped
+from nav_msgs.msg import Odometry
 from PIL import Image
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
@@ -50,6 +51,7 @@ class AutoLocalize(Node):
 
         self.declare_parameter('map_yaml', '')
         self.declare_parameter('scan_topic', '/scan')
+        self.declare_parameter('odom_topic', '/odom_imu')
         self.declare_parameter('init_x', 0.0)
         self.declare_parameter('init_y', 0.0)
         self.declare_parameter('init_yaw', 0.0)
@@ -76,6 +78,7 @@ class AutoLocalize(Node):
         self.fit_warn = float(gp('fit_warn'))
 
         self.scan = None
+        self.speed = 0.0          # 주행 중 재시드 방지용
         self.done = False
         self.dist = None          # 거리변환 (m 단위), 맵 픽셀 격자
 
@@ -91,6 +94,7 @@ class AutoLocalize(Node):
         self.create_subscription(LaserScan, str(gp('scan_topic')),
                                  self._scan_cb, qos_profile_sensor_data)
         self.create_subscription(Bool, '/race/relocalize', self._redo_cb, 10)
+        self.create_subscription(Odometry, str(gp('odom_topic')), self._odom_cb, 10)
         self.create_timer(float(gp('startup_delay')), self._try)
 
         self.get_logger().info(
@@ -123,6 +127,9 @@ class AutoLocalize(Node):
     def _scan_cb(self, msg: LaserScan):
         self.scan = msg
 
+    def _odom_cb(self, msg):
+        self.speed = abs(msg.twist.twist.linear.x)
+
     def _redo_cb(self, msg: Bool):
         if msg.data:
             self.done = False
@@ -134,6 +141,17 @@ class AutoLocalize(Node):
             return
         if self.scan is None:
             self.get_logger().warn('스캔 대기 중…')
+            return
+        # ★ 움직이는 중에는 절대 재시드하지 않는다 (2026-08-04 실차).
+        #   차가 이미 출발한 뒤 /initialpose 를 쏘면 AMCL 이 달리는 도중에
+        #   파티클을 통째로 옮겨 위치가 튄다. 실제로 그때 AMCL 이
+        #   "Lookup would require extrapolation into the future" 를 뱉었다.
+        #   정렬은 정지 상태에서만 의미가 있다 — 스캔 한 장으로 맞추는 것이므로.
+        if self.speed > 0.05:
+            self.get_logger().warn(
+                f'주행 중({self.speed:.2f} m/s)이라 정렬을 미룹니다 — '
+                '정지 상태에서만 재시드합니다',
+                throttle_duration_sec=3.0)
             return
         self.done = True
         self._align(self.scan)

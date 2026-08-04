@@ -11,10 +11,19 @@ Gap Follower (Disparity Extender) — Q2 / 1대1 경주용 반응형 컨트롤�
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
+
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool
 from ackermann_msgs.msg import AckermannDriveStamped
 
+
+# ★ /race/enabled 는 mission_manager 가 **래치(TRANSIENT_LOCAL)** 로 발행한다.
+#   기본 QoS(VOLATILE)로 구독하면 구독자가 생기기 전에 나간 값을 못 받는다.
+#   race.launch.py 는 컨트롤러를 5~8초 지연 기동하므로 항상 그 상황이고, 그래서
+#   출발 게이트가 걸어둔 enabled=false 를 놓쳐 버튼도 안 눌렀는데 출발했다
+#   (2026-08-04 실차). 래치로 구독해야 마지막 값을 받는다.
+LATCHED_IN = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 class GapFollower(Node):
     def __init__(self):
@@ -30,8 +39,11 @@ class GapFollower(Node):
         self.declare_parameter('speed_gain', 0.5)
         self.declare_parameter('max_steer', 0.36)
 
-        self.enabled = True
-        self.create_subscription(Bool, '/race/enabled', self.enabled_cb, 10)
+        self.enabled = False   # ★ mission_manager 의 /race/enabled(래치)를 받아야 켜진다.
+        #   True 로 두면 그 값이 도착하기 전 한 틱이라도 먼저 나가버린다.
+        #   mission_manager 가 없는 단독 실행이면 "정지 중: /race/enabled=false"
+        #   로그가 이유를 알려준다 — 조용히 달려나가는 것보다 낫다.
+        self.create_subscription(Bool, '/race/enabled', self.enabled_cb, LATCHED_IN)
         self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
         self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
         self.get_logger().info('GapFollower 시작')
@@ -118,7 +130,10 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        node.publish_stop()
+        # Ctrl-C 로 컨텍스트가 이미 닫힌 뒤면 발행이 예외를 던진다.
+        # 종료 경로에서만 나는 노이즈라 조건을 두고 조용히 넘긴다.
+        if rclpy.ok():
+            node.publish_stop()
         node.destroy_node()
         rclpy.shutdown()
 

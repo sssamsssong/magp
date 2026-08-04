@@ -36,6 +36,8 @@ from PIL import Image
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
+
 from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry, Path
@@ -46,6 +48,15 @@ from visualization_msgs.msg import Marker, MarkerArray
 # ── 저장소 루트 (주행 종료 시 실주행 로그 저장용, gen_waypoints.py와 동일한 관례) ──
 # 이 파일: <repo>/src/race_stack/race_stack/stanley_controller.py
 _PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # <repo>/src/race_stack
+
+
+# ★ /race/enabled 는 mission_manager 가 **래치(TRANSIENT_LOCAL)** 로 발행한다.
+#   기본 QoS(VOLATILE)로 구독하면 구독자가 생기기 전에 나간 값을 못 받는다.
+#   race.launch.py 는 컨트롤러를 5~8초 지연 기동하므로 항상 그 상황이고, 그래서
+#   출발 게이트가 걸어둔 enabled=false 를 놓쳐 버튼도 안 눌렀는데 출발했다
+#   (2026-08-04 실차). 래치로 구독해야 마지막 값을 받는다.
+LATCHED_IN = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+
 _REPO_ROOT = (os.path.expanduser(os.environ['RACE_WS']) if os.environ.get('RACE_WS')
               else os.path.dirname(os.path.dirname(_PKG_DIR)))
 
@@ -306,7 +317,10 @@ class StanleyController(Node):
                 f'(spacing {self._wp_ds:.3f}m)')
 
         # ── state ─────────────────────────────────────────────────────
-        self.enabled        = True
+        self.enabled = False   # ★ mission_manager 의 /race/enabled(래치)를 받아야 켜진다.
+        #   True 로 두면 그 값이 도착하기 전 한 틱이라도 먼저 나가버린다.
+        #   mission_manager 가 없는 단독 실행이면 "정지 중: /race/enabled=false"
+        #   로그가 이유를 알려준다 — 조용히 달려나가는 것보다 낫다.
         self.pos            = None
         self.yaw            = 0.0
         self.speed          = 0.0
@@ -377,7 +391,7 @@ class StanleyController(Node):
 
         # ── subscriptions / publishers ─────────────────────────────────
         self.create_subscription(Bool,
-            '/race/enabled', self._enabled_cb, 10)
+            '/race/enabled', self._enabled_cb, LATCHED_IN)
         self.create_subscription(PoseWithCovarianceStamped,
             '/amcl_pose', self._pose_cb, 10)
         # ★ 기본이 /odom_imu 다 (2026-08-04). 원본 /odom 의 각속도는 서보 "명령"
@@ -1312,7 +1326,10 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        node._publish_cmd(0.0, 0.0)
+        # Ctrl-C 로 컨텍스트가 이미 닫힌 뒤면 발행이 예외를 던진다.
+        # 종료 경로에서만 나는 노이즈라 조건을 두고 조용히 넘긴다.
+        if rclpy.ok():
+            node._publish_cmd(0.0, 0.0)
         node.save_run_log()
         node.destroy_node()
         rclpy.shutdown()

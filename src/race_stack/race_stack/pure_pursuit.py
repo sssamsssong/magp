@@ -25,6 +25,8 @@ import numpy as np
 import scipy.spatial.distance
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
+
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
@@ -34,6 +36,13 @@ from ackermann_msgs.msg import AckermannDriveStamped
 
 from race_stack.stanley_controller import _load_map, _world_to_img, _REPO_ROOT
 
+
+# ★ /race/enabled 는 mission_manager 가 **래치(TRANSIENT_LOCAL)** 로 발행한다.
+#   기본 QoS(VOLATILE)로 구독하면 구독자가 생기기 전에 나간 값을 못 받는다.
+#   race.launch.py 는 컨트롤러를 5~8초 지연 기동하므로 항상 그 상황이고, 그래서
+#   출발 게이트가 걸어둔 enabled=false 를 놓쳐 버튼도 안 눌렀는데 출발했다
+#   (2026-08-04 실차). 래치로 구독해야 마지막 값을 받는다.
+LATCHED_IN = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 def yaw_from_quat(q):
     return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
@@ -97,7 +106,10 @@ class PurePursuit(Node):
             w = self.waypoints[:, :2]
             self._wp_ds = float(np.mean(np.hypot(*(np.roll(w, -1, axis=0) - w).T)))
 
-        self.enabled = True
+        self.enabled = False   # ★ mission_manager 의 /race/enabled(래치)를 받아야 켜진다.
+        #   True 로 두면 그 값이 도착하기 전 한 틱이라도 먼저 나가버린다.
+        #   mission_manager 가 없는 단독 실행이면 "정지 중: /race/enabled=false"
+        #   로그가 이유를 알려준다 — 조용히 달려나가는 것보다 낫다.
         self.last_speed = 0.0
         self.got_pose = False
         self.pos = None
@@ -131,7 +143,7 @@ class PurePursuit(Node):
         self._last_trail = None
         self._run_t0 = self.get_clock().now()
 
-        self.create_subscription(Bool, '/race/enabled', self.enabled_cb, 10)
+        self.create_subscription(Bool, '/race/enabled', self.enabled_cb, LATCHED_IN)
         self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose',
                                  self.pose_cb, 10)
         self.create_subscription(
