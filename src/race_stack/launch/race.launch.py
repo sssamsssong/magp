@@ -190,6 +190,39 @@ def generate_launch_description():
                      'attempt_respawn_reconnection': True,
                      'node_names': ['map_server', 'amcl']}])]))
 
+    # ---------- 2-1. 조이스틱 수동 개입 ----------
+    # 자율주행 중 LB 를 누르면 사람이 조종을 가져간다. 컨트롤러만 멈추고
+    # AMCL·LiDAR·맵은 그대로 두므로 위치 추정이 끊기지 않고, 다시 LB 를 누르면
+    # 그 자리에서 자율주행이 이어진다. 트랙 복귀·회수에 쓴다.
+    #   · 자율로 시작(start_auto) → 평소에는 /teleop 을 안 낸다
+    #   · 개입 시 /teleop(mux priority 100) 이 /drive(10) 를 덮는다
+    #   · /race/enabled 는 건드리지 않는다 — mission_manager 가 /race/manual 을
+    #     받아 해석한다 (한 토픽을 두 노드가 쓰면 상태가 뒤집힌다)
+    jc = cfg.get('joystick', {})
+    pp0 = cfg.get('pure_pursuit', {})
+    if bool(jc.get('manual_override', True)):
+        nodes.append(TimerAction(period=4.0, actions=[Node(
+            package='race_stack', executable='joystick_teleop',
+            name='joystick_teleop', output='screen',
+            parameters=[{
+                'axis_steer':       int(  jc.get('axis_steer',       0)),
+                'axis_speed':       int(  jc.get('axis_speed',       5)),
+                'btn_reverse':      int(  jc.get('btn_reverse',      5)),
+                'btn_toggle':       int(  jc.get('btn_toggle',       4)),
+                'steer_invert':     bool( jc.get('steer_invert',     False)),
+                'trigger_invert':   bool( jc.get('trigger_invert',   True)),
+                'trigger_deadzone': float(jc.get('trigger_deadzone', 0.05)),
+                'trigger_expo':     float(jc.get('trigger_expo',     1.0)),
+                'steer_deadzone':   float(jc.get('steer_deadzone',   0.08)),
+                'arm_on_neutral':   bool( jc.get('arm_on_neutral',   True)),
+                'debug':            False,
+                'allow_toggle':     True,
+                'start_auto':       True,     # 자율로 시작
+                'max_speed':        float(jc.get('max_speed',
+                                                 cfg['speed'].get('mapping_max', 1.0))),
+                'max_steer':        float(pp0.get('max_steer', 0.36)),
+            }])]))
+
     # ---------- 3. 미션 매니저 ----------
     m = cfg['mission']
     time_limit = int(m.get('time_limit_sec', 0))

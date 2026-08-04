@@ -38,8 +38,11 @@ sensor_msgs/Joy → /teleop (AckermannDriveStamped)
   steer_invert, max_speed, max_steer, debug
 """
 
+import time
+
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool
 from ackermann_msgs.msg import AckermannDriveStamped
@@ -53,6 +56,18 @@ class JoystickTeleop(Node):
         self.declare_parameter('axis_speed',       5)      # RT 트리거
         self.declare_parameter('btn_reverse',      5)      # RB — 후진 전환
         self.declare_parameter('btn_toggle',       4)      # LB — 수동↔자율 토글
+        # ── LB 토글의 의미는 어느 스택에 붙느냐로 갈린다 ────────────────
+        #  · ./race.sh joy (수동 전용, 트랙 밖에서 굴릴 때)
+        #      allow_toggle=False, start_auto=False
+        #      자율로 넘길 대상(/drive 를 내는 컨트롤러)이 애초에 없다.
+        #      예전엔 토글은 되는데 차가 안 움직여 조용히 실패했다 → 아예 끈다.
+        #  · ./race.sh q1|q2|q3|race (주행 스택에 붙음)
+        #      allow_toggle=True, start_auto=True
+        #      자율로 시작하고, LB 를 누르면 사람이 조종을 가져온다.
+        #      이때도 AMCL·LiDAR·맵은 계속 살아 있어 위치 추정이 끊기지 않으므로,
+        #      다시 LB 를 누르면 **그 자리에서** 자율주행이 이어진다.
+        self.declare_parameter('allow_toggle',     True)
+        self.declare_parameter('start_auto',       False)
         self.declare_parameter('steer_invert',     False)
         self.declare_parameter('trigger_invert',   True)   # /joy 기준 안 누름=+1
         self.declare_parameter('trigger_deadzone', 0.05)
@@ -82,25 +97,69 @@ class JoystickTeleop(Node):
         self.trig_neutral = 1.0 if self.inv_trigger else -1.0
         self.trig_full    = -self.trig_neutral
 
-        self.auto_mode  = False   # 시작은 수동 모드
+        self.allow_tog  = bool(p('allow_toggle'))
+        self.auto_mode  = bool(p('start_auto'))   # 주행 스택에 붙으면 자율로 시작
         self.prev_lb    = False   # LB 이전 상태 (엣지 감지용)
         self.armed      = not self.arm_required   # 트리거 중립 확인 여부
         self._last_log  = 0.0
         self._warned    = False
 
         self.create_subscription(Joy, '/joy', self._joy_cb, 10)
-        self.pub         = self.create_publisher(AckermannDriveStamped, '/teleop', 10)
-        self.pub_enabled = self.create_publisher(Bool, '/race/enabled', 10)
+        self.pub = self.create_publisher(AckermannDriveStamped, '/teleop', 10)
+        # ★ /race/enabled 를 직접 건드리지 않는다 (2026-08-04).
+        #   주행 스택에서는 mission_manager 가 그 토픽의 유일한 주인이고,
+        #   출발 게이트·랩 완주 정지도 거기서 나온다. 둘이 같이 발행하면
+        #   누가 마지막으로 썼는지에 따라 상태가 뒤집힌다.
+        #   여기서는 "사람이 개입했다" 는 사실만 알리고 해석은 그쪽에 맡긴다.
+        self.pub_manual = self.create_publisher(
+            Bool, '/race/manual',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.pub_manual.publish(Bool(data=not self.auto_mode))
+
+        # ★ 자율 모드로 넘겼는데 실제로 굴러가는지 확인한다.
+        #   자율 모드는 "/teleop 발행을 멈춰 mux 를 /drive 채널로 넘기는" 것뿐이라,
+        #   /drive 를 내는 컨트롤러가 없으면 아무 일도 안 일어난다.
+        #   `./race.sh joy` 는 브링업+조이스틱만 띄우므로 정확히 그 상태다.
+        #   예전엔 "모드 전환 → [자율]" 로그만 뜨고 차는 가만히 있어서
+        #   무엇이 잘못됐는지 알 수 없었다 (2026-08-04 실제로 겪음).
+        self._drive_seen = 0.0
+        self._auto_since = None
+        self.create_subscription(AckermannDriveStamped, '/drive',
+                                 self._drive_cb, 10)
+        self.create_timer(1.0, self._check_auto)
 
         self.get_logger().info(
-            f'JoystickTeleop ready  [현재: 수동 모드]\n'
-            f'  LB(버튼{self.btn_tog}) → 수동↔자율 토글\n'
+            f'JoystickTeleop ready  [현재: {"자율" if self.auto_mode else "수동"} 모드]\n'
+            + (f'  LB(버튼{self.btn_tog}) → 수동↔자율 토글 '
+               f'(지금 {"자율" if self.auto_mode else "수동"})\n'
+               if self.allow_tog else
+               '  LB 토글 없음 — 수동 전용 모드\n') +
             f'  RT(축{self.ax_speed}) → 전진 속도 (선형, 놓으면 즉시 정지)\n'
             f'  L스틱(축{self.ax_steer}) → 조향\n'
             f'  RB(버튼{self.btn_rev}) 누른 채 RT → 후진\n'
             f'  트리거 매핑: {self.trig_neutral:+.0f}(안 누름) → {self.trig_full:+.0f}(끝까지)'
             f'  = 0 → {self.max_speed} m/s'
             f'  [deadzone {self.trig_dz}, expo {self.trig_expo}]')
+
+    def _drive_cb(self, msg: AckermannDriveStamped):
+        self._drive_seen = time.time()
+
+    def _check_auto(self):
+        """자율 모드인데 /drive 가 안 오면 알려준다 (1.5초 유예 후)."""
+        if not self.auto_mode or self._auto_since is None:
+            return
+        now = time.time()
+        if now - self._auto_since < 1.5:
+            return
+        if now - self._drive_seen < 0.5:
+            return          # 정상 — 컨트롤러가 발행 중
+        self.get_logger().warn(
+            '자율 모드인데 /drive 가 오지 않습니다 — 차는 움직이지 않습니다.\n'
+            '  자율 모드는 "/teleop 을 놓아 mux 를 /drive 로 넘기는" 것뿐이고,\n'
+            '  /drive 를 내는 컨트롤러는 별도로 떠 있어야 합니다.\n'
+            '  ./race.sh joy 는 브링업+조이스틱만 띄우는 수동 전용 모드입니다.\n'
+            '  → 자율주행까지 하려면 ./race.sh q1|q2|q3|race 를 쓰세요.',
+            throttle_duration_sec=5.0)
 
     # ── 트리거 raw 값 → 0.0~1.0 선형 스로틀 ────────────────────
     def _throttle(self, raw: float) -> float:
@@ -123,14 +182,25 @@ class JoystickTeleop(Node):
         # ── 모드 토글 (LB 상승 엣지) ──────────────────────────────
         lb = len(msg.buttons) > self.btn_tog and bool(msg.buttons[self.btn_tog])
         if lb and not self.prev_lb:
-            self.auto_mode = not self.auto_mode
-            label = '자율' if self.auto_mode else '수동'
-            self.get_logger().info(f'모드 전환 → [{label}]')
-            enabled = Bool()
-            enabled.data = self.auto_mode
-            self.pub_enabled.publish(enabled)
-            if not self.auto_mode:
-                self._publish(0.0, 0.0)  # 수동 전환 시 즉시 정지
+            if not self.allow_tog:
+                # 수동 전용 모드 — 넘길 대상이 없다. 조용히 무시하지 말고 알린다.
+                self.get_logger().info(
+                    'LB 토글은 이 모드에서 꺼져 있습니다 (수동 전용). '
+                    '자율주행은 ./race.sh q1|q2|q3|race 로 실행하세요.',
+                    throttle_duration_sec=5.0)
+            else:
+                self.auto_mode = not self.auto_mode
+                self._auto_since = (time.time() if self.auto_mode else None)
+                if self.auto_mode:
+                    self.get_logger().info(
+                        '모드 전환 → [자율]  컨트롤러가 지금 위치에서 이어받습니다')
+                else:
+                    self.get_logger().warn(
+                        '모드 전환 → [수동]  컨트롤러 정지, 사람이 조종합니다 '
+                        '(AMCL·LiDAR 는 계속 동작 — 위치 추정은 끊기지 않음)')
+                self.pub_manual.publish(Bool(data=not self.auto_mode))
+                if not self.auto_mode:
+                    self._publish(0.0, 0.0)  # 수동 전환 시 즉시 정지
         self.prev_lb = lb
 
         # 자율 모드: /teleop 발행 안 함 → mux가 자율주행 채널로 전환

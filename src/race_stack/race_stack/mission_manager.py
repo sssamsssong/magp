@@ -73,6 +73,15 @@ class MissionManager(Node):
         self._ready = False               # 준비 완료 배너를 띄웠나
         self._force_t = None              # 미준비 상태에서 버튼 누른 시각
 
+        # ── 수동 개입 ──────────────────────────────────────────────────
+        # 조이스틱 LB 로 사람이 조종을 가져가면 컨트롤러를 멈춘다.
+        # 나머지 노드(AMCL·LiDAR·맵)는 그대로 두므로 위치 추정이 끊기지 않고,
+        # 다시 자율로 넘기면 그 자리에서 이어서 달린다.
+        self.manual = False
+        self.create_subscription(
+            Bool, '/race/manual', self.manual_cb,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+
         self.set_enabled(self.started)
         self.create_timer(0.5, self.check_time)
 
@@ -135,6 +144,21 @@ class MissionManager(Node):
             self.get_logger().info(
                 f'[출발 대기] 정합 {self._fit*100:.1f}cm | AMCL ({x:+.2f}, {y:+.2f}) '
                 f'공분산합 {cov:.3f} — 버튼을 누르세요')
+
+    def manual_cb(self, msg: Bool):
+        if bool(msg.data) == self.manual:
+            return
+        self.manual = bool(msg.data)
+        if self.manual:
+            self.get_logger().warn('수동 개입 — 컨트롤러 정지 (/race/enabled=false)')
+            self.set_enabled(False)
+        elif self.finished:
+            self.get_logger().info('자율 복귀 요청 — 이미 완주/정지 상태라 무시')
+        elif self.started:
+            self.get_logger().info('자율 복귀 — 현재 위치에서 주행을 이어갑니다')
+            self.set_enabled(True)
+        else:
+            self.get_logger().info('자율 복귀 — 아직 출발 전이라 게이트에서 대기')
 
     def fit_cb(self, msg: Float32):
         self._fit = float(msg.data)
@@ -199,6 +223,11 @@ class MissionManager(Node):
             self.get_logger().warn(
                 '⚠ AMCL pose 미수신 상태로 출발합니다 — init_pose 가정으로 달립니다')
         self.get_logger().info(f'════════ 출발! ({src}) ════════')
+        if self.manual:
+            self.get_logger().warn(
+                '수동 개입 중이라 컨트롤러는 아직 멈춰 있습니다 — '
+                'LB 로 자율로 되돌리면 주행을 시작합니다')
+            return
         self.set_enabled(True)
 
     def p(self, name):

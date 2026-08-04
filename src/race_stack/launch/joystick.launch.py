@@ -94,6 +94,11 @@ def generate_launch_description():
             'axis_speed':       int(  joy_cfg.get('axis_speed',       5)),
             'btn_reverse':      int(  joy_cfg.get('btn_reverse',      5)),
             'btn_toggle':       int(  joy_cfg.get('btn_toggle',       4)),
+            # ★ 수동 전용 모드다. 자율로 넘길 대상(/drive 를 내는 컨트롤러)이
+            #   애초에 없으므로 LB 토글을 끈다. 예전엔 토글 로그만 뜨고 차는
+            #   가만히 있어서 조용히 실패했다 (2026-08-04).
+            'allow_toggle':     False,
+            'start_auto':       False,
             'steer_invert':     bool( joy_cfg.get('steer_invert',     False)),
             'trigger_invert':   bool( joy_cfg.get('trigger_invert',   True)),
             'trigger_deadzone': float(joy_cfg.get('trigger_deadzone', 0.05)),
