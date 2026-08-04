@@ -120,6 +120,12 @@ class StanleyController(Node):
         # 구독할 오도메트리. 기본은 imu_odom 이 내는 자이로 기반 /odom_imu.
         # 원본으로 되돌리려면 race_script.yaml 에서 '/odom' 으로 바꾼다.
         self.declare_parameter('odom_topic',      '/odom_imu')
+        # ★ 초기 pose 시드 (race_script.yaml 의 localization.init_*)
+        #   AMCL 의 첫 /amcl_pose 를 받기 전까지 "차가 여기 있다" 고 가정한다.
+        #   자세한 이유는 _odom_cb 의 시드 블록 주석 참조.
+        self.declare_parameter('init_x',           0.0)
+        self.declare_parameter('init_y',           0.0)
+        self.declare_parameter('init_yaw',         0.0)
         self.declare_parameter('max_speed',        5.0)
         self.declare_parameter('min_speed',        1.0)
         self.declare_parameter('max_steer',        0.36)
@@ -332,6 +338,10 @@ class StanleyController(Node):
         self._amcl_pose     = None                # 원시 amcl (odom 폴백용)
         self._map_from_odom = None                # (th, tx, ty) 보정 변환
         self._steer_prev    = 0.0                 # 조향 LPF 상태
+        self._amcl_seen     = False               # /amcl_pose 를 한 번이라도 받았나
+        self._seed_pose     = (float(p('init_x')), float(p('init_y')),
+                               float(p('init_yaw')))
+        self._seed_warn_t   = None                # AMCL 미수신 경고 스로틀
 
         # ── Q2: map image + polygon bounds ────────────────────────────
         self.map_arr        = None
@@ -412,7 +422,19 @@ class StanleyController(Node):
         pose = self._current_pose()
         if not self.enabled or self.wps is None or pose is None:
             self._publish_cmd(0.0, 0.0)
+            # 왜 멈춰 있는지 로그로 남긴다 — "로그는 정상인데 차가 안 움직임" 을
+            # 다시 겪지 않도록. 세 가지 원인이 겉으로는 똑같이 보인다.
+            why = ('/race/enabled=false (mission_manager 가 껐음)' if not self.enabled
+                   else '웨이포인트 없음' if self.wps is None
+                   else 'pose 없음 — odom 미수신 (imu_odom 이 떠 있는지 확인)')
+            self.get_logger().warn(f'정지 중: {why}', throttle_duration_sec=3.0)
             return
+        # AMCL 이 계속 조용하면 시드 가정만으로 달리고 있다는 뜻이다.
+        if not self._amcl_seen:
+            self.get_logger().warn(
+                'AMCL pose 미수신 — init_pose 가정으로 주행 중입니다. '
+                '실제 위치와 다르면 라인을 벗어납니다 (RViz 에서 스캔-맵 정합 확인)',
+                throttle_duration_sec=5.0)
         self.pos = np.array([pose[0], pose[1]])   # scan_cb 등 공용 상태 갱신
         self.yaw = pose[2]
         steer, speed = self._compute_cmd(*pose)
@@ -447,12 +469,44 @@ class StanleyController(Node):
         self._odom_last = entry
         self._odom_buf.append(entry)
 
+        # ── 초기 pose 시드 ────────────────────────────────────────────
+        # ★ 왜 필요한가 (2026-08-04 실차: 로그는 정상인데 차가 안 움직임)
+        #   예전엔 /amcl_pose 를 한 번이라도 받아야만 주행이 시작됐다.
+        #   그런데 AMCL 이 /amcl_pose 를 내는 시점은
+        #     (1) 첫 스캔을 받았을 때 1회,
+        #     (2) 그 뒤로는 update_min_d(2.5cm)/update_min_a(1.7도) 만큼 움직였을 때
+        #   뿐이다. race.launch.py 는 lifecycle 을 5초, 컨트롤러를 8초로 지연
+        #   기동하므로 (1) 이 컨트롤러가 뜨기 전에 끝나 있다. 래치 토픽도 아니라
+        #   놓치면 끝이고, 차가 멈춰 있으니 (2) 도 영원히 안 온다 →
+        #   "pose 가 없어 0속도 발행 → 안 움직이니 pose 도 안 옴" 데드락.
+        #
+        #   그래서 첫 odom 이 오는 순간 **init_pose 에 있다고 가정**하고 보정을
+        #   시드한다. AMCL 도 같은 값으로 파티클을 뿌리므로 둘의 가정이 일치하고,
+        #   진짜 /amcl_pose 가 오면 _pose_cb 가 즉시 덮어쓴다.
+        #   기다림에 주행을 걸지 않는 것이 핵심이다.
+        if self._map_from_odom is None and not self._amcl_seen:
+            sx, sy, syaw = self._seed_pose
+            _, ox, oy, oyaw = entry
+            th = _normalize(syaw - oyaw)
+            c, s = math.cos(th), math.sin(th)
+            self._map_from_odom = (th, sx - (c * ox - s * oy),
+                                   sy - (s * ox + c * oy))
+            self.get_logger().info(
+                f'초기 pose 시드: ({sx:.3f}, {sy:.3f}, {syaw:.3f}rad) — '
+                'AMCL 첫 수신 전까지 이 가정으로 주행합니다')
+
     def _pose_cb(self, msg: PoseWithCovarianceStamped):
         """amcl 수신 → map←odom 보정 변환 갱신 (제어는 _cmd_tick 이 50Hz로)."""
         px  = msg.pose.pose.position.x
         py  = msg.pose.pose.position.y
         yaw = _yaw(msg.pose.pose.orientation)
         self._amcl_pose = (px, py, yaw)
+        if not self._amcl_seen:
+            self._amcl_seen = True
+            sx, sy, _ = self._seed_pose
+            self.get_logger().info(
+                f'AMCL pose 첫 수신 ({px:.3f}, {py:.3f}) — 시드 가정 해제. '
+                f'시드와의 차이 {math.hypot(px - sx, py - sy):.2f}m')
 
         # amcl 측정 시각과 가장 가까운 odom 샘플 기준으로 보정 계산
         # (amcl 은 그 시각의 pose 이므로, 그 시각의 odom 과 짝지어야 정확)

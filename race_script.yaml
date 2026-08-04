@@ -21,8 +21,8 @@ mode: q2
 #    (주최측 배포 맵을 maps/ 폴더에 넣고 이름만 적으면 됨)
 #    웨이포인트: race_stack/waypoints/<waypoints>.csv  (x,y,speed)
 # ------------------------------------------------------------
-map_name: sohot_clean           # maps/track_2nd_clean.yaml
-waypoints: sohot_clean_wp       # waypoints/track_2nd_clean_wp.csv
+map_name: half_clean           # maps/track_2nd_clean.yaml
+waypoints: half_clean_wp       # waypoints/track_2nd_clean_wp.csv
 
 # ------------------------------------------------------------
 # 시뮬레이터 스폰 위치 (map 좌표계)
@@ -194,9 +194,9 @@ safety:
 # 9. 로컬라이제이션 (AMCL)
 # ------------------------------------------------------------
 localization:
-  init_x: -0.2184           # 시작 위치 초기 추정 (map 좌표)
-  init_y: -2.3503
-  init_yaw: -0.0082          # 라디안
+  init_x: 0.0           # 시작 위치 초기 추정 (map 좌표)
+  init_y: 0.0
+  init_yaw: 0.0          # 라디안
 
   # ── IMU yaw 융합 (2026-08-03 추가) ─────────────────────────
   #  vesc_to_odom 은 각속도를 "서보 명령"으로 계산한다 (ω = v·tan(δ)/L).
@@ -403,7 +403,7 @@ stanley:
 #   RViz: /frenet_candidates (초록=선택, 파랑=가능, 빨강=불가)
 # ------------------------------------------------------------
 frenet:
-  enabled: true             # false = 예전 래치+고정량 방식으로 롤백
+  enabled: false             # false = 예전 래치+고정량 방식으로 롤백
   candidates: 9             # 후보 개수. 홀수여야 d=0(라인 유지)이 정확히 포함된다
   d_max: 0.60               # 최대 횡오프셋 (m). 트랙 폭 대비 과하면 경계로 밀린다
   clearance: 0.35           # 후보가 확보해야 할 장애물까지 최소 거리 (m)

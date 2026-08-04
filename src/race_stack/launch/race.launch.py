@@ -292,6 +292,10 @@ def generate_launch_description():
                 'frenet_bounds':     bool( fr.get('bounds',     True)),
                 'frenet_debug':      bool( fr.get('debug',      True)),
                 'odom_topic':        odom_topic,
+                # AMCL 첫 pose 를 받기 전까지의 위치 가정 (AMCL 과 같은 값)
+                'init_x':            float(loc.get('init_x',   0.0)),
+                'init_y':            float(loc.get('init_y',   0.0)),
+                'init_yaw':          float(loc.get('init_yaw', 0.0)),
                 'interp_scale':    int(  sc.get('interp_scale',   20)),
                 'lookahead_min':   float(sc.get('lookahead_min',  0.5)),
                 'lookahead_max':   float(sc.get('lookahead_max',  2.0)),
