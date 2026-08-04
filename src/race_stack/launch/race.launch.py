@@ -181,6 +181,9 @@ def generate_launch_description():
         name='mission_manager', output='screen',
         parameters=[{'laps': laps,
                      'time_limit_sec': time_limit,
+                     'start_gate':   bool(m.get('start_gate',   False)) and not bench,
+                     'start_button': int( m.get('start_button', 1)),
+                     'start_key':    bool(m.get('start_key',    True)),
                      'start_x': float(m.get('start_x', 0.0)),
                      'start_y': float(m.get('start_y', 0.0)),
                      'start_radius': float(m.get('start_radius', 1.5))}]))

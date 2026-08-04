@@ -147,6 +147,11 @@ kill_stack () {
 case "$CMD" in
   stop)
     kill_stack; exit $? ;;
+  go)
+    # 출발 게이트 해제 (mission.start_gate: true 일 때).
+    # 같은 터미널에서 Enter 를 못 쓰는 경우(tmux·jetson.sh 원격 등) 용.
+    echo "[race.sh] 출발 신호 발행 → /race/go"
+    exec ros2 topic pub -1 /race/go std_msgs/msg/Bool '{data: true}' ;;
   check)
     # 주행 중 다른 터미널에서 실행 — 각 토픽이 실제로 발행되고 있는지 확인.
     # ros2 topic list 는 discovery 만 되면 뜨므로 판정 근거가 못 된다.
