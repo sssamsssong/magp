@@ -68,6 +68,9 @@ class AutoLocalize(Node):
         self.declare_parameter('startup_delay', 2.0)      # 스캔 안정화 대기 (s)
         # 평균 오차가 이보다 크면 "제대로 못 맞췄다" 고 본다 (m)
         self.declare_parameter('fit_warn', 0.20)
+        # 한 스텝에 이만큼 넘게 튀면 경고 (m). 1.45m/s 에서 AMCL 갱신 간격을
+        # 감안해도 30cm 이상은 주행으로 설명되지 않는다.
+        self.declare_parameter('jump_warn', 0.30)
 
         gp = lambda n: self.get_parameter(n).value
         self.init = (float(gp('init_x')), float(gp('init_y')), float(gp('init_yaw')))
@@ -76,6 +79,8 @@ class AutoLocalize(Node):
         self.max_range = float(gp('max_range'))
         self.n_beams = int(gp('n_beams'))
         self.fit_warn = float(gp('fit_warn'))
+        self.jump_warn = float(gp('jump_warn'))
+        self._amcl_prev = None
 
         self.scan = None
         self.speed = 0.0          # 주행 중 재시드 방지용
@@ -95,6 +100,8 @@ class AutoLocalize(Node):
                                  self._scan_cb, qos_profile_sensor_data)
         self.create_subscription(Bool, '/race/relocalize', self._redo_cb, 10)
         self.create_subscription(Odometry, str(gp('odom_topic')), self._odom_cb, 10)
+        self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose',
+                                 self._amcl_cb, 10)
         self.create_timer(float(gp('startup_delay')), self._try)
 
         self.get_logger().info(
@@ -129,6 +136,47 @@ class AutoLocalize(Node):
 
     def _odom_cb(self, msg):
         self.speed = abs(msg.twist.twist.linear.x)
+
+    # ── AMCL 감시 ──────────────────────────────────────────────────────────
+    def _amcl_cb(self, msg: PoseWithCovarianceStamped):
+        """AMCL 이 물리적으로 불가능한 답을 내면 즉시 알린다.
+
+        ★ 왜 필요한가 (2026-08-04 실차)
+          주행 중 위치가 80ms 만에 1.98m 순간이동했고, 그 뒤 20개 표본이 전부
+          **맵의 벽 안쪽**이었다. 차는 벽 속에 있을 수 없으므로 그건 보정이
+          아니라 발산이다. 그런데 그 순간 로그에는 아무것도 안 남아서, 나중에
+          주행 로그를 뜯어보고서야 알았다. 실시간으로 보이면 그 자리에서 판단할
+          수 있다 — 컨트롤러가 그 값을 그대로 믿고 조향하기 때문이다.
+
+        여기서 고치지는 않는다. 잘못된 pose 를 코드가 임의로 무시하면 "왜 안
+        가지?" 라는 더 어려운 증상이 된다. 판단 근거만 준다.
+        """
+        if self.dist is None:
+            return
+        x = msg.pose.pose.position.x
+        y = msg.pose.pose.position.y
+        ix = int((x - self.ox) / self.res)
+        iy = int(self.H - (y - self.oy) / self.res)
+        inside = 0 <= ix < self.W and 0 <= iy < self.H
+        clear = float(self.dist[iy, ix]) if inside else -1.0
+
+        if self._amcl_prev is not None:
+            d = math.hypot(x - self._amcl_prev[0], y - self._amcl_prev[1])
+            if d > self.jump_warn:
+                self.get_logger().error(
+                    f'⚠ AMCL 위치 점프 {d*100:.0f}cm — '
+                    f'({self._amcl_prev[0]:+.2f},{self._amcl_prev[1]:+.2f}) → '
+                    f'({x:+.2f},{y:+.2f}). 컨트롤러가 이 값을 그대로 믿습니다')
+        self._amcl_prev = (x, y)
+
+        if not inside:
+            self.get_logger().error(f'⚠ AMCL 이 맵 밖을 가리킵니다 ({x:+.2f},{y:+.2f})',
+                                    throttle_duration_sec=1.0)
+        elif clear <= 0.0:
+            self.get_logger().error(
+                f'⚠ AMCL 이 **벽 안쪽**을 가리킵니다 ({x:+.2f},{y:+.2f}) — '
+                '물리적으로 불가능한 추정입니다. 위치추정이 깨진 상태입니다',
+                throttle_duration_sec=1.0)
 
     def _redo_cb(self, msg: Bool):
         if msg.data:
