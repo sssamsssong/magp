@@ -71,8 +71,22 @@ setup_dds () {
         # 포기하고 멀티캐스트 자동 탐색으로 둔다. RMW 는 그대로 Cyclone 유지 —
         # 여기서 FastDDS 로 되돌리면 상대 기기와 RMW 가 어긋나 통신이 끊긴다.
         unset CYCLONEDDS_URI
-        echo "[dds] CycloneDDS (자동 탐색) — ${subnet}x 대역을 못 찾았습니다."
-        echo "      주행 내부망에서는 인터페이스 고정 + 유니캐스트로 자동 전환됩니다."
+        echo "[dds] ⚠ CycloneDDS 폴백 (멀티캐스트 자동 탐색)"
+        echo "      network.subnet = '${subnet}' 로 시작하는 내 IP 가 없습니다."
+        echo "      내 IP: $(ip -4 -br addr 2>/dev/null \
+            | awk '$1!="lo"{printf "%s(%s) ", $3, $1}')"
+        echo ""
+        echo "      ★ 상대 기기도 반드시 같은 폴백 상태여야 통신됩니다."
+        echo "        한쪽만 고정되면 통신이 0 이 됩니다 — 고정된 쪽은"
+        echo "        AllowMulticast=false 라 상대의 멀티캐스트 인사를 아예 못 듣고,"
+        echo "        피어 목록엔 자기 IP 뿐이라 먼저 인사하지도 않습니다."
+        echo "        (2026-08-04 실제로 겪음: 젯슨만 새 대역으로 바꾸자 RViz 먹통)"
+        echo "        → 노트북에서도 git pull 로 race_script.yaml 을 맞추고,"
+        echo "          양쪽에서 이 줄이 똑같이 나오는지 확인할 것."
+        echo ""
+        echo "      ※ 폴백은 '되는' 상태가 아니라 '덜 되는' 상태입니다."
+        echo "        WiFi 에서 /map(67KB)·/tf_static 래치 전달이 자주 실패합니다"
+        echo "        — CycloneDDS 를 도입한 이유가 바로 그 문제였습니다."
         return 0
     fi
 
@@ -95,6 +109,7 @@ setup_dds () {
 
     export CYCLONEDDS_URI="file://$out"
     echo "[dds] CycloneDDS  |  인터페이스 $myip 고정  |  피어 $(echo "$peers" | grep -c .)개"
+    echo "      (상대 기기에서도 이 줄이 떠야 통신됩니다. 한쪽만 고정 = 통신 0)"
 }
 
 setup_dds
