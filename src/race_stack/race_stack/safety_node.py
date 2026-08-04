@@ -68,13 +68,18 @@ class SafetyNode(Node):
         self.declare_parameter('use_arc_corridor',   True)
         # RViz 디버그 마커 발행
         self.declare_parameter('publish_debug',      True)
+        # ★ 기본이 /odom_imu 다 (2026-08-04). 통로 예측이 yaw rate 로 선회 반경
+        #   R=v/ω 을 잡는데, 원본 /odom 의 ω 는 서보 "명령" 에서 나와 서보 지연·
+        #   타이어 슬립만큼 과대평가된다. 즉 실제보다 많이 휜 통로를 보고 판정했다.
+        self.declare_parameter('odom_topic',         '/odom_imu')
 
         self.speed = 0.0
         self.yaw_rate = 0.0
         self.braking_until = None
         self.hit_streak = 0
 
-        self.create_subscription(Odometry, '/odom', self.odom_cb, 10)
+        self.create_subscription(
+            Odometry, self.get_parameter('odom_topic').value, self.odom_cb, 10)
         self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
         # mux에서 /teleop 이 priority 100 → 컨트롤러(/drive, 10)보다 우선
         self.brake_pub = self.create_publisher(AckermannDriveStamped, '/teleop', 10)

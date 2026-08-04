@@ -43,6 +43,7 @@ setup(
             'gen_waypoints      = race_stack.gen_waypoints:main',
             'sim_bridge         = race_stack.sim_bridge:main',
             'imu_odom           = race_stack.imu_odom:main',
+            'scan_deskew        = race_stack.scan_deskew:main',
         ],
     },
 )

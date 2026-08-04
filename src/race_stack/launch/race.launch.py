@@ -101,6 +101,9 @@ def generate_launch_description():
     #   odom→base_link TF 는 이 노드만 발행한다. 빠지면 AMCL 이 전부 멈춘다.
     #   imu_yaw: false 면 들어온 odom 을 그대로 중계해 기존 동작과 동일해진다.
     loc = cfg.get('localization', {})
+    # 컨트롤러·AEB·deskew 가 모두 같은 오도메트리를 봐야 한다. 원본 /odom 은
+    # 각속도가 서보 명령 기반이라 진로 예측이 틀어진다 (2026-08-04 전환).
+    odom_topic = str(loc.get('odom_topic', '/odom_imu'))
     nodes.append(Node(
         package='race_stack', executable='imu_odom', name='imu_odom',
         output='screen',
@@ -116,6 +119,26 @@ def generate_launch_description():
             'stationary_rate_deg': float(loc.get('imu_stationary_rate_deg', 2.0)),
         }]))
 
+    # ---------- 1-2. 스캔 모션 보정 (deskew) ----------
+    # 라이다 한 스캔(25ms) 동안 차가 움직이면 첫 빔과 마지막 빔이 다른 위치에서
+    # 찍힌 것인데 메시지는 같은 순간처럼 담긴다. 코너에서 ω=2rad/s 면 스캔 도중
+    # 2.9° 회전 → 5m 점이 25cm 어긋난다. AMCL 이 그 찌그러진 점을 맵에 맞추려다
+    # 위치가 튄다. 속도를 올릴수록 정확히 비례해 나빠지므로 미리 넣어 둔다.
+    deskew_on = bool(loc.get('scan_deskew', False))
+    scan_topic = '/scan_deskewed' if deskew_on else '/scan'
+    if deskew_on:
+        nodes.append(Node(
+            package='race_stack', executable='scan_deskew', name='scan_deskew',
+            output='screen',
+            parameters=[{
+                'scan_in':       '/scan',
+                'scan_out':      scan_topic,
+                'odom_topic':    odom_topic,
+                'stamp_at':      str(  loc.get('deskew_stamp_at',    'start')),
+                'min_yaw_rate':  float(loc.get('deskew_min_yaw_rate', 0.05)),
+                'min_speed':     float(loc.get('deskew_min_speed',    0.10)),
+            }]))
+
     # ---------- 2. 맵 서버 + AMCL + lifecycle ----------
     nodes.append(Node(
         package='nav2_map_server', executable='map_server', name='map_server',
@@ -125,7 +148,8 @@ def generate_launch_description():
     nodes.append(Node(
         package='nav2_amcl', executable='amcl', name='amcl', output='screen',
         parameters=[amcl_yaml,
-                    {'initial_pose.x': float(loc.get('init_x', 0.0)),
+                    {'scan_topic': scan_topic.lstrip('/'),
+                     'initial_pose.x': float(loc.get('init_x', 0.0)),
                      'initial_pose.y': float(loc.get('init_y', 0.0)),
                      'initial_pose.yaw': float(loc.get('init_yaw', 0.0)),
                      'set_initial_pose': True}]))
@@ -177,6 +201,7 @@ def generate_launch_description():
                 'consec_frames':       int(  s.get('consec_frames',       3)),
                 'use_arc_corridor':    bool( s.get('use_arc_corridor',    True)),
                 'publish_debug':       bool( s.get('publish_debug',       True)),
+                'odom_topic':          odom_topic,
             }]))
 
     # ---------- 5. 컨트롤러 (AMCL 수렴 시간 확보를 위해 8초 지연 기동) ----------
@@ -186,6 +211,7 @@ def generate_launch_description():
     #   pure_pursuit 이 공유한다 (같은 트랙·같은 차라 튜닝을 하나로 유지).
     #   경계 파일도 마찬가지로 maps/<map_name>/ 하나를 같이 본다.
     sc = cfg.get('stanley', {})
+    fr = cfg.get('frenet', {})
     bound_dir = sc.get('bound_dir', '') or \
         os.path.join(race_data, 'maps', cfg['map_name'])
 
@@ -219,6 +245,7 @@ def generate_launch_description():
                          'obs_horizon_min': float(sc.get('obs_horizon_min', 0.5)),
                          'obs_horizon_max': float(sc.get('obs_horizon_max', 3.0)),
                          'obs_vote_frames': int(  sc.get('obs_vote_frames',  5)),
+                         'odom_topic':      odom_topic,
                          'laser_offset_x':  0.27, 'laser_offset_y': 0.0,
                          'grid_xmin':       0.35, 'grid_xmax':      5.0,
                          'grid_ymin':      -2.5,  'grid_ymax':      2.5,
@@ -253,6 +280,18 @@ def generate_launch_description():
                 'obs_horizon_min': float(sc.get('obs_horizon_min', 0.5)),
                 'obs_horizon_max': float(sc.get('obs_horizon_max', 3.0)),
                 'obs_vote_frames': int(  sc.get('obs_vote_frames',  5)),
+                # Frenet 후보 궤적 회피
+                'frenet_enabled':    bool( fr.get('enabled',    True)),
+                'frenet_candidates': int(  fr.get('candidates', 9)),
+                'frenet_d_max':      float(fr.get('d_max',      0.60)),
+                'frenet_clearance':  float(fr.get('clearance',  0.25)),
+                'frenet_w_offset':   float(fr.get('w_offset',   1.0)),
+                'frenet_w_change':   float(fr.get('w_change',   0.8)),
+                'frenet_w_clear':    float(fr.get('w_clear',    2.0)),
+                'frenet_clear_cap':  float(fr.get('clear_cap',  0.35)),
+                'frenet_bounds':     bool( fr.get('bounds',     True)),
+                'frenet_debug':      bool( fr.get('debug',      True)),
+                'odom_topic':        odom_topic,
                 'interp_scale':    int(  sc.get('interp_scale',   20)),
                 'lookahead_min':   float(sc.get('lookahead_min',  0.5)),
                 'lookahead_max':   float(sc.get('lookahead_max',  2.0)),

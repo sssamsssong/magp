@@ -117,6 +117,9 @@ class StanleyController(Node):
         # ── parameter declarations ─────────────────────────────────────
         self.declare_parameter('mode',            'q1')
         self.declare_parameter('waypoint_file',   '')
+        # 구독할 오도메트리. 기본은 imu_odom 이 내는 자이로 기반 /odom_imu.
+        # 원본으로 되돌리려면 race_script.yaml 에서 '/odom' 으로 바꾼다.
+        self.declare_parameter('odom_topic',      '/odom_imu')
         self.declare_parameter('max_speed',        5.0)
         self.declare_parameter('min_speed',        1.0)
         self.declare_parameter('max_steer',        0.36)
@@ -153,6 +156,28 @@ class StanleyController(Node):
         # 라이다 40Hz 기준 5프레임 = 125ms = 1.8m/s 에서 0.23m 주행.
         # 예전 10프레임(250ms=0.45m)은 감시거리 1.04m 의 절반을 판정에 썼다.
         self.declare_parameter('obs_vote_frames',  5)
+
+        # ── Frenet 후보 궤적 회피 (2026-08-04) ─────────────────────────
+        # 기존 방식: "막혔다" → 래치한 한쪽으로 고정량(car_width+margin) 이동.
+        #   장애물 폭·위치와 무관하게 항상 같은 양을 같은 쪽으로 민다. 트랙이
+        #   좁아 그쪽이 더 위험해도, 살짝만 비켜도 되는 상황에도 똑같이 민다.
+        # 새 방식: 레이싱라인을 기준선(s축)으로 삼고 횡오프셋 d 후보를 여러 개
+        #   깔아, 각 후보 경로가 장애물·트랙경계와 얼마나 떨어지는지 실제로 재서
+        #   비용이 최소인 d 를 고른다. 검출 파이프라인(통로 판정·투표)은 그대로다 —
+        #   바뀌는 건 "얼마나 어느 쪽으로" 뿐이다.
+        # ★ 래치가 필요 없어진다: 연속성은 w_change 비용이 만든다. 그래서 장애물
+        #   두 개가 좌우로 있을 때 중간을 고르는 것 같은 판단이 자연히 나온다.
+        self.declare_parameter('frenet_enabled',    True)   # False = 옛 래치 방식
+        self.declare_parameter('frenet_candidates', 9)      # 홀수 권장 (0 포함)
+        self.declare_parameter('frenet_d_max',      0.60)   # 최대 횡오프셋 (m)
+        self.declare_parameter('frenet_clearance',  0.25)   # 후보 경로가 확보해야 할
+                                                            # 장애물까지 최소 거리 (m)
+        self.declare_parameter('frenet_w_offset',   1.0)    # |d| 비용 — 라인 복귀력
+        self.declare_parameter('frenet_w_change',   0.8)    # |d-현재| 비용 — 히스테리시스
+        self.declare_parameter('frenet_w_clear',    2.0)    # 여유거리 보상 가중
+        self.declare_parameter('frenet_clear_cap',  0.35)   # 이 이상 여유는 더 안 쳐준다
+        self.declare_parameter('frenet_bounds',     True)   # 트랙 경계 이탈 후보 배제
+        self.declare_parameter('frenet_debug',      True)   # /frenet_candidates 마커
         # 라이다 장착 오프셋 (base_link → laser). 격자 점유 판정에 필수.
         # ★ f1tenth_stack/launch/bringup_launch.py 의 static_baselink_to_laser
         #   값과 반드시 일치해야 한다 (현재 x=0.27, y=0.0).
@@ -206,6 +231,28 @@ class StanleyController(Node):
         # 장애물을 내 차 폭으로 보고: 중심간 car_width + 여유
         self.obs_shift  = self.car_width + self.obs_margin
         self.obs_shift_rate = p('obstacle_shift_rate')
+        self.fr_on      = bool(p('frenet_enabled'))
+        self.fr_n       = max(3, int(p('frenet_candidates')))
+        self.fr_dmax    = float(p('frenet_d_max'))
+        # ★ 요구 여유는 검출 통로 반폭보다 작으면 안 된다.
+        #   검출은 obs_corridor_half_width 로 "막혔다" 고 판정하는데 Frenet 이
+        #   그보다 좁은 기준으로 "라인 그대로도 괜찮다" 고 답하면, 막혔다고 해놓고
+        #   아무 회피도 안 하는 상태로 굳는다 (두 층이 다른 기준을 보는 문제).
+        self.fr_clear   = float(p('frenet_clearance'))
+        if self.fr_clear < self.obs_corr_hw:
+            self.get_logger().warn(
+                f'frenet.clearance({self.fr_clear:.2f}) < '
+                f'obs_corridor_half_width({self.obs_corr_hw:.2f}) — '
+                f'검출 기준에 맞춰 {self.obs_corr_hw:.2f} 로 올립니다')
+            self.fr_clear = self.obs_corr_hw
+        self.fr_w_off   = float(p('frenet_w_offset'))
+        self.fr_w_chg   = float(p('frenet_w_change'))
+        self.fr_w_clr   = float(p('frenet_w_clear'))
+        self.fr_clr_cap = float(p('frenet_clear_cap'))
+        self.fr_bounds  = bool(p('frenet_bounds'))
+        self.fr_debug   = bool(p('frenet_debug'))
+        # 후보 오프셋 격자 — 0 이 정확히 포함되도록 홀수개를 권장한다
+        self.fr_grid    = np.linspace(-self.fr_dmax, self.fr_dmax, self.fr_n)
         self.laser_dx   = p('laser_offset_x')
         self.laser_dy   = p('laser_offset_y')
         self.obs_h_sec  = p('obs_horizon_sec')
@@ -268,6 +315,13 @@ class StanleyController(Node):
             maxlen=max(1, int(p('obs_vote_frames'))))
         # "전방 경로를 막고 있는" 장애물 점들. 회피 방향 계산과 마커 표시에 쓴다.
         self.blocking_pts: list[np.ndarray] = []
+        # 트랙 안에 있는 모든 장애물 점 (막고 있든 아니든). Frenet 후보 평가는
+        # "지금 진로를 막았나" 가 아니라 "저 후보로 가면 뭐가 있나" 를 봐야 하므로
+        # blocking_pts 로는 부족하다 — 옆으로 피한 자리의 장애물이 안 들어온다.
+        self.on_track_pts: np.ndarray = np.zeros((0, 2))
+        self._fr_costs: deque = deque(          # 후보별 비용의 이동평균 창
+            maxlen=max(1, int(p('obs_vote_frames'))))
+        self._fr_best_d = 0.0                   # 마지막으로 고른 오프셋 (로그용)
 
         # ── pose 융합 상태 ─────────────────────────────────────────────
         # /amcl_pose 는 느리고(이동해야 갱신) /odom 은 빠르지만 드리프트.
@@ -316,8 +370,12 @@ class StanleyController(Node):
             '/race/enabled', self._enabled_cb, 10)
         self.create_subscription(PoseWithCovarianceStamped,
             '/amcl_pose', self._pose_cb, 10)
+        # ★ 기본이 /odom_imu 다 (2026-08-04). 원본 /odom 의 각속도는 서보 "명령"
+        #   으로 계산돼(ω=v·tan(δ)/L) 서보 지연·타이어 슬립만큼 과대평가된다.
+        #   이 yaw_rate 가 진로 원호 예측(_in_predicted_corridor)에 그대로 쓰이므로
+        #   장애물 판정까지 같이 틀어졌다. imu_odom 이 자이로 실측으로 바꿔 준다.
         self.create_subscription(Odometry,
-            '/odom', self._odom_cb, 10)
+            p('odom_topic'), self._odom_cb, 10)
         # Q2 는 장애물 격자 판정에, 그 외 모드는 벽 회피에 스캔이 필요하다.
         if self.mode == 'q2' or self.wa_on:
             self.create_subscription(LaserScan,
@@ -326,6 +384,8 @@ class StanleyController(Node):
         self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive',    10)
         self.wp_pub    = self.create_publisher(Marker,                 '/waypoint', 10)
         self.obs_pub   = self.create_publisher(MarkerArray,            '/obstacle', 10)
+        self.fr_pub    = (self.create_publisher(MarkerArray, '/frenet_candidates', 5)
+                          if self.fr_debug else None)
         # ── RViz 시각화: 전체 레이싱라인(속도 컬러) + 차 이동궤적 ─────────
         # 노트북 RViz 가 늦게 접속해도 받도록 1Hz 로 주기 재발행한다.
         self.path_pub    = self.create_publisher(Marker, '/waypoints_path', 10)
@@ -575,17 +635,24 @@ class StanleyController(Node):
                 else np.array([-math.sin(yaw), math.cos(yaw)]))
 
         if not self.lane_free and self.blocking_pts:
-            # ── 방향 래치 ──────────────────────────────────────────────
-            # 한 번 "왼쪽으로 피한다" 고 정하면 그 장애물을 지나칠 때까지 유지.
-            # 매 프레임 다시 정하면, 피하느라 차가 돌면서 장애물이 반대편으로
-            # 보여 부호가 뒤집히고 좌우로 크게 휘청인다.
-            if self._shift_side == 0:
-                obs_c = np.mean(self.blocking_pts, axis=0)
-                lateral = float((obs_c - np.array([px, py])) @ left)
-                self._shift_side = -1.0 if lateral > 0 else 1.0
-            goal = self._shift_side * self.obs_shift
+            if self.fr_on:
+                # ── Frenet 후보 궤적 ───────────────────────────────────
+                # 래치가 없다. 연속성은 |d-현재| 비용이 만들고, 그래서 장애물이
+                # 좌우로 둘일 때 "가운데" 같은 답도 자연히 나온다.
+                goal = self._frenet_select(px, py, yaw)
+            else:
+                # ── 옛 방식: 방향 래치 + 고정량 ────────────────────────
+                # 한 번 "왼쪽으로 피한다" 고 정하면 그 장애물을 지나칠 때까지 유지.
+                # 매 프레임 다시 정하면, 피하느라 차가 돌면서 장애물이 반대편으로
+                # 보여 부호가 뒤집히고 좌우로 크게 휘청인다.
+                if self._shift_side == 0:
+                    obs_c = np.mean(self.blocking_pts, axis=0)
+                    lateral = float((obs_c - np.array([px, py])) @ left)
+                    self._shift_side = -1.0 if lateral > 0 else 1.0
+                goal = self._shift_side * self.obs_shift
         else:
             self._shift_side = 0
+            self._fr_costs.clear()
             goal = 0.0
 
         # ── 램프 ───────────────────────────────────────────────────────
@@ -601,6 +668,139 @@ class StanleyController(Node):
         else:
             self._shift_vec = None
         return target
+
+    # ── Frenet 후보 궤적 평가 ──────────────────────────────────────────────
+
+    def _frenet_paths(self, px: float, py: float):
+        """레이싱라인을 기준선으로 한 후보 경로들을 만든다.
+
+        반환: (cands (N, M, 2) map 좌표, seg (M,2), left (M,2))
+              후보가 만들어지지 않으면 (None, None, None)
+
+        기준선은 "현재 위치에서 앞으로 horizon 만큼의 레이싱라인" 이고, 후보는
+        그것을 각 점의 **법선 방향으로** d 만큼 민 것이다. 직선 평행이동이 아니라
+        점마다 법선을 쓰기 때문에 코너에서도 라인의 곡률을 그대로 따라간다.
+        """
+        wps = self.wps
+        if wps is None or len(wps) < 5:
+            return None, None, None
+        n = len(wps)
+        near = int(np.argmin(np.hypot(wps[:, 0] - px, wps[:, 1] - py)))
+        horizon = self._obs_horizon()
+        m = max(3, int(round(horizon / max(self._wp_ds, 1e-3))))
+        m = min(m, n - 1)
+        idx = (near + np.arange(m + 1)) % n
+        seg = wps[idx, :2]
+
+        # 점별 접선 → 법선 (중심차분). 끝점은 한쪽 차분으로 대체된다.
+        fwd = wps[(idx + 1) % n, :2]
+        bwd = wps[(idx - 1) % n, :2]
+        tang = fwd - bwd
+        tn = np.hypot(tang[:, 0], tang[:, 1])
+        ok = tn > 1e-9
+        tang[ok] /= tn[ok, None]
+        left = np.stack([-tang[:, 1], tang[:, 0]], axis=1)
+
+        # (N, M, 2) — 후보 × 경로점 × 좌표
+        cands = seg[None, :, :] + self.fr_grid[:, None, None] * left[None, :, :]
+        return cands, seg, left
+
+    def _frenet_select(self, px: float, py: float, yaw: float) -> float:
+        """후보 오프셋 중 비용이 최소인 것을 고른다 (m, 좌측 +).
+
+        비용 = w_offset·|d|            라인에서 멀어질수록 손해 (복귀력)
+             + w_change·|d - 현재|     급하게 바꾸지 않도록 (히스테리시스)
+             - w_clear·min(여유, cap)  장애물에서 멀수록 이득 (cap 이상은 무의미)
+        여유 < frenet_clearance 이거나 트랙 밖으로 나가는 후보는 **실행 불가**.
+
+        ★ 비용 벡터를 투표 창만큼 이동평균한다. 라이다 한 프레임의 노이즈로
+          목표 오프셋이 튀면 그게 곧 조향 킥이 된다 (검출 쪽 free_votes 와 같은 이유).
+        """
+        cands, seg, left = self._frenet_paths(px, py)
+        if cands is None:
+            return 0.0
+        N, M, _ = cands.shape
+        flat = cands.reshape(N * M, 2)
+
+        # ── 장애물까지의 여유 ──────────────────────────────────────────
+        obs = self.on_track_pts
+        if len(obs) == 0:
+            obs = np.asarray(self.blocking_pts) if self.blocking_pts else obs
+        if len(obs):
+            # 관련 없는 먼 점은 버린다 — cdist 크기를 실제로 지배하는 건 이쪽이다
+            near_m = (np.hypot(obs[:, 0] - px, obs[:, 1] - py)
+                      < self._obs_horizon() + self.fr_dmax + 1.0)
+            obs = obs[near_m]
+        if len(obs):
+            d_obs = scipy.spatial.distance.cdist(flat, obs).min(axis=1)
+            clear = d_obs.reshape(N, M).min(axis=1)          # 후보별 최소 여유
+        else:
+            clear = np.full(N, np.inf)
+
+        # ── 트랙 경계 이탈 검사 ────────────────────────────────────────
+        inside = np.ones(N, bool)
+        if self.fr_bounds and getattr(self, 'track_mask', None) is not None:
+            h, w = self.map_meta[0], self.map_meta[1]
+            res, ox, oy = self.map_meta[2], self.map_meta[3], self.map_meta[4]
+            img = _world_to_img(flat, h, res, ox, oy)
+            ix, iy = img[:, 0], img[:, 1]
+            ok = (ix >= 0) & (ix < w) & (iy >= 0) & (iy < h)
+            good = np.zeros(N * M, bool)
+            good[ok] = self.track_mask[iy[ok], ix[ok]]
+            inside = good.reshape(N, M).all(axis=1)
+
+        # ── 비용 ───────────────────────────────────────────────────────
+        d = self.fr_grid
+        cost = (self.fr_w_off * np.abs(d)
+                + self.fr_w_chg * np.abs(d - self._shift_cur)
+                - self.fr_w_clr * np.minimum(clear, self.fr_clr_cap))
+        feasible = inside & (clear >= self.fr_clear)
+
+        self._fr_costs.append(cost)
+        cost_avg = np.mean(np.stack(self._fr_costs), axis=0)
+
+        if feasible.any():
+            masked = np.where(feasible, cost_avg, np.inf)
+            best = int(np.argmin(masked))
+        else:
+            # 전부 막혔다 — 그나마 가장 여유 있는 쪽으로. 여기까지 오면 속도를
+            # 줄이는 게 정답이지만 그건 AEB/감속의 영역이고, 조향은 최선을 다한다.
+            best = int(np.argmax(np.where(inside, clear, -np.inf))
+                       if inside.any() else np.argmax(clear))
+            self.get_logger().warn(
+                f'[frenet] 실행 가능한 후보 없음 — 최대여유 {clear[best]:.2f}m '
+                f'(요구 {self.fr_clear:.2f}m), d={d[best]:+.2f}m',
+                throttle_duration_sec=1.0)
+
+        self._fr_best_d = float(d[best])
+        if self.fr_pub is not None:
+            self._pub_frenet(cands, feasible, best)
+        return self._fr_best_d
+
+    def _pub_frenet(self, cands, feasible, best):
+        """후보 경로를 RViz 에 그린다 — 초록=선택, 파랑=가능, 빨강=불가."""
+        arr = MarkerArray()
+        now = self.get_clock().now().to_msg()
+        for i in range(len(cands)):
+            mk = Marker()
+            mk.header.frame_id = 'map'
+            mk.header.stamp = now
+            mk.ns = 'frenet'
+            mk.id = i
+            mk.type = Marker.LINE_STRIP
+            mk.action = Marker.ADD
+            mk.scale.x = 0.03 if i == best else 0.015
+            if i == best:
+                mk.color.r, mk.color.g, mk.color.b, mk.color.a = 0.0, 1.0, 0.0, 1.0
+            elif feasible[i]:
+                mk.color.r, mk.color.g, mk.color.b, mk.color.a = 0.2, 0.5, 1.0, 0.5
+            else:
+                mk.color.r, mk.color.g, mk.color.b, mk.color.a = 1.0, 0.2, 0.2, 0.4
+            for x, y in cands[i]:
+                pt = Point(); pt.x = float(x); pt.y = float(y); pt.z = 0.02
+                mk.points.append(pt)
+            arr.markers.append(mk)
+        self.fr_pub.publish(arr)
 
     def _build_track_mask(self, ign: float):
         """경계 안쪽 판정을 픽셀 마스크로 사전계산 (기동 시 1회).
@@ -874,6 +1074,11 @@ class StanleyController(Node):
             keep = np.zeros(len(pts_world), bool)
             keep[inb] = self.track_mask[iy[inb], ix[inb]]
             on_track = list(pts_world[keep])
+
+        # Frenet 후보 평가는 "지금 진로" 밖의 점도 봐야 한다 (옆으로 피한 자리에
+        # 뭐가 있는지). blocking 만으로는 그 정보가 없어서 따로 보관한다.
+        self.on_track_pts = (np.asarray(on_track) if on_track
+                             else np.zeros((0, 2)))
 
         if not on_track:
             self.blocking_pts = []

@@ -45,6 +45,8 @@ class PurePursuit(Node):
         super().__init__('pure_pursuit')
         # ★ 로그 폴더명(save_run_log)에 쓰는 용도 — 조향/속도 로직과는 무관.
         self.declare_parameter('mode', 'q1')
+        # 자이로 기반 오도메트리 (imu_odom). 원본은 '/odom'
+        self.declare_parameter('odom_topic', '/odom_imu')
         self.declare_parameter('waypoint_file', '')
         self.declare_parameter('max_speed', 3.0)
         self.declare_parameter('min_speed', 1.0)
@@ -132,7 +134,8 @@ class PurePursuit(Node):
         self.create_subscription(Bool, '/race/enabled', self.enabled_cb, 10)
         self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose',
                                  self.pose_cb, 10)
-        self.create_subscription(Odometry, '/odom', self.odom_cb, 10)
+        self.create_subscription(
+            Odometry, self.get_parameter('odom_topic').value, self.odom_cb, 10)
         if self.obs_on:
             self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
             self.obs_pub = self.create_publisher(MarkerArray, '/obstacle', 10)
