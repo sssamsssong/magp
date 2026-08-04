@@ -154,17 +154,27 @@ PCT=$(awk -v v="$VOLT" 'BEGIN{
 V=$(printf "%.1f" "$VOLT" 2>/dev/null || echo "$VOLT")
 CELL=$(awk -v v="$VOLT" 'BEGIN{printf "%.2f", v/4.0}')
 
-# 색/문구 임계값은 동료의 충전기 실측 보정을 그대로 따른다
-if   awk "BEGIN{exit !($VOLT >= 15.6)}"; then COLOR="\033[32m"; NOTE="충분"
-elif awk "BEGIN{exit !($VOLT >= 14.8)}"; then COLOR="\033[33m"; NOTE="충전 권장"
-else                                          COLOR="\033[31m"; NOTE="★ 즉시 충전"
+# ── 경고 단계 (2026-08-04 하향) ───────────────────────────────
+#   예전엔 주의선이 15.6V(≈60%)라 절반이나 남았는데도 "충전 권장"이 떴다.
+#   실제로 52%에서 경고가 뜨는 건 과하다 — 판단을 흐리기만 한다.
+#   위 방전곡선 앵커 기준으로 단계를 잔량 %에 맞춰 다시 잡는다:
+#       14.8V = 3.70 V/cell = 20%   ← 주의
+#       14.4V = 3.60 V/cell = 11%   ← 위험
+#   ※ 무부하 기준이다. 주행 중에는 가속마다 전압이 처지므로, 정지 상태에서
+#     14.8V 면 부하 시엔 그보다 한참 아래로 떨어진다. 20%는 "이번 주행은
+#     마치되 다음 주행 전에 충전" 정도의 선이지 여유가 많다는 뜻이 아니다.
+BAT_WARN=14.8      # 20%
+BAT_CRIT=14.4      # 11%
+if   awk "BEGIN{exit !($VOLT >= $BAT_WARN)}"; then COLOR="\033[32m"; NOTE="충분"
+elif awk "BEGIN{exit !($VOLT >= $BAT_CRIT)}"; then COLOR="\033[33m"; NOTE="충전 권장"
+else                                               COLOR="\033[31m"; NOTE="★ 즉시 충전"
 fi
 RESET="\033[0m"
 
 # 터미널이 아니면(파일 리다이렉트·파이프) 색을 끈다 — 로그에 ESC[32m 이 남지 않도록
 if [ ! -t 1 ]; then COLOR=""; RESET=""; fi
 
-echo -e "[bat] 배터리 ${COLOR}${V} V${RESET} (${CELL} V/cell) — 약 ${COLOR}${PCT}%${RESET}, ${NOTE}   [만충 16.8 / 주의 15.6 / 위험 14.8]"
+echo -e "[bat] 배터리 ${COLOR}${V} V${RESET} (${CELL} V/cell) — 약 ${COLOR}${PCT}%${RESET}, ${NOTE}   [만충 16.8 / 주의 ${BAT_WARN}(20%) / 위험 ${BAT_CRIT}(11%)]"
 
 if [ "$MODE_ARG" != "--inline" ]; then
     echo "      ※ 잔량은 무부하 전압 기준 근사치 — 주행 중에는 처져서 낮게 나온다."
