@@ -191,7 +191,13 @@ class StanleyController(Node):
                                                             # 장애물까지 최소 거리 (m)
         self.declare_parameter('frenet_w_offset',   1.0)    # |d| 비용 — 라인 복귀력
         self.declare_parameter('frenet_w_change',   0.8)    # |d-현재| 비용 — 히스테리시스
-        self.declare_parameter('frenet_w_clear',    2.0)    # 여유거리 보상 가중
+        # ★ w_clear 는 w_offset 보다 작아야 한다 (2026-08-04 실차에서 배움).
+        #   옆으로 Δd 옮기면 여유도 대략 Δd 늘어난다. 그래서 w_clear > w_offset 이면
+        #   비용 변화가 (w_offset - w_clear)·Δd < 0 — **갈수록 이득**이 되어
+        #   clear_cap 에 닿을 때까지 최대한 벗어나는 게 최적해가 된다.
+        #   실제로 정중앙 점 장애물 하나에 45cm 를 밀어 경로가 크게 흔들렸다.
+        #   작게 두면 "실행 가능한 최소 오프셋"이 최적해가 된다 (같은 상황 30cm).
+        self.declare_parameter('frenet_w_clear',    0.5)    # 여유거리 보상 가중
         self.declare_parameter('frenet_clear_cap',  0.35)   # 이 이상 여유는 더 안 쳐준다
         self.declare_parameter('frenet_bounds',     True)   # 트랙 경계 이탈 후보 배제
         self.declare_parameter('frenet_debug',      True)   # /frenet_candidates 마커

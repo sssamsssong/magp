@@ -201,9 +201,9 @@ safety:
 # 9. 로컬라이제이션 (AMCL)
 # ------------------------------------------------------------
 localization:
-  init_x: 0.0           # 시작 위치 초기 추정 (map 좌표)
-  init_y: 0.0
-  init_yaw: 0.0          # 라디안
+  init_x: -0.2941       # 시작 위치 초기 추정 (map 좌표)
+  init_y: 0.031
+  init_yaw: 0.0344       # 라디안
 
   # ── IMU yaw 융합 — odom 의 각속도를 VESC 자이로 실측으로 교체 ──
   #    상세: 개발현황.md 08/03
@@ -387,14 +387,15 @@ stanley:
 #   상세: 개발현황.md 08/04
 # ------------------------------------------------------------
 frenet:
-  enabled: false            # false = 옛 방식(래치 + 고정량 0.42m)
-  candidates: 9             # 후보 개수 (홀수여야 d=0 포함)
-  d_max: 0.60               # 최대 횡오프셋 (m)
-  clearance: 0.35           # 후보가 확보해야 할 장애물까지 최소 거리 (m)
+  enabled: true             # false = 옛 방식(래치 + 고정량 0.42m)
+  candidates: 13            # 후보 개수 (홀수여야 d=0 포함). 많을수록 잘게 고른다
+  d_max: 0.45               # 최대 횡오프셋 (m)
+  clearance: 0.30           # 후보가 확보해야 할 장애물까지 최소 거리 (m)
                             #   ★ obs_corridor_half_width 이상이어야 한다
   w_offset: 1.0             # |d| 비용 — 라인 복귀력
-  w_change: 0.8             # |d-현재| 비용 — 히스테리시스
-  w_clear: 2.0              # 여유거리 보상
+  w_change: 1.0             # |d-현재| 비용 — 히스테리시스
+  w_clear: 0.5              # 여유거리 보상. ★ w_offset 보다 작아야 한다
+                            #   크면 "옆으로 갈수록 이득"이 되어 최대까지 벗어난다
   clear_cap: 0.35           # 이 이상 여유는 더 안 쳐준다 (m)
   bounds: true              # 트랙 경계 이탈 후보 배제
   debug: true               # /frenet_candidates 마커
