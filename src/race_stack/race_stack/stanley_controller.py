@@ -235,6 +235,11 @@ class StanleyController(Node):
         self.declare_parameter('grid_res',         0.04)
         self.declare_parameter('grid_safe_dist',   0.3)
         self.declare_parameter('bound_ignore_px',  7.5)
+        # 이보다 벽에 가까운 반사는 '벽' 으로 본다 (m). 라인 위 최소 여유보다
+        # 작아야 라인이 마스크 안에 남는다 (이 트랙 최소 0.36m)
+        self.declare_parameter('track_margin',     0.20)
+        # 경계 폴리곤을 겹쳐 쓸 것인가 — 트랙 밖 자유공간을 덜어낼 때만 유용
+        self.declare_parameter('use_bounds',       False)
 
         def p(n): return self.get_parameter(n).value
 
@@ -276,6 +281,8 @@ class StanleyController(Node):
         self.fr_debug   = bool(p('frenet_debug'))
         # 후보 오프셋 격자 — 0 이 정확히 포함되도록 홀수개를 권장한다
         self.fr_grid    = np.linspace(-self.fr_dmax, self.fr_dmax, self.fr_n)
+        self.track_margin = float(p('track_margin'))
+        self.use_bounds = bool(p('use_bounds'))
         self.laser_dx   = p('laser_offset_x')
         self.laser_dy   = p('laser_offset_y')
         self.obs_h_sec  = p('obs_horizon_sec')
@@ -922,21 +929,44 @@ class StanleyController(Node):
           (ii < -ign) ⟺ 내곽 폴리곤 외부에서 경계까지 거리 > ign
         """
         self.track_mask = None
-        if (self.inner_bound is None or self.outer_bound is None
-                or self.map_meta is None):
+        if self.map_meta is None:
             return
         h, w = self.map_meta[0], self.map_meta[1]
-        outer_m = np.zeros((h, w), np.uint8)
-        inner_m = np.zeros((h, w), np.uint8)
-        cv2.fillPoly(outer_m, [self.outer_bound.astype(np.int32)], 1)
-        cv2.fillPoly(inner_m, [self.inner_bound.astype(np.int32)], 1)
-        d_out = cv2.distanceTransform(outer_m, cv2.DIST_L2, 5)
-        d_in = cv2.distanceTransform((1 - inner_m).astype(np.uint8),
-                                     cv2.DIST_L2, 5)
-        self.track_mask = (d_out > ign) & (d_in > ign)
+        res = self.map_meta[2]
+
+        # ★ 맵에서 직접 만든다 (2026-08-05). 예전엔 inner/outer 폴리곤을 썼는데
+        #   그건 사람이 클릭해 만든 저해상도 도형이다. half_clean 은 33m 트랙에
+        #   inner 10점 / outer 28점뿐이라 실제 벽선을 전혀 못 따라갔다:
+        #     · 마스크가 **실제로는 벽인 181px 를 트랙 안쪽으로 포함** →
+        #       그 벽에 찍힌 라이다 점이 장애물로 오인됐다
+        #     · 반대로 진짜 주행 가능한 456px 는 누락
+        #   실차에서 장애물 없이도 벽을 피하려 들며 트랙 좌우로 요동쳤다.
+        #   맵의 자유공간을 margin 만큼 침식하면 5cm 해상도로 실제 벽을 따라간다.
+        #
+        #   margin 은 "이보다 벽에 가까운 반사는 벽으로 본다" 는 뜻이다.
+        #   라인 위 최소 여유(이 트랙 36cm)보다 작아야 라인이 마스크 안에 남는다.
+        margin = float(self.track_margin)
+        # map_arr 은 상하 반전(아래가 0행)이라 _world_to_img 규약(위가 0행)에 맞춘다
+        occ_top = np.flipud(self.map_arr[:, :, 0]) > 0.5
+        free = (~occ_top).astype(np.uint8)
+        dist_m = cv2.distanceTransform(free, cv2.DIST_L2, 5) * res
+        self.track_mask = dist_m > margin
+
+        src = '맵 자유공간'
+        # 경계 폴리곤이 있으면 "트랙 밖 자유공간"(피트·관중석 등)을 덜어내는
+        # 용도로만 겹쳐 쓴다. 폴리곤이 엉성해도 벽을 장애물로 만들지는 않는다.
+        if (self.use_bounds and self.inner_bound is not None
+                and self.outer_bound is not None):
+            outer_m = np.zeros((h, w), np.uint8)
+            inner_m = np.zeros((h, w), np.uint8)
+            cv2.fillPoly(outer_m, [self.outer_bound.astype(np.int32)], 1)
+            cv2.fillPoly(inner_m, [self.inner_bound.astype(np.int32)], 1)
+            self.track_mask &= (outer_m > 0) & (inner_m == 0)
+            src += ' ∩ 경계 폴리곤'
+
         self.get_logger().info(
             f'track mask built: {int(self.track_mask.sum())} / {h*w} px '
-            f'(bound_ignore {ign}px)')
+            f'({src}, margin {margin:.2f}m)')
 
     def _predicted_track_path(self, horizon: float) -> np.ndarray:
         """앞으로 지나갈 경로를 "레이싱라인 + 현재 횡오차"로 예측 (map 좌표).

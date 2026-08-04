@@ -310,7 +310,7 @@ def generate_launch_description():
                          'laser_offset_x':  0.27, 'laser_offset_y': 0.0,
                          'grid_xmin':       0.35, 'grid_xmax':      5.0,
                          'grid_ymin':      -2.5,  'grid_ymax':      2.5,
-                         'grid_res':        0.04, 'grid_safe_dist':  0.3,
+                         'grid_res':        0.04, 'grid_safe_dist':  0.12,
                          'bound_ignore_px': 7.5}])
 
     elif controller == 'stanley':
@@ -381,7 +381,7 @@ def generate_launch_description():
                 # 장애물은 피할 수도 없다. (실차에서 차 앞 0.11m 노이즈 검출됨)
                 'grid_xmin':       0.35, 'grid_xmax':      5.0,
                 'grid_ymin':      -2.5,  'grid_ymax':      2.5,
-                'grid_res':        0.04, 'grid_safe_dist':  0.3,
+                'grid_res':        0.04, 'grid_safe_dist':  0.12,
                 'bound_ignore_px': 7.5,
             }])
 
