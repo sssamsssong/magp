@@ -21,15 +21,40 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 [ -f /opt/ros/humble/setup.bash ] && source /opt/ros/humble/setup.bash 2>/dev/null || true
 [ -f "$WS/install/setup.bash"   ] && source "$WS/install/setup.bash"   2>/dev/null || true
 
+# ※ dds_env.sh 는 일부러 소싱하지 않는다. 단독 실행이면 드라이버도 구독자도
+#   같은 셸의 RMW 를 쓰므로 어차피 일치하고, race.sh 경유면 이미 소싱돼 있다.
+#   여기서 또 소싱하면 `ros2 daemon stop` 과 Cyclone 탐색이 끼어들어 느려진다.
+
 # VESC 심링크 (재부팅마다 날아간다 — race.sh 와 같은 처리)
 if [ ! -e /dev/sensors/vesc ]; then
     sudo mkdir -p /dev/sensors 2>/dev/null || true
     sudo ln -sf /dev/ttyACM0 /dev/sensors/vesc 2>/dev/null || true
 fi
 
+# ★ `ros2 topic echo` 를 쓰지 않는다 (2026-08-04).
+#   ros2 CLI 는 조회에 **ros2 데몬**을 거치는데, 데몬은 RMW 별로 따로 뜨고 한 번
+#   엉키면 발행자가 멀쩡히 살아 있어도 토픽을 못 찾는다. 실제로 드라이버가
+#   `Connected to VESC with firmware version 6.6` 까지 찍는데도 echo 가 아무것도
+#   못 받아 "전압을 읽지 못했습니다" 가 떴다. 같은 환경에서 아래 파이썬 구독자는
+#   즉시 15.50V 를 읽었다 — CLI 경로만의 문제였다.
+#   노드로 직접 구독하면 데몬을 안 거치고 CLI 기동 비용도 없다.
 read_volt () {
-    timeout "${1:-5}" ros2 topic echo /sensors/core --once 2>/dev/null \
-        | grep -m1 'voltage_input' | awk '{print $2}'
+    timeout "${1:-5}" python3 -c '
+import sys, time, rclpy
+from rclpy.node import Node
+from vesc_msgs.msg import VescStateStamped
+rclpy.init()
+n = Node("bat_probe")
+got = []
+n.create_subscription(VescStateStamped, "/sensors/core",
+                      lambda m: got.append(m.state.voltage_input), 10)
+t0 = time.time()
+while time.time() - t0 < float(sys.argv[1]) and not got:
+    rclpy.spin_once(n, timeout_sec=0.2)
+if got:
+    print(f"{got[-1]:.3f}")
+rclpy.shutdown()
+' "${1:-5}" 2>/dev/null
 }
 
 VOLT=""
