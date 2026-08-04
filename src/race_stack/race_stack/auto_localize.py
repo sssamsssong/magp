@@ -45,6 +45,11 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Float32
 
 
+def _wrap(a):
+    """각도를 -π~π 로."""
+    return math.atan2(math.sin(a), math.cos(a))
+
+
 class AutoLocalize(Node):
     def __init__(self):
         super().__init__('auto_localize')
@@ -71,6 +76,12 @@ class AutoLocalize(Node):
         # 한 스텝에 이만큼 넘게 튀면 경고 (m). 1.45m/s 에서 AMCL 갱신 간격을
         # 감안해도 30cm 이상은 주행으로 설명되지 않는다.
         self.declare_parameter('jump_warn', 0.30)
+        # 복도 벽 방향으로 yaw 를 먼저 맞출 것인가
+        self.declare_parameter('use_walls', True)
+        self.declare_parameter('wall_range', 3.0)     # 옆벽으로 볼 최대 거리 (m)
+        # 스캔은 PCA 직선다움(0~1), 맵은 히스토그램 봉우리 비율 — 척도가 달라 따로 둔다
+        self.declare_parameter('wall_scan_min', 0.85)
+        self.declare_parameter('wall_map_min',  0.35)
 
         gp = lambda n: self.get_parameter(n).value
         self.init = (float(gp('init_x')), float(gp('init_y')), float(gp('init_yaw')))
@@ -81,11 +92,15 @@ class AutoLocalize(Node):
         self.fit_warn = float(gp('fit_warn'))
         self.jump_warn = float(gp('jump_warn'))
         self._amcl_prev = None
+        self.wall_range = float(gp('wall_range'))
+        self.wall_scan_min = float(gp('wall_scan_min'))
+        self.wall_map_min = float(gp('wall_map_min'))
 
         self.scan = None
         self.speed = 0.0          # 주행 중 재시드 방지용
         self.done = False
         self.dist = None          # 거리변환 (m 단위), 맵 픽셀 격자
+        self._bnd = None          # (by, bx, 방향, 세기) 벽 표면 픽셀
 
         self._load_map(str(gp('map_yaml')))
 
@@ -127,8 +142,24 @@ class AutoLocalize(Node):
         # 자유공간에서 "가장 가까운 장애물까지" 거리 (픽셀 → m)
         free = (~occupied).astype(np.uint8)
         self.dist = cv2.distanceTransform(free, cv2.DIST_L2, 5) * self.res
+
+        # 벽 "표면" 과 그 국소 방향을 미리 뽑아 둔다 (_map_wall_dir 용).
+        # 표면 = 장애물이면서 자유공간에 인접한 픽셀 = 라이다가 실제로 보는 면.
+        occ_u8 = occupied.astype(np.uint8)
+        bnd = (occ_u8 > 0) & (cv2.dilate(free, np.ones((3, 3), np.uint8)) > 0)
+        by, bx = np.nonzero(bnd)
+        if len(bx) >= 30:
+            blur = cv2.GaussianBlur(occ_u8.astype(np.float32), (5, 5), 0)
+            gx = cv2.Sobel(blur, cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(blur, cv2.CV_32F, 0, 1, ksize=3)
+            # 기울기는 벽의 법선. +90° 가 벽 방향. 이미지 y 는 아래로 증가하므로 부호 반전
+            ang = np.arctan2(-gy[by, bx], gx[by, bx]) + math.pi / 2.0
+            self._bnd = (by, bx, ang, np.hypot(gx[by, bx], gy[by, bx]))
+        else:
+            self._bnd = None
         self.get_logger().info(
-            f'맵 로드: {self.W}x{self.H}px @ {self.res}m, 장애물 {int(occupied.sum())}px')
+            f'맵 로드: {self.W}x{self.H}px @ {self.res}m, '
+            f'장애물 {int(occupied.sum())}px (표면 {len(bx)}px)')
 
     # ── 콜백 ───────────────────────────────────────────────────────────────
     def _scan_cb(self, msg: LaserScan):
@@ -204,6 +235,116 @@ class AutoLocalize(Node):
         self.done = True
         self._align(self.scan)
 
+    # ── 벽 방향 추정 ───────────────────────────────────────────────────────
+    #
+    # ★ 왜 격자 탐색만으로는 부족한가 (2026-08-04)
+    #   출발 지점은 양옆이 벽인 **직선 복도**다. 복도에서 비용 함수는 가로 방향
+    #   으로는 뾰족하지만 복도를 따라서는 평평하고(aperture problem), yaw 도
+    #   1° 격자로는 잘 안 갈린다. 그래서 실측에서 출발 방향이 -6°~-25° 로
+    #   흩어졌다. 그런데 복도에서는 **벽의 방향 자체가 답을 알려준다** —
+    #   스캔이 만드는 직선과 맵의 직선을 맞추면 yaw 가 바로 정해진다.
+    #   격자 탐색으로 짐작할 이유가 없다.
+    #
+    # 방향은 180° 주기다(벽은 앞뒤 구분이 없다). 그래서 각도를 2배로 만들어
+    # 원형 평균을 내고 다시 반으로 나눈다 — 0°와 179° 가 이웃임을 살리는 표준 기법.
+
+    @staticmethod
+    def _dominant_angle(ang, weight=None, bins=180, win_deg=10.0):
+        """방향들(0~π)의 지배적 각도와 그 집중도.
+
+        전체 평균(원형 평균)을 쓰면 코너·기둥 같은 다른 방향이 섞여 값이 희석된다
+        (실측: 복도 한가운데인데 집중도 0.12). 히스토그램 최빈값을 먼저 찾고,
+        그 봉우리 ±win_deg 안에 든 가중치 비율을 집중도로 본다 — 다봉 분포에서도
+        "복도 방향이 지배적인가" 를 제대로 판정한다.
+        """
+        if len(ang) < 10:
+            return None, 0.0
+        a = ang % math.pi
+        w = np.ones_like(a) if weight is None else np.asarray(weight, float)
+        h, edges = np.histogram(a, bins=bins, range=(0.0, math.pi), weights=w)
+        # 180° 주기이므로 원형으로 3칸 스무딩
+        h = h + np.roll(h, 1) + np.roll(h, -1)
+        k = int(np.argmax(h))
+        peak = (edges[k] + edges[k + 1]) / 2.0
+        win = math.radians(win_deg)
+        d = np.abs(np.angle(np.exp(2j * (a - peak)))) / 2.0     # 180° 주기 거리
+        m = d < win
+        conc = float(w[m].sum() / (w.sum() + 1e-9))
+        if m.sum() < 5:
+            return None, 0.0
+        # 봉우리 안쪽만으로 원형 평균 → 격자(1°)보다 고운 해상도
+        a2 = 2.0 * a[m]
+        ref = math.atan2(float(np.sum(w[m] * np.sin(a2))),
+                         float(np.sum(w[m] * np.cos(a2)))) / 2.0
+        return ref % math.pi, conc
+
+    @staticmethod
+    def _line_pca(pts):
+        """점 뭉치의 주방향과 직선다움. (각도 0~π, 0~1) — 아니면 (None, 0)."""
+        if len(pts) < 15:
+            return None, 0.0
+        q = pts - pts.mean(axis=0)
+        # 공분산의 고유벡터 = 주축. λ2/λ1 가 작을수록 곧은 직선이다.
+        cov = (q.T @ q) / len(q)
+        ev, evec = np.linalg.eigh(cov)          # 오름차순
+        if ev[1] <= 1e-9:
+            return None, 0.0
+        v = evec[:, 1]
+        return math.atan2(v[1], v[0]) % math.pi, float(1.0 - ev[0] / ev[1])
+
+    def _scan_wall_dir(self, px, py):
+        """스캔이 보는 좌우 복도 벽의 방향 (차량 좌표계, 0~π).
+
+        ★ 인접점 차분을 쓰면 안 된다 — 라이다 빔 간격이 1m 에서 5.8mm 라
+          거리 노이즈 3cm 가 방향을 완전히 지배한다 (실측 집중도 0.14).
+          좌·우 벽을 각각 **직선 피팅(PCA)** 하면 노이즈가 평균으로 지워진다.
+        ★ 360° 전체도 쓰면 안 된다. 코너·안쪽 섬까지 섞여 방향성이 희석된다.
+          옆쪽(전방축 기준 50~130°)의 가까운 점만 본다 — 차가 복도와 ±25° 안에
+          놓여 있다면 그 범위가 곧 좌우 벽이다.
+        """
+        r = np.hypot(px, py)
+        a = np.degrees(np.arctan2(py, px))              # 0=전방, ±180=후방
+        near = r < self.wall_range
+        left = near & (a > 50.0) & (a < 130.0)
+        right = near & (a < -50.0) & (a > -130.0)
+
+        got = []
+        for m in (left, right):
+            if m.sum() < 15:
+                continue
+            ang, q = self._line_pca(np.stack([px[m], py[m]], axis=1))
+            if ang is not None and q > 0.90:            # 충분히 곧은 면만
+                got.append((ang, q, int(m.sum())))
+        if not got:
+            return None, 0.0
+        # 두 벽은 나란하므로 180° 주기 원형 평균으로 합친다
+        w = np.array([g[2] for g in got], float)
+        a2 = 2.0 * np.array([g[0] for g in got])
+        ref = math.atan2(float(np.sum(w * np.sin(a2))),
+                         float(np.sum(w * np.cos(a2)))) / 2.0
+        # 품질: 각 면의 직선다움 평균 × (양쪽 다 잡혔으면 가산)
+        qual = float(np.mean([g[1] for g in got])) * (1.0 if len(got) == 2 else 0.8)
+        return ref % math.pi, qual
+
+    def _map_wall_dir(self, x0, y0, radius=1.5):
+        """맵에서 init 주변 복도의 방향 (map 좌표계, 0~π).
+
+        ★ 장애물 픽셀 전체로 PCA 하면 안 된다 — 맵의 벽은 **속이 채워진 두꺼운
+          덩어리**다(이 맵은 아래 1m·위 3.2m 두께). 뭉치를 보면 방향이 안 나온다.
+          라이다는 **표면만** 보므로 맵에서도 표면(자유공간에 닿은 장애물 픽셀)만
+          쓰고, 각 표면점의 국소 방향을 Sobel 법선에서 얻어 히스토그램으로 모은다.
+          그러면 나란한 두 벽이 같은 봉우리에 쌓인다.
+        """
+        if self._bnd is None:
+            return None, 0.0
+        by, bx, bang, bmag = self._bnd
+        wx = self.ox + bx * self.res
+        wy = self.oy + (self.H - by) * self.res
+        m = np.hypot(wx - x0, wy - y0) < radius
+        if m.sum() < 30:
+            return None, 0.0
+        return self._dominant_angle(bang[m], bmag[m])
+
     # ── 정렬 ───────────────────────────────────────────────────────────────
     def _align(self, scan: LaserScan):
         gp = lambda n: self.get_parameter(n).value
@@ -230,6 +371,30 @@ class AutoLocalize(Node):
         dy = np.arange(-sxy, sxy + 1e-9, step)
         dth = np.arange(-syaw, syaw + 1e-9, dyaw)
         x0, y0, th0 = self.init
+
+        # ── 벽 방향으로 yaw 를 먼저 확정한다 ────────────────────────────
+        # 되면 격자는 그 주변만 미세하게 훑는다. 안 되면(복도가 아니거나 방향성이
+        # 약하면) 원래 범위로 되돌아간다 — 조용히 나빠지지 않게 로그를 남긴다.
+        if bool(gp('use_walls')):
+            sa, sR = self._scan_wall_dir(px, py)
+            ma, mR = self._map_wall_dir(x0, y0)
+            if (sa is not None and ma is not None
+                    and sR > self.wall_scan_min and mR > self.wall_map_min):
+                # 방향은 180° 주기라 후보가 둘이다. init_yaw 에 가까운 쪽을 고른다.
+                cands = [(ma - sa) % (2 * math.pi), (ma - sa + math.pi) % (2 * math.pi)]
+                yaw_w = min(cands, key=lambda t: abs(_wrap(t - th0)))
+                off = math.degrees(_wrap(yaw_w - th0))
+                th0 = yaw_w
+                dth = np.arange(-math.radians(6.0), math.radians(6.0) + 1e-9, dyaw)
+                self.get_logger().info(
+                    f'벽 방향 정렬: 스캔 {math.degrees(sa):.1f}°(집중도 {sR:.2f}) / '
+                    f'맵 {math.degrees(ma):.1f}°(집중도 {mR:.2f}) → '
+                    f'yaw {math.degrees(yaw_w):+.1f}° (init 대비 {off:+.1f}°), '
+                    f'이후 ±6° 미세탐색')
+            else:
+                self.get_logger().warn(
+                    f'벽 방향을 못 잡음 (스캔 집중도 {sR:.2f}, 맵 {mR:.2f}) — '
+                    f'±{gp("search_yaw_deg")}° 격자 탐색으로 진행합니다')
 
         best = (np.inf, x0, y0, th0)
         # yaw 별로 한 번 회전시켜 놓고 xy 는 브로드캐스트로 훑는다

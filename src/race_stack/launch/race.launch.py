@@ -160,6 +160,7 @@ def generate_launch_description():
                 'step_xy':        float(loc.get('align_step_xy',        0.05)),
                 'step_yaw_deg':   float(loc.get('align_step_yaw_deg',   1.0)),
                 'fit_warn':       float(loc.get('align_fit_warn',       0.20)),
+                'use_walls':      bool( loc.get('align_use_walls',      True)),
                 'laser_offset_x': 0.27, 'laser_offset_y': 0.0,
             }])]))
 
