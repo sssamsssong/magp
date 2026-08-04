@@ -139,6 +139,30 @@ def generate_launch_description():
                 'min_speed':     float(loc.get('deskew_min_speed',    0.10)),
             }]))
 
+    # ---------- 1-3. 초기 위치 자동 정렬 ----------
+    # AMCL 은 정지 상태에서 필터를 갱신하지 않아 /amcl_pose 를 아예 안 낸다.
+    # 그래서 예전엔 RViz 2D Pose Estimate 를 사람이 찍어야 했는데, 대회
+    # 출발선에서 노트북을 여는 건 현실적이지 않다. 이 노드가 스캔을 맵에
+    # 맞춰 init_pose 주변을 훑고 /initialpose 를 대신 발행한다.
+    # AMCL 이 활성화된 뒤여야 하므로 지연 기동한다.
+    if bool(loc.get('auto_localize', True)):
+        nodes.append(TimerAction(period=7.0, actions=[Node(
+            package='race_stack', executable='auto_localize',
+            name='auto_localize', output='screen',
+            parameters=[{
+                'map_yaml':       map_yaml,
+                'scan_topic':     scan_topic,
+                'init_x':         float(loc.get('init_x',   0.0)),
+                'init_y':         float(loc.get('init_y',   0.0)),
+                'init_yaw':       float(loc.get('init_yaw', 0.0)),
+                'search_xy':      float(loc.get('align_search_xy',      0.5)),
+                'search_yaw_deg': float(loc.get('align_search_yaw_deg', 15.0)),
+                'step_xy':        float(loc.get('align_step_xy',        0.05)),
+                'step_yaw_deg':   float(loc.get('align_step_yaw_deg',   1.0)),
+                'fit_warn':       float(loc.get('align_fit_warn',       0.20)),
+                'laser_offset_x': 0.27, 'laser_offset_y': 0.0,
+            }])]))
+
     # ---------- 2. 맵 서버 + AMCL + lifecycle ----------
     nodes.append(Node(
         package='nav2_map_server', executable='map_server', name='map_server',
