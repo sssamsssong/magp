@@ -139,8 +139,13 @@ class SlipLogger(Node):
         d('bias_sec', 3.0)
         # 조이스틱 (F710: A=0 B=1 X=2 Y=3, D-pad = axes 6(좌우) 7(상하))
         d('btn_toggle', 1)
-        d('axis_dpad_x', 6)
+        d('axis_dpad_x', 6)          # F710 실측: 6=Hat0X, 7=Hat0Y, 버튼 1=B
         d('axis_dpad_y', 7)
+        # ★ 부호는 드라이버마다 다르다. 리눅스 규약은 Hat0Y 위=-1 인데 ROS
+        #   joy_node 가 뒤집는지가 확실치 않다. 화면의 "D-pad" 값을 보고
+        #   반대로 움직이면 이 값을 true 로 바꾸면 된다.
+        d('dpad_x_invert', False)
+        d('dpad_y_invert', False)
         # 정상상태 판정
         d('ss_hold_sec', 0.5)
         d('ss_v_tol', 0.15)
@@ -184,6 +189,7 @@ class SlipLogger(Node):
         # 연결 상태 — teleop 로그를 화면에서 뺐으므로(slip.launch.py 의 quiet)
         # "왜 차가 안 나가지" 를 여기서 판단할 수 있어야 한다.
         self._seen = {'joy': 0.0, 'odom': 0.0, 'imu': 0.0, 'teleop': 0.0}
+        self._dpad = (0.0, 0.0, False)      # 화면 진단용 (부호 확인)
 
         os.makedirs(_OUT, exist_ok=True)
         self.counts = self._load_counts()
@@ -252,6 +258,11 @@ class SlipLogger(Node):
         b = bool(msg.buttons[bt]) if len(msg.buttons) > bt else False
         dx = float(msg.axes[ax]) if len(msg.axes) > ax else 0.0
         dy = float(msg.axes[ay]) if len(msg.axes) > ay else 0.0
+        if bool(p('dpad_x_invert')):
+            dx = -dx
+        if bool(p('dpad_y_invert')):
+            dy = -dy
+        self._dpad = (dx, dy, b)
         prev = self._prev_joy
         self._prev_joy = (b, dx, dy)
         if prev is None:
@@ -522,6 +533,9 @@ class SlipLogger(Node):
             f'{n} {"✔" if ok[k] else "✘"}'
             for k, n in (('joy', '조이스틱'), ('odom', '오도메트리'),
                          ('imu', 'IMU'), ('teleop', '조종출력')))))
+        dx, dy, bb = self._dpad
+        A(_row(f'  D-pad  x {dx:+.0f}  y {dy:+.0f}   B {"눌림" if bb else " · "}'
+               f'   (반대로 움직이면 dpad_*_invert)'))
         if ok['joy'] and not ok['teleop']:
             # joystick_teleop 은 트리거가 중립인 걸 한 번 봐야 스로틀을 푼다.
             A(_row('  ⚠ 조종 출력 없음 — RT 에서 손을 떼세요 (트리거 중립 대기)'))

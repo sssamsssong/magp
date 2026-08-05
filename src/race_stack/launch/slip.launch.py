@@ -59,5 +59,7 @@ def generate_launch_description():
             'target_runs':  int(sl.get('target_runs', 3)),
             'lever_x':      float(sl.get('lever_x', 0.0)),
             'mu':           float(sl.get('mu', 0.7)),
+            'dpad_x_invert': bool(sl.get('dpad_x_invert', False)),
+            'dpad_y_invert': bool(sl.get('dpad_y_invert', False)),
         }])]))
     return LaunchDescription(nodes)
