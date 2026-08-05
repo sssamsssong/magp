@@ -9,10 +9,9 @@
     # 2026-07-16 IMU 호주행 캘리브레이션: 실제 = 1.594×명령 + 0.032 (구 -1.2135/0.40)
     #   좌 기구락 servo 0.15 = 0.361rad, 우 락 0.85 = 0.558rad → max_steer ≤ 0.35 권장
     steering_angle_to_servo_gain: -0.761
-    # ★ 2026-08-05 실측: 차를 손으로 밀어 직진하는 서보 값이 0.419 였다
-    #   (steer_limit_check.py). 0.425 는 0.45° 우측으로 치우쳐 있어 직진 시
-    #   살짝 오른쪽으로 쏠렸다.
-    steering_angle_to_servo_offset: 0.419
+    # 실측 중립은 0.419 지만 그 값으로 주행하니 직선에서 조향이 발산했다.
+    # 백래시 가설 검증 전까지 0.425 유지 (자세한 내용은 업데이트노트 08-05).
+    steering_angle_to_servo_offset: 0.425
 
     port: /dev/sensors/vesc
     duty_cycle_min: 0.0
@@ -29,7 +28,7 @@
     #   기존 0.15/0.85 중 좌측이 0.05 만큼 보수적이라 좌회전 4.1° 를 못 쓰고 있었다.
     #   (측정: config/vesc_steer_test.yaml 로 락을 풀고 steer_limit_check.py)
     #   스토퍼를 직접 밀지 않도록 0.01 여유를 두고 0.11 로 설정.
-    servo_min: 0.11
+    servo_min: 0.15
     servo_max: 0.85
 
 # No longer needed, all parameters are shared
