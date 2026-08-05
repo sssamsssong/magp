@@ -22,7 +22,11 @@
     speed_max: 50000.0
     position_min: 0.0
     position_max: 0.0
-    servo_min: 0.15
+    # ★ 2026-08-05 실측: 좌 기구 스토퍼가 서보 0.100, 우가 0.860 이었다.
+    #   기존 0.15/0.85 중 좌측이 0.05 만큼 보수적이라 좌회전 4.1° 를 못 쓰고 있었다.
+    #   (측정: config/vesc_steer_test.yaml 로 락을 풀고 steer_limit_check.py)
+    #   스토퍼를 직접 밀지 않도록 0.01 여유를 두고 0.11 로 설정.
+    servo_min: 0.11
     servo_max: 0.85
 
 # No longer needed, all parameters are shared

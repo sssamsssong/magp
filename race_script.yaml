@@ -50,7 +50,7 @@ sim_vehicle:
   h:           0.074   # CoG 높이 (m)
   m:           3.74    # 차량 질량 (kg)
   I:           0.04712 # 관성 모멘트 (kg·m²)
-  s_max:       0.36    # 최대 조향각 (rad) — max_steer와 동일하게
+  s_max:       0.40    # 최대 조향각 (rad) — max_steer와 동일하게
   sv_max:      1.2     # 최대 조향 각속도 (rad/s) — 낮을수록 코너 초입 선회 지연
   a_max:       9.51    # 최대 가속도 (m/s²)
   v_max:       10.0    # 최대 속도 (m/s)
@@ -127,7 +127,7 @@ pure_pursuit:
   lookahead: 1.8            # 전방주시거리 (m). 고속=크게, 저속=작게
   lookahead_speed_gain: 0.3 # 속도 비례 lookahead 가변 (L = lookahead + gain*v)
   wheelbase: 0.33           # 축간거리 (m)
-  max_steer: 0.36           # 최대 조향각 (rad)
+  max_steer: 0.4            # 최대 조향각 (rad)
   curvature_slowdown: 1.5   # 곡률 기반 감속 게인 (클수록 코너에서 많이 감속)
 
   # ★ Q2 장애물 회피 — Stanley 의 wall_avoid.enabled 처럼 이 값 하나로 껐다/켠다.
