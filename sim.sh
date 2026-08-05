@@ -1,33 +1,52 @@
 #!/usr/bin/env bash
 # ============================================================
-#  sim.sh — 노트북에서 시뮬레이션 실행
+#  sim.sh — 시뮬레이션 실행
 #
-#  최초 1회:  ./setup_laptop.sh
-#  이후 실행: ./sim.sh
+#  [f1tenth gym 시뮬 — 노트북 기본 / 명시 지정]
+#    ./sim.sh              컨트롤러 선택 메뉴 (race_stack 없으면 자동)
+#    ./sim.sh hybrid       MAP+Stanley 하이브리드
+#    ./sim.sh pure_pursuit 퓨어퍼슈트
+#    ./sim.sh build        f1tenth_racing 빌드
+#    ./sim.sh lap          랩타임 측정 (별도 터미널)
+#    ./sim.sh stop         gym 시뮬 종료
+#
+#  [race_stack 시뮬 — 젯슨 전용]
+#    ./sim.sh race         race_script.yaml 기준 실행
 # ============================================================
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-
+GYM_SH="$SCRIPT_DIR/f1TENTH-contest_full_stack/sim.sh"
 WS=${RACE_WS:-$HOME/f1tenth_ws}
+
+# gym 관련 커맨드는 무조건 gym으로
+case "${1:-}" in
+  map|hybrid|pure_pursuit|stanley|build|lap|stop|menu|race)
+    exec "$GYM_SH" "$@" ;;
+esac
+
+# 기본(인자 없음) 또는 명시적 race 커맨드 처리
+CMD=${1:-}
+
+# race_stack 실제 인식 여부로 환경 판단
+source /opt/ros/humble/setup.bash
+[ -f "$WS/install/setup.bash" ] && source "$WS/install/setup.bash"
+
+if [ "$CMD" != "race" ] && ! ros2 pkg prefix race_stack &>/dev/null; then
+    # 노트북 환경: race_stack 없음 → gym으로 자동 전환
+    exec "$GYM_SH" "$@"
+fi
+
+# ── race_stack 시뮬 (젯슨) ──────────────────────────────────────────────
 export RACE_WS="$WS"
 export RACE_SCRIPT="$SCRIPT_DIR/race_script.yaml"
-
 SIM_WS="$SCRIPT_DIR/f1TENTH-contest_full_stack/sim_ws"
 
-# ---------- 빌드 여부 확인 ----------
-if [ ! -f "$WS/install/setup.bash" ]; then
-    echo "✗ ~/f1tenth_ws 가 빌드되지 않았습니다."
-    echo "  먼저 ./setup_laptop.sh 를 실행하세요."
-    exit 1
-fi
 if [ ! -f "$SIM_WS/install/setup.bash" ]; then
     echo "✗ sim_ws 가 빌드되지 않았습니다."
     echo "  먼저 ./setup_laptop.sh 를 실행하세요."
     exit 1
 fi
 
-source /opt/ros/humble/setup.bash
-source "$WS/install/setup.bash"
 source "$SIM_WS/install/setup.bash"
 
 MAP=$(python3 -c "import yaml; print(yaml.safe_load(open('$RACE_SCRIPT'))['map_name'])" 2>/dev/null || echo "?")
@@ -35,7 +54,7 @@ MODE=$(python3 -c "import yaml; print(yaml.safe_load(open('$RACE_SCRIPT'))['mode
 CTRL=$(python3 -c "import yaml; print(yaml.safe_load(open('$RACE_SCRIPT'))['controller'])" 2>/dev/null || echo "?")
 
 echo "============================================"
-echo "  RoboRacer 2026  |  SIMULATION"
+echo "  RoboRacer 2026  |  SIMULATION (race_stack)"
 echo "  mode=$MODE  controller=$CTRL  map=$MAP"
 echo "  config: $RACE_SCRIPT"
 echo "============================================"

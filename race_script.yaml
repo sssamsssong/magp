@@ -21,8 +21,8 @@ mode: q2
 #    (주최측 배포 맵을 maps/ 폴더에 넣고 이름만 적으면 됨)
 #    웨이포인트: race_stack/waypoints/<waypoints>.csv  (x,y,speed)
 # ------------------------------------------------------------
-map_name: half_clean           # maps/track_2nd_clean.yaml
-waypoints: half_clean_wp       # waypoints/track_2nd_clean_wp.csv
+map_name: sohot_clean
+waypoints: sohot_clean_wp
 
 # ------------------------------------------------------------
 # 시뮬레이터 스폰 위치 (map 좌표계)

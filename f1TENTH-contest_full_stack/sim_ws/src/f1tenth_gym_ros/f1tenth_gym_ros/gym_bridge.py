@@ -65,6 +65,19 @@ class GymBridge(Node):
         self.declare_parameter('sy1')
         self.declare_parameter('stheta1')
         self.declare_parameter('kb_teleop')
+        self.declare_parameter('veh_mu',          1.0489)
+        self.declare_parameter('veh_C_Sf',        4.718)
+        self.declare_parameter('veh_C_Sr',        5.4562)
+        self.declare_parameter('veh_lf',          0.15875)
+        self.declare_parameter('veh_lr',          0.17145)
+        self.declare_parameter('veh_h',           0.074)
+        self.declare_parameter('veh_m',           3.74)
+        self.declare_parameter('veh_I',           0.04712)
+        self.declare_parameter('veh_s_max',       0.4189)
+        self.declare_parameter('veh_sv_max',      3.2)
+        self.declare_parameter('veh_a_max',       9.51)
+        self.declare_parameter('veh_v_max',       20.0)
+        self.declare_parameter('veh_steer_delay', 2)
 
         # check num_agents
         num_agents = self.get_parameter('num_agent').value
@@ -73,12 +86,36 @@ class GymBridge(Node):
         elif type(num_agents) != int:
             raise ValueError('num_agents should be an int.')
 
+        s_max = self.get_parameter('veh_s_max').value
+        veh_params = {
+            'mu':           self.get_parameter('veh_mu').value,
+            'C_Sf':         self.get_parameter('veh_C_Sf').value,
+            'C_Sr':         self.get_parameter('veh_C_Sr').value,
+            'lf':           self.get_parameter('veh_lf').value,
+            'lr':           self.get_parameter('veh_lr').value,
+            'h':            self.get_parameter('veh_h').value,
+            'm':            self.get_parameter('veh_m').value,
+            'I':            self.get_parameter('veh_I').value,
+            's_min':        -s_max,
+            's_max':        s_max,
+            'sv_min':       -self.get_parameter('veh_sv_max').value,
+            'sv_max':       self.get_parameter('veh_sv_max').value,
+            'v_switch':     7.319,
+            'a_max':        self.get_parameter('veh_a_max').value,
+            'v_min':        -5.0,
+            'v_max':        self.get_parameter('veh_v_max').value,
+            'width':        0.31,
+            'length':       0.58,
+            'steer_buffer_size': self.get_parameter('veh_steer_delay').value,
+        }
+
         # env backend
         self.env = gym.make('f110_gym:f110-v0',
                             map=self.get_parameter('map_path').value,
                             map_ext=self.get_parameter('map_img_ext').value,
                             num_agents=num_agents,
-                            lidar_dist=self.get_parameter("scan_distance_to_base_link").value
+                            lidar_dist=self.get_parameter("scan_distance_to_base_link").value,
+                            params=veh_params,
                             )
 
         sx = self.get_parameter('sx').value

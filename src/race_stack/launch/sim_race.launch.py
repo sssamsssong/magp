@@ -59,6 +59,24 @@ def generate_launch_description():
     sy      = float(sim_cfg.get('sy',     4.111))
     stheta  = float(sim_cfg.get('stheta', math.pi))
 
+    # ── 차량 물리 파라미터 (race_script.yaml [sim_vehicle] 섹션) ─────────────
+    sv = cfg.get('sim_vehicle', {})
+    veh_params = {
+        'veh_mu':          float(sv.get('mu',          1.0489)),
+        'veh_C_Sf':        float(sv.get('C_Sf',        4.718)),
+        'veh_C_Sr':        float(sv.get('C_Sr',        5.4562)),
+        'veh_lf':          float(sv.get('lf',          0.15875)),
+        'veh_lr':          float(sv.get('lr',          0.17145)),
+        'veh_h':           float(sv.get('h',           0.074)),
+        'veh_m':           float(sv.get('m',           3.74)),
+        'veh_I':           float(sv.get('I',           0.04712)),
+        'veh_s_max':       float(sv.get('s_max',       0.4189)),
+        'veh_sv_max':      float(sv.get('sv_max',      3.2)),
+        'veh_a_max':       float(sv.get('a_max',       9.51)),
+        'veh_v_max':       float(sv.get('v_max',       20.0)),
+        'veh_steer_delay': int(  sv.get('steer_delay', 2)),
+    }
+
     # ── 컨트롤러 파라미터 ─────────────────────────────────────────────────
     mode      = cfg.get('mode', 'q1')
     max_speed = float(cfg['speed'].get(f'{mode}_max', cfg['speed']['q1_max']))
@@ -86,7 +104,8 @@ def generate_launch_description():
                      'kb_teleop':   False,
                      'sx':     sx,
                      'sy':     sy,
-                     'stheta': stheta}])
+                     'stheta': stheta,
+                     **veh_params}])
 
     # 2. RViz
     rviz = Node(

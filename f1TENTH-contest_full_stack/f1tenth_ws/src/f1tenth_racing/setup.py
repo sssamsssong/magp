@@ -26,6 +26,8 @@ setup(
             'racing_node = f1tenth_racing.racing_node:main',
             'pure_pursuit_node = f1tenth_racing.pure_pursuit_node:main',
             'hybrid_controller_node = f1tenth_racing.hybrid_controller_node:main',
+            'map_controller_node = f1tenth_racing.map_controller_node:main',
+            'stanley_controller_node = f1tenth_racing.stanley_controller_node:main',
             'lap_timer_node = f1tenth_racing.lap_timer_node:main',
         ],
     },
