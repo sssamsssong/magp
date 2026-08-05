@@ -237,7 +237,7 @@ class StanleyController(Node):
         self.declare_parameter('bound_ignore_px',  7.5)
         # 이보다 벽에 가까운 반사는 '벽' 으로 본다 (m). 라인 위 최소 여유보다
         # 작아야 라인이 마스크 안에 남는다 (이 트랙 최소 0.36m)
-        self.declare_parameter('track_margin',     0.20)
+        self.declare_parameter('track_margin',     0.28)
         # 경계 폴리곤을 겹쳐 쓸 것인가 — 트랙 밖 자유공간을 덜어낼 때만 유용
         self.declare_parameter('use_bounds',       False)
 

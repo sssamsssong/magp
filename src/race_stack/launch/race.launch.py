@@ -311,6 +311,8 @@ def generate_launch_description():
                          'grid_xmin':       0.35, 'grid_xmax':      5.0,
                          'grid_ymin':      -2.5,  'grid_ymax':      2.5,
                          'grid_res':        0.04, 'grid_safe_dist':  0.12,
+                         'track_margin':    float(sc.get('track_margin', 0.28)),
+                'track_margin':    float(sc.get('track_margin', 0.28)),
                          'bound_ignore_px': 7.5}])
 
     elif controller == 'stanley':
