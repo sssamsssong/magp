@@ -219,13 +219,9 @@ case "$CMD" in
   joy)
     exec ros2 launch race_stack joystick.launch.py ;;
   slip)
-    # 수동 주행으로 타이어 슬립 데이터 수집 (AMCL·컨트롤러 불필요).
-    # 별도 터미널에서 ./race.sh joy 로 조종하면서 이걸 띄운다.
-    shift || true
-    NAME=""
-    [ "${1:-}" = "--name" ] && { NAME=${2:?이름을 주세요}; }
+    # 타이어 슬립 데이터 수집 리그. 조이스틱 ↑↓=속도, ←→=반경, B=시작/종료.
+    # 이 노드는 차를 조종하지 않는다 — 별 터미널의 ./race.sh joy 로 몬다.
     exec ros2 run race_stack slip_logger --ros-args \
-      -p name:="$NAME" \
       -p servo_gain:="$(python3 -c "import yaml;print(yaml.safe_load(open('$SCRIPT_DIR/config/vesc.yaml'))['/**']['ros__parameters']['steering_angle_to_servo_gain'])")" \
       -p servo_offset:="$(python3 -c "import yaml;print(yaml.safe_load(open('$SCRIPT_DIR/config/vesc.yaml'))['/**']['ros__parameters']['steering_angle_to_servo_offset'])")" ;;
   log)
