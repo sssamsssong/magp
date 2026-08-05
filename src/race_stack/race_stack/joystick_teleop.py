@@ -38,13 +38,14 @@ sensor_msgs/Joy → /teleop (AckermannDriveStamped)
   steer_invert, max_speed, max_steer, debug
 """
 
+import math
 import time
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import Joy
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float64
 from ackermann_msgs.msg import AckermannDriveStamped
 
 
@@ -77,6 +78,11 @@ class JoystickTeleop(Node):
         self.declare_parameter('debug',            False)
         self.declare_parameter('max_speed',        1.0)
         self.declare_parameter('max_steer',        0.36)
+        # 슬립 시험용 조향 상한 오버라이드를 받을 토픽. slip_logger 가 시험할
+        # 조향각을 여기로 쏘면, 스틱을 끝까지 밀어도 그 각도까지만 나간다.
+        # 사람이 목표 각도를 손으로 맞추는 것보다 훨씬 재현성이 높다.
+        self.declare_parameter('steer_limit_topic', '/slip/steer_limit')
+        self.declare_parameter('steer_limit_timeout', 1.0)   # s
 
         def p(n): return self.get_parameter(n).value
         self.ax_steer      = p('axis_steer')
@@ -92,6 +98,8 @@ class JoystickTeleop(Node):
         self.debug         = p('debug')
         self.max_speed     = p('max_speed')
         self.max_steer     = p('max_steer')
+        self._steer_lim = None        # (값, 수신시각) — 없으면 max_steer 사용
+        self._lim_logged = None
 
         # 트리거 양 끝점: 안 누름(중립) → 끝까지 당김
         self.trig_neutral = 1.0 if self.inv_trigger else -1.0
@@ -124,6 +132,9 @@ class JoystickTeleop(Node):
         #   무엇이 잘못됐는지 알 수 없었다 (2026-08-04 실제로 겪음).
         self._drive_seen = 0.0
         self._auto_since = None
+        self.create_subscription(
+            Float64, self.get_parameter('steer_limit_topic').value,
+            self._steer_limit_cb, 10)
         self.create_subscription(AckermannDriveStamped, '/drive',
                                  self._drive_cb, 10)
         self.create_timer(1.0, self._check_auto)
@@ -238,7 +249,20 @@ class JoystickTeleop(Node):
         if self.inv_steer:
             steer = -steer
 
-        steer = float(max(-self.max_steer, min(self.max_steer, steer * self.max_steer)))
+        # ★ 슬립 시험 중이면 상한을 시험 각도로 낮춘다. 오버라이드는 **낮추는
+        #   방향으로만** 쓴다 — max_steer 를 넘기면 기구 스토퍼를 밀게 된다.
+        #   타임아웃을 두어 slip_logger 가 죽으면 자동으로 원래 상한으로 돌아온다.
+        lim = self.max_steer
+        if self._steer_lim is not None:
+            val, t_rx = self._steer_lim
+            age = (self.get_clock().now().nanoseconds * 1e-9) - t_rx
+            if age <= float(self.get_parameter('steer_limit_timeout').value):
+                lim = min(self.max_steer, val)
+            else:
+                self._steer_lim = None
+                self._lim_logged = None
+                self.get_logger().info('조향 상한 오버라이드 해제 (수신 끊김)')
+        steer = float(max(-lim, min(lim, steer * lim)))
         speed = float(max(-self.max_speed, min(self.max_speed, speed)))
 
         if self.debug:
@@ -250,6 +274,17 @@ class JoystickTeleop(Node):
                     f'| 조향 {steer:+.3f} rad')
 
         self._publish(steer, speed)
+
+    def _steer_limit_cb(self, msg: Float64):
+        v = float(msg.data)
+        if not (0.0 < v <= self.max_steer + 1e-6):
+            return
+        self._steer_lim = (v, self.get_clock().now().nanoseconds * 1e-9)
+        if self._lim_logged is None or abs(self._lim_logged - v) > 1e-4:
+            self._lim_logged = v
+            self.get_logger().info(
+                f'조향 상한 오버라이드 {math.degrees(v):.1f}° '
+                f'(스틱 끝까지 = 이 각도)')
 
     def _publish(self, steer: float, speed: float):
         msg = AckermannDriveStamped()

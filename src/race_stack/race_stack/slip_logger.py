@@ -113,6 +113,12 @@ class SlipLogger(Node):
         d('odom_topic', '/odom')          # 병진 속도는 휠 오도메트리가 정확하다
         d('servo_topic', '/commands/servo/position')
         d('joy_topic', '/joy')
+        # ★ 시험할 조향각을 joystick_teleop 에 상한으로 넘긴다. 그러면 L스틱을
+        #   끝까지 밀었을 때 차량 최대각이 아니라 **이 각도**가 나온다.
+        #   사람이 화면을 보며 손으로 맞추는 것보다 재현성이 비교가 안 된다.
+        #   teleop 쪽은 max_steer 를 넘는 값은 무시하고, 1초 안 오면 원래
+        #   상한으로 되돌아간다 (이 노드가 죽어도 조종은 정상).
+        d('steer_limit_topic', '/slip/steer_limit')
         d('wheelbase', 0.33)
         d('servo_gain', -0.761)           # config/vesc.yaml 과 같아야 한다
         d('servo_offset', 0.425)
@@ -174,12 +180,22 @@ class SlipLogger(Node):
         os.makedirs(_OUT, exist_ok=True)
         self.counts = self._load_counts()
 
+        self.lim_pub = self.create_publisher(Float64, p('steer_limit_topic'), 10)
+        self.create_timer(0.2, self._pub_limit)
         self.create_subscription(Odometry, p('odom_topic'), self._odom_cb, 20)
         self.create_subscription(Float64, p('servo_topic'), self._servo_cb, 20)
         self.create_subscription(Joy, p('joy_topic'), self._joy_cb, 10)
         self.create_subscription(Imu, p('imu_topic'), self._imu_cb,
                                  qos_profile_sensor_data)
         self.create_timer(0.3, self._draw)
+
+    def _pub_limit(self):
+        """고른 시험 조향각을 조향 상한으로 계속 알린다 (5Hz).
+
+        주기 발행이라 이 노드를 끄면 teleop 이 타임아웃으로 원래 상한을 되찾는다.
+        """
+        r = self.radii[self.ir]
+        self.lim_pub.publish(Float64(data=float(math.atan(self.L / r))))
 
     # ── 측정 횟수 누적 (재시작해도 이어진다) ───────────────────────────
     def _cfile(self):
@@ -448,12 +464,12 @@ class SlipLogger(Node):
             _, cv, cd, cw, cwk, _, cay, _, cb, _ = self.rows[-1]
             ratio = (cw / cwk) if abs(cwk) > 0.05 else float('nan')
             rad = (cv / cw) if abs(cw) > 0.05 else float('nan')
-            derr = math.degrees(abs(cd) - delta)      # 목표 조향과의 차이
-            mark = ('◀ 더 꺾어' if derr < -1.0 else
-                    ('▶ 덜 꺾어' if derr > 1.0 else '✔ 유지'))
+            # L스틱을 끝까지 밀면 상한(=시험각)에 닿는다. 얼마나 닿았는지 표시.
+            hit = abs(cd) / max(delta, 1e-6)
+            mark = '✔ 끝까지' if hit > 0.97 else f'스틱 더 밀기 ({hit*100:3.0f}%)'
             A(_row(f'  {time.time() - self.t_state:5.1f}초   v {cv:4.2f}㎧'
-                   f'   δ {math.degrees(cd):+6.1f}° / 목표 {math.degrees(delta):.1f}°'
-                   f'  {mark}'))
+                   f'   δ {math.degrees(cd):+6.1f}° / 상한 {math.degrees(delta):.1f}°'
+                   f'   {mark}'))
             A(_row(f'  실제 반경 {rad:5.2f}m  (조향을 고정하면 슬립이 생길수록 커진다)'))
             A(_row(f'  a_y {cay:+5.2f}㎧² ({cay / lim * 100:3.0f}%)'
                    f'   ψ̇ {math.degrees(cw):+6.1f}°/s'
@@ -479,9 +495,10 @@ class SlipLogger(Node):
             left = float(self.get_parameter('bias_sec').value) - (time.time() - self.t_state)
             A(_row(f'  바이어스 측정 중… {max(left, 0):.1f}초  (움직이지 마세요)'))
         else:
-            A(_row(f'  B = 시작  →  δ 를 {math.degrees(delta):.1f}° 로 고정한 채'
-                   f' 속도만 천천히 올리세요'))
-            A(_row(f'      (0.3㎧² 이하. 1.0→2.5㎧ 를 10초 정도. 바닥 표시 불필요)'))
+            A(_row(f'  조향 상한을 {math.degrees(delta):.1f}° 로 걸어 두었습니다'
+                   f' — L스틱을 끝까지 밀면 그 각도'))
+            A(_row(f'  B = 시작  →  스틱 끝까지 유지한 채 속도만 천천히 올리기'
+                   f' (0.3㎧² 이하)'))
 
         A('╠' + bar + '╣')
         fit = getattr(self, 'fit', None)
