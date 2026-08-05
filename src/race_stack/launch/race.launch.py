@@ -139,6 +139,29 @@ def generate_launch_description():
                 'min_speed':     float(loc.get('deskew_min_speed',    0.10)),
             }]))
 
+    # ---------- 1-2b. 위치추정 품질 감시 ----------
+    # 읽기 전용이다 — TF 도 /drive 도 건드리지 않으므로 켜 두어도 주행에 영향이
+    # 없다. 매 스캔마다 "이 자세가 맞다면 라이다는 뭘 봐야 하는가" 를 맵
+    # 레이캐스팅으로 구해 실측과 비교한다. 그 잔차가 위치추정 오차이고,
+    # 잔차가 거리에 비례해 자라면 맵 스케일 문제다 (08/02 부터 미해결).
+    # 어떤 필터(AMCL·SynPF)를 쓰든 같은 잣대라, 교체 효과를 재는 근거가 된다.
+    if bool(loc.get('monitor', True)) and map_yaml:
+        nodes.append(Node(
+            package='race_stack', executable='localization_monitor',
+            name='localization_monitor', output='screen',
+            parameters=[{
+                'map_yaml':    map_yaml,
+                'scan_topic':  scan_topic,
+                'odom_topic':  odom_topic,
+                'fov_deg':     float(loc.get('monitor_fov_deg',   180.0)),
+                'beam_deg':    float(loc.get('monitor_beam_deg',    2.0)),
+                'max_range':   float(loc.get('monitor_max_range',   6.0)),
+                'reject_m':    float(loc.get('monitor_reject_m',    1.0)),
+                'report_sec':  float(loc.get('monitor_report_sec',  2.0)),
+                'spatial_cell':       float(loc.get('monitor_cell',       0.4)),
+                'spatial_report_sec': float(loc.get('monitor_map_sec',   20.0)),
+            }]))
+
     # ---------- 1-3. 초기 위치 자동 정렬 ----------
     # AMCL 은 정지 상태에서 필터를 갱신하지 않아 /amcl_pose 를 아예 안 낸다.
     # 그래서 예전엔 RViz 2D Pose Estimate 를 사람이 찍어야 했는데, 대회
@@ -312,7 +335,6 @@ def generate_launch_description():
                          'grid_ymin':      -2.5,  'grid_ymax':      2.5,
                          'grid_res':        0.04, 'grid_safe_dist':  0.12,
                          'track_margin':    float(sc.get('track_margin', 0.28)),
-                'track_margin':    float(sc.get('track_margin', 0.28)),
                          'bound_ignore_px': 7.5}])
 
     elif controller == 'stanley':
@@ -385,6 +407,14 @@ def generate_launch_description():
                 'grid_ymin':      -2.5,  'grid_ymax':      2.5,
                 'grid_res':        0.04, 'grid_safe_dist':  0.12,
                 'bound_ignore_px': 7.5,
+                'track_margin':    float(sc.get('track_margin', 0.28)),
+                'use_bounds':      bool( sc.get('use_bounds',   False)),
+                # 빔별 기대거리 비교 (레이캐스팅) — 벽 오검출 대책
+                'raycast_obs':      bool( sc.get('raycast_obs',      True)),
+                'raycast_pose_unc': float(sc.get('raycast_pose_unc', 0.25)),
+                'raycast_deficit':  float(sc.get('raycast_deficit',  0.30)),
+                'raycast_fov_deg':  float(sc.get('raycast_fov_deg',  100.0)),
+                'raycast_beam_deg': float(sc.get('raycast_beam_deg', 1.0)),
             }])
 
     else:

@@ -77,6 +77,11 @@ class ImuOdom(Node):
         self.declare_parameter('publish_tf', True)
         # 자이로 원본 단위 — VESC 는 deg/s 로 준다 (vesc_packet.cpp:627)
         self.declare_parameter('gyro_units', 'deg')      # deg | rad
+        # ★ VESC 원시 IMU 는 g / deg-s 라 REP-145 가 아니다. robot_localization
+        #   EKF 는 rad/s·m/s² 를 전제하므로 원시 토픽을 물리면 각속도를 57 배로
+        #   읽는다. 여기서 단위만 바꿔 표준 토픽으로 다시 낸다 (자세·적분 없음).
+        self.declare_parameter('imu_out_topic', '/imu/data')
+        self.declare_parameter('accel_units', 'g')       # g | ms2
         self.declare_parameter('yaw_axis', 'z')
         self.declare_parameter('yaw_sign', 1.0)
         # 바이어스 추정
@@ -106,7 +111,12 @@ class ImuOdom(Node):
         self.last_odom = None
         self.last_report = None
 
+        self.to_ms2 = (9.80665
+                       if str(self.p('accel_units')).lower() == 'g' else 1.0)
+
         self.pub = self.create_publisher(Odometry, self.p('out_topic'), 10)
+        self.imu_pub = (self.create_publisher(Imu, self.p('imu_out_topic'), 20)
+                        if self.p('imu_out_topic') else None)
         self.tfb = TransformBroadcaster(self) if self.p('publish_tf') else None
         self.create_subscription(Odometry, self.p('odom_topic'), self.odom_cb, 20)
         self.create_subscription(Imu, self.p('imu_topic'), self.imu_cb,
@@ -135,8 +145,31 @@ class ImuOdom(Node):
                          yaw_from_quat(msg.pose.pose.orientation),
                          msg.twist.twist.angular.z)
 
+    # ── 단위만 표준으로 바꾼 IMU 재발행 (EKF 입력용) ──────────
+    # imu_yaw 설정과 무관하게 항상 낸다 — EKF 를 쓰든 안 쓰든 표준 토픽이
+    # 있어야 rviz·rosbag·robot_localization 이 같은 값을 본다.
+    def _republish_imu(self, msg: Imu):
+        if self.imu_pub is None:
+            return
+        o = Imu()
+        o.header = msg.header
+        o.angular_velocity.x = msg.angular_velocity.x * self.to_rad
+        o.angular_velocity.y = msg.angular_velocity.y * self.to_rad
+        o.angular_velocity.z = msg.angular_velocity.z * self.to_rad
+        o.linear_acceleration.x = msg.linear_acceleration.x * self.to_ms2
+        o.linear_acceleration.y = msg.linear_acceleration.y * self.to_ms2
+        o.linear_acceleration.z = msg.linear_acceleration.z * self.to_ms2
+        # 자세(orientation)는 이 IMU 가 주지 않는다 — REP-145 규약대로
+        # 공분산 [0] 을 -1 로 두어 "없음" 을 알린다. 이걸 빼먹으면 EKF 가
+        # 단위 쿼터니언(0,0,0,1)을 "정북 고정" 자세로 믿고 yaw 를 묶어버린다.
+        o.orientation_covariance[0] = -1.0
+        o.angular_velocity_covariance[0] = 0.0
+        o.linear_acceleration_covariance[0] = 0.0
+        self.imu_pub.publish(o)
+
     # ── IMU: yaw 적분 + 위치 추측항법 ──────────────────────────
     def imu_cb(self, msg: Imu):
+        self._republish_imu(msg)
         if not self.use_imu:
             return
 

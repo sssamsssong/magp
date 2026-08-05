@@ -240,6 +240,15 @@ class StanleyController(Node):
         self.declare_parameter('track_margin',     0.28)
         # 경계 폴리곤을 겹쳐 쓸 것인가 — 트랙 밖 자유공간을 덜어낼 때만 유용
         self.declare_parameter('use_bounds',       False)
+        # ── 빔별 기대거리 비교(레이캐스팅) ─────────────────────────────
+        # 마스크 방식(track_margin)은 "이 반사점이 벽 근처인가"만 보므로,
+        # AMCL 오차가 margin 을 넘으면 벽 반사가 그대로 장애물이 된다.
+        # 레이캐스팅은 "이 빔이 맵 벽보다 뚜렷하게 앞에서 끊겼는가"를 본다.
+        self.declare_parameter('raycast_obs',       True)
+        self.declare_parameter('raycast_pose_unc',  0.25)   # 위치추정 불확실성(m)
+        self.declare_parameter('raycast_deficit',   0.30)   # 기대보다 이만큼 짧아야 장애물
+        self.declare_parameter('raycast_fov_deg',   100.0)  # 전방 감시 화각(±)
+        self.declare_parameter('raycast_beam_deg',  1.0)    # 빔 샘플 간격
 
         def p(n): return self.get_parameter(n).value
 
@@ -401,6 +410,7 @@ class StanleyController(Node):
                         'obstacle avoidance will run without polygon test')
 
             self._build_track_mask(float(p('bound_ignore_px')))
+            self._build_raycast_map()
 
         # ── subscriptions / publishers ─────────────────────────────────
         self.create_subscription(Bool,
@@ -968,6 +978,109 @@ class StanleyController(Node):
             f'track mask built: {int(self.track_mask.sum())} / {h*w} px '
             f'({src}, margin {margin:.2f}m)')
 
+    # ── 빔별 기대거리 비교 (레이캐스팅) ────────────────────────────────────
+
+    def _build_raycast_map(self):
+        """레이캐스팅용 점유격자를 기동 시 1회 만든다.
+
+        ★ 왜 맵을 부풀리나 (dilate)
+          기대거리를 "정확한 위치" 기준으로 계산하면, AMCL 이 20cm 틀린 순간
+          벽 반사가 기대보다 20cm 짧게 보여 장애물이 된다. 마스크 방식이 실패한
+          것과 똑같은 이유다.
+
+          그래서 맵의 벽을 위치추정 불확실성 반경만큼 부풀린 뒤 레이캐스팅한다.
+          그러면 기대거리는 "불확실성 안의 어떤 위치에서든 가능한 **가장 짧은**
+          거리" 가 된다. 실측이 그보다도 더 짧다면, 그 반사는 어떤 위치를
+          가정해도 맵 벽으로 설명할 수 없다 — 즉 진짜 장애물이다.
+
+          이 방향의 대가는 "벽에 바짝 붙은 장애물을 놓친다" 는 것이다. 반대
+          방향의 오류(벽을 장애물로 봄)는 직선 9m 를 42cm 밀려 달리게 만들었으니,
+          이쪽 대가가 훨씬 싸다.
+        """
+        self.ray_occ = None
+        if self.map_meta is None or not bool(self.get_parameter('raycast_obs').value):
+            return
+        res = self.map_meta[2]
+        unc = float(self.get_parameter('raycast_pose_unc').value)
+        occ_top = (np.flipud(self.map_arr[:, :, 0]) > 0.5).astype(np.uint8)
+        r_px = max(1, int(round(unc / res)))
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r_px + 1, 2 * r_px + 1))
+        self.ray_occ = cv2.dilate(occ_top, k) > 0
+        self.get_logger().info(
+            f'raycast map built: 벽을 {unc:.2f}m({r_px}px) 부풀림, '
+            f'점유 {int(occ_top.sum())} → {int(self.ray_occ.sum())} px')
+
+    def _raycast_expected(self, lx0: float, ly0: float,
+                          angs: np.ndarray, rmax: float) -> np.ndarray:
+        """(lx0,ly0) 에서 angs 방향으로 부풀린 맵을 쏴 기대거리를 구한다.
+
+        벽에 닿지 않으면 rmax 를 돌려준다. 전 빔을 한 번에 행진시켜(B×S 배열)
+        파이썬 루프를 없앴다 — _scan_cb 는 40Hz 안에 끝나야 한다.
+        """
+        h, w, res, ox, oy = self.map_meta
+        step = res * 0.5
+        t = np.arange(0.0, rmax + step, step)                 # (S,)
+        xs = lx0 + np.cos(angs)[:, None] * t[None, :]
+        ys = ly0 + np.sin(angs)[:, None] * t[None, :]
+        ix = ((xs - ox) / res).astype(np.int32)
+        iy = (h - (ys - oy) / res).astype(np.int32)
+        inb = (ix >= 0) & (ix < w) & (iy >= 0) & (iy < h)
+        hit = np.zeros(ix.shape, bool)
+        hit[inb] = self.ray_occ[iy[inb], ix[inb]]
+        # 맵 밖으로 나간 지점은 더 볼 것이 없으므로 벽으로 간주해 행진을 멈춘다
+        hit |= ~inb
+
+        # ★ 출발점이 부풀린 벽 안에 있는 경우 (차가 벽에서 pose_unc 이내)
+        #   그대로 두면 t=0 에서 즉시 "명중" 이라 기대거리가 전부 0 이 되고,
+        #   장애물 탐지가 통째로 멎는다. 트랙 여유가 36cm 인데 부풀림이 25cm 라
+        #   실제로 자주 일어난다. 광선이 일단 자유공간으로 빠져나온 뒤부터
+        #   명중을 센다.
+        free = ~hit
+        escaped = free.any(axis=1)
+        first_free = np.argmax(free, axis=1)
+        after = np.arange(hit.shape[1])[None, :] > first_free[:, None]
+        hit = hit & after
+
+        any_hit = hit.any(axis=1)
+        first = np.argmax(hit, axis=1)
+        exp = np.where(any_hit, t[first], rmax)
+        # 끝까지 자유공간을 못 만난 빔은 판단 근거가 없다 — 0 을 돌려주면
+        # (meas < 0 - deficit) 이 항상 거짓이 되어 장애물로 오인하지 않는다.
+        return np.where(escaped, exp, 0.0)
+
+    def _raycast_obstacle_pts(self, msg: LaserScan) -> np.ndarray:
+        """기대보다 뚜렷하게 짧게 끊긴 빔만 골라 map 좌표 점으로 돌려준다."""
+        deficit = float(self.get_parameter('raycast_deficit').value)
+        fov     = math.radians(float(self.get_parameter('raycast_fov_deg').value))
+        bstep   = math.radians(float(self.get_parameter('raycast_beam_deg').value))
+
+        n = len(msg.ranges)
+        stride = max(1, int(round(bstep / max(msg.angle_increment, 1e-6))))
+        idx = np.arange(0, n, stride)
+        a_car = msg.angle_min + idx * msg.angle_increment       # 차량 기준 빔각
+        keep = np.abs(a_car) <= fov * 0.5
+        idx, a_car = idx[keep], a_car[keep]
+        if len(idx) == 0:
+            return np.zeros((0, 2))
+
+        meas = np.asarray(msg.ranges, dtype=float)[idx]
+        valid = np.isfinite(meas) & (meas > msg.range_min) & (meas < msg.range_max)
+
+        horizon = self._obs_horizon()
+        rmax = horizon + deficit + 0.5
+
+        # 라이다 원점은 base_link 보다 앞에 있다 — 기대거리도 거기서 재야 한다
+        cy, sy = math.cos(self.yaw), math.sin(self.yaw)
+        lx0 = float(self.pos[0]) + cy * self.laser_dx - sy * self.laser_dy
+        ly0 = float(self.pos[1]) + sy * self.laser_dx + cy * self.laser_dy
+        exp = self._raycast_expected(lx0, ly0, self.yaw + a_car, rmax)
+
+        obs = valid & (meas < horizon) & (meas < exp - deficit)
+        if not obs.any():
+            return np.zeros((0, 2))
+        r, a = meas[obs], (self.yaw + a_car)[obs]
+        return np.vstack((lx0 + r * np.cos(a), ly0 + r * np.sin(a))).T
+
     def _predicted_track_path(self, horizon: float) -> np.ndarray:
         """앞으로 지나갈 경로를 "레이싱라인 + 현재 횡오차"로 예측 (map 좌표).
 
@@ -1150,6 +1263,22 @@ class StanleyController(Node):
             return          # 아래 격자 판정은 Q2 전용
 
         p = self.get_parameter
+
+        # ── 빔별 기대거리 비교 (기본 경로) ─────────────────────────────
+        # 격자+마스크 방식은 "벽 근처인가" 만 보므로 AMCL 오차가 track_margin 을
+        # 넘으면 벽이 장애물이 된다 (2026-08-05 q2: 직선 9.4m 를 42cm 밀려 주행).
+        # 여기서는 "맵 벽보다 앞에서 끊긴 빔" 만 장애물로 본다.
+        if getattr(self, 'ray_occ', None) is not None:
+            pts_world = self._raycast_obstacle_pts(msg)
+            if len(pts_world) == 0:
+                self.on_track_pts = np.zeros((0, 2))
+                self.blocking_pts = []
+                self.free_votes.append(True)
+                return
+            # 마스크를 다시 걸지 않는다 — 이미 "맵으로 설명되지 않는 점" 만 남았다.
+            self._classify_obstacles(pts_world, 0.0, masked=False)
+            return
+
         xmin = p('grid_xmin').value;   xmax = p('grid_xmax').value
         ymin = p('grid_ymin').value;   ymax = p('grid_ymax').value
         res  = p('grid_res').value;    safe = p('grid_safe_dist').value
@@ -1194,9 +1323,10 @@ class StanleyController(Node):
 
         self._classify_obstacles(pts_world, ign)
 
-    def _classify_obstacles(self, pts_world: np.ndarray, ign: float):
+    def _classify_obstacles(self, pts_world: np.ndarray, ign: float,
+                            masked: bool = True):
         # without bound files → treat all grid hits as candidates (벽도 섞인다)
-        if getattr(self, 'track_mask', None) is None:
+        if not masked or getattr(self, 'track_mask', None) is None:
             on_track = list(pts_world)
         else:
             # 사전계산된 마스크 조회 — 예전의 점당 cv2.pointPolygonTest 2회
