@@ -219,11 +219,9 @@ case "$CMD" in
   joy)
     exec ros2 launch race_stack joystick.launch.py ;;
   slip)
-    # 타이어 슬립 데이터 수집 리그. 조이스틱 ↑↓=속도, ←→=반경, B=시작/종료.
-    # 이 노드는 차를 조종하지 않는다 — 별 터미널의 ./race.sh joy 로 몬다.
-    exec ros2 run race_stack slip_logger --ros-args \
-      -p servo_gain:="$(python3 -c "import yaml;print(yaml.safe_load(open('$SCRIPT_DIR/config/vesc.yaml'))['/**']['ros__parameters']['steering_angle_to_servo_gain'])")" \
-      -p servo_offset:="$(python3 -c "import yaml;print(yaml.safe_load(open('$SCRIPT_DIR/config/vesc.yaml'))['/**']['ros__parameters']['steering_angle_to_servo_offset'])")" ;;
+    # 타이어 슬립 데이터 수집. 조종(조이스틱)까지 한 번에 올린다.
+    # ←→ = 시험 조향각(= L스틱 최대값), ↑↓ = 램프 목표 속도, B = 시작/종료
+    exec ros2 launch race_stack slip.launch.py ;;
   log)
     NAME=${2:?웨이포인트 이름을 주세요: ./race.sh log my_track_wp}
     exec ros2 run race_stack waypoint_logger --ros-args -p output:="$PKG_SHARE_WP/$NAME.csv" ;;

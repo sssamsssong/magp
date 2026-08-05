@@ -78,6 +78,7 @@ import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from ackermann_msgs.msg import AckermannDriveStamped
 from sensor_msgs.msg import Imu, Joy
 from std_msgs.msg import Float64
 
@@ -176,6 +177,9 @@ class SlipLogger(Node):
         self._msg = ''
         # 속도 대역별 (실제 ψ̇)/(기구학 ψ̇). 1.00 에서 떨어지는 대역이 슬립 시작점.
         self._band = {}
+        # 연결 상태 — teleop 로그를 화면에서 뺐으므로(slip.launch.py 의 quiet)
+        # "왜 차가 안 나가지" 를 여기서 판단할 수 있어야 한다.
+        self._seen = {'joy': 0.0, 'odom': 0.0, 'imu': 0.0, 'teleop': 0.0}
 
         os.makedirs(_OUT, exist_ok=True)
         self.counts = self._load_counts()
@@ -185,6 +189,8 @@ class SlipLogger(Node):
         self.create_subscription(Odometry, p('odom_topic'), self._odom_cb, 20)
         self.create_subscription(Float64, p('servo_topic'), self._servo_cb, 20)
         self.create_subscription(Joy, p('joy_topic'), self._joy_cb, 10)
+        self.create_subscription(AckermannDriveStamped, '/teleop',
+                                 lambda m: self._seen.__setitem__('teleop', time.time()), 10)
         self.create_subscription(Imu, p('imu_topic'), self._imu_cb,
                                  qos_profile_sensor_data)
         self.create_timer(0.3, self._draw)
@@ -227,12 +233,14 @@ class SlipLogger(Node):
 
     # ── 입력 ───────────────────────────────────────────────────────────
     def _odom_cb(self, msg: Odometry):
+        self._seen['odom'] = time.time()
         self.v = float(msg.twist.twist.linear.x)
 
     def _servo_cb(self, msg: Float64):
         self.delta = (float(msg.data) - self.so) / self.sg
 
     def _joy_cb(self, msg: Joy):
+        self._seen['joy'] = time.time()
         p = lambda n: self.get_parameter(n).value
         bt, ax, ay = int(p('btn_toggle')), int(p('axis_dpad_x')), int(p('axis_dpad_y'))
         b = bool(msg.buttons[bt]) if len(msg.buttons) > bt else False
@@ -270,6 +278,7 @@ class SlipLogger(Node):
 
     # ── IMU 처리 ───────────────────────────────────────────────────────
     def _imu_cb(self, msg: Imu):
+        self._seen['imu'] = time.time()
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         if t <= 0.0:
             t = self.get_clock().now().nanoseconds * 1e-9
@@ -501,6 +510,15 @@ class SlipLogger(Node):
                    f' (0.3㎧² 이하)'))
 
         A('╠' + bar + '╣')
+        now = time.time()
+        ok = {k: (now - t) < 1.0 for k, t in self._seen.items()}
+        A(_row('  연결  ' + '  '.join(
+            f'{n} {"✔" if ok[k] else "✘"}'
+            for k, n in (('joy', '조이스틱'), ('odom', '오도메트리'),
+                         ('imu', 'IMU'), ('teleop', '조종출력')))))
+        if ok['joy'] and not ok['teleop']:
+            # joystick_teleop 은 트리거가 중립인 걸 한 번 봐야 스로틀을 푼다.
+            A(_row('  ⚠ 조종 출력 없음 — RT 에서 손을 떼세요 (트리거 중립 대기)'))
         fit = getattr(self, 'fit', None)
         if fit:
             k, r2, nn, amin, amax = fit

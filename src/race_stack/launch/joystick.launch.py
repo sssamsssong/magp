@@ -66,6 +66,12 @@ def _write_joy_config(joy_cfg: dict) -> str:
 
 
 def generate_launch_description():
+    # quiet:=true 면 화면 출력을 로그 파일로 돌린다. slip.launch.py 가 이걸 쓴다 —
+    # 슬립 리그는 전체 화면 패널을 그리므로 다른 노드가 stdout 에 끼어들면 깨진다.
+    import sys
+    quiet = any(a.lower() in ('quiet:=true', 'quiet:=1') for a in sys.argv)
+    out = 'log' if quiet else 'screen'
+
     cfg_path = os.environ.get(
         'RACE_SCRIPT', os.path.expanduser('~/race_script.yaml'))
     with open(cfg_path) as f:
@@ -88,7 +94,7 @@ def generate_launch_description():
     # joystick_teleop (3초 지연: 브링업 후 mux 준비 시간 확보)
     nodes.append(TimerAction(period=3.0, actions=[Node(
         package='race_stack', executable='joystick_teleop',
-        name='joystick_teleop', output='screen',
+        name='joystick_teleop', output=out,
         parameters=[{
             'axis_steer':       int(  joy_cfg.get('axis_steer',       0)),
             'axis_speed':       int(  joy_cfg.get('axis_speed',       5)),
