@@ -8,7 +8,7 @@
 #    ./race.sh mapping-joy     조이스틱으로 SLAM 맵핑
 #    ./race.sh q1|q2|q3|race [컨트롤러]
 #                              컨트롤러 생략 시 yaml의 controller 값 사용
-#                              (auto | stanley | pure_pursuit | gap_follower)
+#                              (auto | stanley | pure_pursuit | gap_follower | map)
 #                              예: ./race.sh q1 pure_pursuit
 #    ./race.sh box [모드]      ★ 박스 위 벤치 테스트 — 바퀴를 돌리지 않는다.
 #                              실주행과 동일한 스택(맵/AMCL/LiDAR/컨트롤러)을 띄우되
@@ -113,7 +113,7 @@ print(v)"; }
 #     ("Failed to find a free participant index for domain 0").
 STACK_PROCS="[r]ace\.launch\.py|[m]apping\.launch\.py|[u]rg_node_driver|[v]esc_driver_node|\
 [n]av2_amcl/amcl|[n]av2_map_server/map_server|[l]ifecycle_manager|[s]tanley_controller|\
-[m]ission_manager|[p]ure_pursuit|[g]ap_follower|[s]afety_node|[a]ckermann_mux|\
+[m]ission_manager|[p]ure_pursuit|[g]ap_follower|[m]ap_controller|[s]afety_node|[a]ckermann_mux|\
 [a]ckermann_to_vesc_node|[v]esc_to_odom_node|[s]lam_toolbox|\
 [j]oy_node|[j]oy_teleop|[s]tatic_transform_publisher|[k]eyboard_teleop|[j]oystick_teleop|\
 [w]aypoint_logger"
@@ -313,8 +313,8 @@ PYEOF
     MODE=$CMD
     CTRL=${2:-}   # 두 번째 인자로 컨트롤러 오버라이드 (yaml 수정 불필요)
     case "$CTRL" in
-      ""|auto|stanley|pure_pursuit|gap_follower) ;;
-      * ) echo "알 수 없는 컨트롤러: $CTRL  (auto|stanley|pure_pursuit|gap_follower)"; exit 1 ;;
+      ""|auto|stanley|pure_pursuit|gap_follower|map) ;;
+      * ) echo "알 수 없는 컨트롤러: $CTRL  (auto|stanley|pure_pursuit|gap_follower|map)"; exit 1 ;;
     esac ;;
   * ) echo "알 수 없는 명령: $CMD"; exit 1 ;;
 esac

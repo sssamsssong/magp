@@ -21,7 +21,9 @@ from ament_index_python.packages import get_package_share_directory
 DEFAULT_CONTROLLER = {'q1': 'pure_pursuit', 'q2': 'gap_follower',
                       'q3': 'pure_pursuit', 'race': 'gap_follower'}
 
-VALID_CONTROLLERS = {'pure_pursuit', 'gap_follower', 'stanley'}
+# 'map' = MAP(Model-based Adaptive Pure pursuit) 컨트롤러. 트랙 맵(map_name)과
+# 무관한 알고리즘 이름이다 — race_script.yaml 의 [map] 절 참조.
+VALID_CONTROLLERS = {'pure_pursuit', 'gap_follower', 'stanley', 'map'}
 
 
 def generate_launch_description():
@@ -415,6 +417,46 @@ def generate_launch_description():
                 'raycast_deficit':  float(sc.get('raycast_deficit',  0.30)),
                 'raycast_fov_deg':  float(sc.get('raycast_fov_deg',  100.0)),
                 'raycast_beam_deg': float(sc.get('raycast_beam_deg', 1.0)),
+            }])
+
+    elif controller == 'map':
+        # MAP 컨트롤러 — 시뮬(f1tenth_racing/map_controller_node.py)에서 개발한
+        # 것을 실차로 옮긴 것. 조향은 L1 가이던스 + Pacejka 역산, 속도는 CSV
+        # 속도의 역방향 스윕 프로파일. 차량 기하(wheelbase/max_steer)는
+        # pure_pursuit 절과 공유한다 — 같은 차이므로 두 군데 두지 않는다.
+        pp = cfg.get('pure_pursuit', {})
+        mp = cfg.get('map', {})
+        ctrl = Node(
+            package='race_stack', executable='map_controller',
+            name='map_controller', output='screen',
+            parameters=[{
+                'mode':          mode,
+                'waypoint_file': wp_csv,
+                'max_speed':     max_speed,
+                'min_speed':     min_speed,
+                'odom_topic':    odom_topic,
+                'wheelbase':     float(pp.get('wheelbase', 0.33)),
+                'max_steer':     float(pp.get('max_steer', 0.36)),
+                'l1_min':        float(mp.get('l1_min',      0.2725)),
+                'l1_k':          float(mp.get('l1_k',        0.2750)),
+                'mass':          float(mp.get('mass',        3.74)),
+                'lf':            float(mp.get('lf',          0.15875)),
+                'lr':            float(mp.get('lr',          0.17145)),
+                'mu':            float(mp.get('mu',          1.0489)),
+                'pac_b':         float(mp.get('pac_b',       3.629)),
+                'pac_c':         float(mp.get('pac_c',       1.3)),
+                'pac_d':         float(mp.get('pac_d',       1.2084)),
+                'pac_e':         float(mp.get('pac_e',      -0.5)),
+                'a_brake':       float(mp.get('a_brake',     6.0902)),
+                'speed_scale':   float(mp.get('speed_scale', 1.0)),
+                'mu_cap':        bool( mp.get('mu_cap',      False)),
+                'steer_alpha':   float(mp.get('steer_alpha', 0.1981)),
+                'reverse_check': bool( mp.get('reverse_check', True)),
+                # AMCL 첫 pose 전까지의 위치 가정 (stanley 와 같은 값을 쓴다).
+                # 없으면 출발선에서 pose 를 기다리다 영영 못 움직인다.
+                'init_x':        float(loc.get('init_x',   0.0)),
+                'init_y':        float(loc.get('init_y',   0.0)),
+                'init_yaw':      float(loc.get('init_yaw', 0.0)),
             }])
 
     else:

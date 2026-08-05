@@ -35,6 +35,7 @@ setup(
             'gap_follower       = race_stack.gap_follower:main',
             'pure_pursuit       = race_stack.pure_pursuit:main',
             'stanley_controller = race_stack.stanley_controller:main',
+            'map_controller     = race_stack.map_controller:main',
             'safety_node        = race_stack.safety_node:main',
             'mission_manager    = race_stack.mission_manager:main',
             'keyboard_teleop    = race_stack.keyboard_teleop:main',
