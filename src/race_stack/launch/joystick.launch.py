@@ -66,10 +66,13 @@ def _write_joy_config(joy_cfg: dict) -> str:
 
 
 def generate_launch_description():
-    # quiet:=true 면 화면 출력을 로그 파일로 돌린다. slip.launch.py 가 이걸 쓴다 —
+    # quiet 면 화면 출력을 로그 파일로 돌린다. slip.launch.py 가 이걸 쓴다 —
     # 슬립 리그는 전체 화면 패널을 그리므로 다른 노드가 stdout 에 끼어들면 깨진다.
+    # ★ RACE_QUIET(환경변수)를 먼저 본다. include 로 불릴 때는 sys.argv 에
+    #   quiet:=true 가 들어오지 않아 argv 검사만으로는 절대 참이 되지 않았다.
     import sys
-    quiet = any(a.lower() in ('quiet:=true', 'quiet:=1') for a in sys.argv)
+    quiet = (os.environ.get('RACE_QUIET', '') == '1'
+             or any(a.lower() in ('quiet:=true', 'quiet:=1') for a in sys.argv))
     out = 'log' if quiet else 'screen'
 
     cfg_path = os.environ.get(
@@ -116,9 +119,15 @@ def generate_launch_description():
             # (맵핑은 천천히 돌아야 품질이 좋아 값을 분리해 둔다. mapping 과
             #  mapping-joy 는 race.sh 가 speed.mapping_max 를 직접 읽으므로
             #  이 값에 영향받지 않는다)
-            'max_speed':        float(joy_cfg.get('max_speed',
-                                                  speed.get('mapping_max', 1.0))),
-            'max_steer':        float(cfg.get('pure_pursuit', {}).get('max_steer', 0.36)),
+            # ★ 슬립 리그(./race.sh slip)는 자기 상한을 환경변수로 주입한다.
+            #   슬립을 내려면 자율주행보다 높은 속도가 필요한데, 예전엔 이 값을
+            #   공유해서 리그 상한을 올리면 자율주행 상한까지 같이 올라갔다.
+            'max_speed':        float(os.environ.get(
+                'RACE_SLIP_MAX_SPEED',
+                joy_cfg.get('max_speed', speed.get('mapping_max', 1.0)))),
+            'max_steer':        float(os.environ.get(
+                'RACE_SLIP_MAX_STEER',
+                cfg.get('pure_pursuit', {}).get('max_steer', 0.36))),
         }])]))
 
     return LaunchDescription(nodes)

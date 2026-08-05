@@ -239,9 +239,16 @@ class SlipLogger(Node):
         return self.speeds[i] if abs(v - self.speeds[i]) <= half else None
 
     def _key(self, v=None, r=None):
+        """측정 칸 식별자. 반경은 소수 2자리로 적는다.
+
+        ★ .1f 로 적으면 반경이 뭉개져 **다른 설정이 같은 칸에 쌓인다**
+          (2026-08-06: 0.65m→"0.7", 0.74m→"0.7" 로 충돌. 조향각으로는
+          26.9도와 24.0도라 완전히 다른 시험인데 counts.json 과 CSV 파일명이
+          겹쳤다). 반경 격자가 촘촘해질수록 반드시 터지는 문제라 자리수를 늘린다.
+        """
         v = self.speeds[self.iv] if v is None else v
         r = self.radii[self.ir] if r is None else r
-        return f'{v:.1f}_{r:.1f}'
+        return f'{v:.1f}_{r:.2f}'
 
     # ── 입력 ───────────────────────────────────────────────────────────
     def _odom_cb(self, msg: Odometry):
@@ -466,12 +473,21 @@ class SlipLogger(Node):
         A(_row(f'  슬립 테스트 리그{" " * 30}[{STATE_NAME[self.state]:^10}]'))
         A('╠' + bar + '╣')
         A(_row(f'  ↑↓  RT 최대속도  {v:5.1f} ㎧   (트리거 1% = {v/100:.3f}㎧)'))
-        A(_row(f'  ←→  L스틱 최대각 {math.degrees(delta):5.1f}°  (반경 {r:.1f}m)'))
+        A(_row(f'  ←→  L스틱 최대각 {math.degrees(delta):5.1f}°  (반경 {r:.2f}m)'))
 
         A(_row(f'      예상 a_y     {ay:5.2f} ㎧²  마찰한계(μ{self.mu:.1f}) 의 '
                f'{ay / lim * 100:3.0f}%'))
         if ay > lim:
             A(_row('      ⚠ 마찰한계 초과 — 미끄러집니다 (그것도 데이터입니다)'))
+            # ★ 필요 공간 경고 (2026-08-06 실차: 피트에서 7㎧ 시험 중 벽에 여러 번
+            #   강하게 충돌. 11g 스파이크가 로그에 남았다).
+            #   한계를 넘으면 차는 설정 반경을 못 지키고, 잡을 수 있는 최소 반경은
+            #   r_min = v²/(μg) 로 **속도의 제곱**에 비례해 커진다. 설정 반경이
+            #   아니라 이 값이 실제로 필요한 공간이다.
+            r_real = v * v / lim
+            A(_row(f'      ⚠ 실제 선회반경 ≈ {r_real:4.1f}m → 지름 {2*r_real:4.1f}m '
+                   f'이상의 빈 공간 필요'))
+            A(_row('      ⚠ 좁은 실내(피트)에서 금지 — 벽에 그대로 박습니다'))
         A('╠' + bar + '╣')
         A(_row(f'  이 설정 측정  {n} / {self.target_runs} 회'
                + ('   ✔ 충분' if n >= self.target_runs else '')))
@@ -483,7 +499,7 @@ class SlipLogger(Node):
                 txt = str(c) if c else '·'
                 sel = abs(ss - v) < 1e-6 and abs(rr - r) < 1e-6
                 cells += f'{"[" + txt + "]":>6}' if sel else f'{txt:>6}'
-            A(_row(f'   {rr:5.1f}m    ' + cells))
+            A(_row(f'   {rr:5.2f}m    ' + cells))
         A('╠' + bar + '╣')
 
         if self.state == REC and self.rows:

@@ -40,10 +40,27 @@ def generate_launch_description():
         except Exception:
             continue
 
+    # ★ 슬립 리그는 조향·속도 상한을 **자기 것**으로 갖는다 (2026-08-06).
+    #   예전엔 joystick.max_speed 와 pure_pursuit.max_steer 를 그대로 물려받아서,
+    #   슬립을 내려고 상한을 올리면 자율주행 컨트롤러의 상한까지 같이 올라갔다.
+    #   게다가 joystick_teleop 은 자기 상한을 넘는 slip 요청값을 **조용히 무시**한다
+    #   (speeds 의 3.0 > max_speed 2.5 → 무시되고 2.5 로 주행) — 그래서 격자 칸이
+    #   영원히 안 채워지고 "속도가 안 올라간다" 로 보였다.
+    #
+    #   ★ 전달은 환경변수로 한다. launch_arguments 로 넘기면 joystick.launch.py
+    #     에는 닿지 않는다 — 거기서는 sys.argv 를 보는데, include 는 argv 를 거치지
+    #     않기 때문이다. (그래서 quiet:=true 도 여태 동작하지 않고 있었다.
+    #     slip 패널이 다른 노드 출력에 깨지던 원인)
+    #     include 는 같은 프로세스에서 늦게 평가되므로 os.environ 이 그대로 보인다.
+    os.environ['RACE_QUIET'] = '1'
+    if 'max_speed' in sl:
+        os.environ['RACE_SLIP_MAX_SPEED'] = str(float(sl['max_speed']))
+    if 'max_steer' in sl:
+        os.environ['RACE_SLIP_MAX_STEER'] = str(float(sl['max_steer']))
+
     nodes = [IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(share, 'launch', 'joystick.launch.py')),
-        launch_arguments={'quiet': 'true'}.items())]
+            os.path.join(share, 'launch', 'joystick.launch.py')))]
 
     # 브링업·teleop 이 자리를 잡은 뒤 패널을 띄운다 (그래야 첫 화면이 안 깨진다)
     nodes.append(TimerAction(period=5.0, actions=[Node(
