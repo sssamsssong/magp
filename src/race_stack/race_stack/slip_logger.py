@@ -120,6 +120,10 @@ class SlipLogger(Node):
         #   teleop 쪽은 max_steer 를 넘는 값은 무시하고, 1초 안 오면 원래
         #   상한으로 되돌아간다 (이 노드가 죽어도 조종은 정상).
         d('steer_limit_topic', '/slip/steer_limit')
+        # ↑↓ 로 고른 속도를 RT 최고속도로 넘긴다. 트리거 전체 행정이 그 속도에
+        # 배분되므로 같은 손놀림이 훨씬 정밀해진다 — 2.5㎧ 상한에서는 트리거
+        # 1% 가 0.025㎧ 라 정상상태 허용치(0.15㎧)를 지키기가 어렵다.
+        d('speed_limit_topic', '/slip/speed_limit')
         d('wheelbase', 0.33)
         d('servo_gain', -0.761)           # config/vesc.yaml 과 같아야 한다
         d('servo_offset', 0.425)
@@ -185,6 +189,7 @@ class SlipLogger(Node):
         self.counts = self._load_counts()
 
         self.lim_pub = self.create_publisher(Float64, p('steer_limit_topic'), 10)
+        self.spd_pub = self.create_publisher(Float64, p('speed_limit_topic'), 10)
         self.create_timer(0.2, self._pub_limit)
         self.create_subscription(Odometry, p('odom_topic'), self._odom_cb, 20)
         self.create_subscription(Float64, p('servo_topic'), self._servo_cb, 20)
@@ -202,6 +207,7 @@ class SlipLogger(Node):
         """
         r = self.radii[self.ir]
         self.lim_pub.publish(Float64(data=float(math.atan(self.L / r))))
+        self.spd_pub.publish(Float64(data=float(self.speeds[self.iv])))
 
     # ── 측정 횟수 누적 (재시작해도 이어진다) ───────────────────────────
     def _cfile(self):
@@ -448,9 +454,9 @@ class SlipLogger(Node):
         A = L.append
         A(_row(f'  슬립 테스트 리그{" " * 30}[{STATE_NAME[self.state]:^10}]'))
         A('╠' + bar + '╣')
-        A(_row(f'  ↑↓  목표 속도    {v:5.1f} ㎧'))
-        A(_row(f'  ←→  목표 반경    {r:5.1f} m'))
-        A(_row(f'      필요 조향    {math.degrees(delta):5.1f}°  (서보 {servo:.3f})'))
+        A(_row(f'  ↑↓  RT 최대속도  {v:5.1f} ㎧   (트리거 1% = {v/100:.3f}㎧)'))
+        A(_row(f'  ←→  L스틱 최대각 {math.degrees(delta):5.1f}°  (반경 {r:.1f}m)'))
+
         A(_row(f'      예상 a_y     {ay:5.2f} ㎧²  마찰한계(μ{self.mu:.1f}) 의 '
                f'{ay / lim * 100:3.0f}%'))
         if ay > lim:
@@ -504,10 +510,10 @@ class SlipLogger(Node):
             left = float(self.get_parameter('bias_sec').value) - (time.time() - self.t_state)
             A(_row(f'  바이어스 측정 중… {max(left, 0):.1f}초  (움직이지 마세요)'))
         else:
-            A(_row(f'  조향 상한을 {math.degrees(delta):.1f}° 로 걸어 두었습니다'
-                   f' — L스틱을 끝까지 밀면 그 각도'))
-            A(_row(f'  B = 시작  →  스틱 끝까지 유지한 채 속도만 천천히 올리기'
-                   f' (0.3㎧² 이하)'))
+            A(_row(f'  L스틱 끝까지 = {math.degrees(delta):.1f}°,'
+                   f'  RT 끝까지 = {v:.1f}㎧ 로 걸어 두었습니다'))
+            A(_row(f'  B = 시작  →  L스틱 고정, RT 를 {v:.1f}㎧ 까지'
+                   f' {v/0.15:.0f}초에 걸쳐 천천히'))
 
         A('╠' + bar + '╣')
         now = time.time()
