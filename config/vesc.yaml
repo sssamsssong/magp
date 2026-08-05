@@ -9,7 +9,10 @@
     # 2026-07-16 IMU 호주행 캘리브레이션: 실제 = 1.594×명령 + 0.032 (구 -1.2135/0.40)
     #   좌 기구락 servo 0.15 = 0.361rad, 우 락 0.85 = 0.558rad → max_steer ≤ 0.35 권장
     steering_angle_to_servo_gain: -0.761
-    steering_angle_to_servo_offset: 0.425
+    # ★ 2026-08-05 실측: 차를 손으로 밀어 직진하는 서보 값이 0.419 였다
+    #   (steer_limit_check.py). 0.425 는 0.45° 우측으로 치우쳐 있어 직진 시
+    #   살짝 오른쪽으로 쏠렸다.
+    steering_angle_to_servo_offset: 0.419
 
     port: /dev/sensors/vesc
     duty_cycle_min: 0.0

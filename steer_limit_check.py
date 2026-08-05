@@ -99,7 +99,7 @@ def main():
     print(f'\n방향 {args.side} — Enter 마다 서보 {args.step:+.3f} '
           f'({abs(args.step/gain)*180/math.pi:.2f}°) 씩 이동, 하드리밋 {limit:.2f}')
     print('\n★ 바퀴를 공중에 띄웠는지 확인하세요. 모터 명령은 보내지 않습니다.')
-    print('  Enter = 한 칸 더 /  b = 한 칸 되돌리기 /  c = 중앙 /  q = 종료\n')
+    print('  Enter = 한 칸 더 / b = 되돌리기 / c = 중앙 / 숫자 = 서보값 직접 지정 / q = 종료\n')
 
     servo = offset
     pub.publish(Float64(data=servo))
@@ -123,6 +123,17 @@ def main():
             if cmd == 'c':
                 servo = offset
                 pub.publish(Float64(data=servo)); show(servo, '  (중앙)')
+                continue
+            if cmd and (cmd[0].isdigit() or cmd[0] == '.'):
+                # 서보 값을 직접 입력해 바로 이동 (중립 찾을 때 편하다)
+                try:
+                    v = float(cmd)
+                except ValueError:
+                    print('  숫자를 못 읽었습니다'); continue
+                if not (args.floor <= v <= args.ceil):
+                    print(f'  {args.floor}~{args.ceil} 범위로 입력하세요'); continue
+                servo = v
+                pub.publish(Float64(data=servo)); show(servo, '  (직접 지정)')
                 continue
             if cmd == 'b':
                 servo = min(max(servo - dirn * args.step, args.floor), args.ceil)
