@@ -24,6 +24,7 @@ import cv2
 import numpy as np
 import scipy.spatial.distance
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 
@@ -581,13 +582,28 @@ def main():
     node = PurePursuit()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # SIGTERM(race.sh kill_stack)은 rclpy 가 컨텍스트를 내리면서
+        # ExternalShutdownException 으로 올라온다. KeyboardInterrupt 만 잡으면
+        # 이게 안 잡혀 종료 정리가 반쪽이 된다.
         pass
+    except Exception:
+        # 컨텍스트가 이미 내려간 뒤 executor 내부(wait set 등)에서 나는 예외는
+        # 종료 잡음일 뿐이다. 살아 있는 상태의 예외만 그대로 올린다.
+        # (RCLError 는 rclpy 의 private 모듈에만 있어 타입으로 못 잡는다)
+        if rclpy.ok():
+            raise
     finally:
-        node.publish_stop()
+        # ★ 컨텍스트가 이미 닫힌 뒤면 발행이 예외를 던진다. 가드 없이 두면 그
+        #   예외가 finally 를 뚫고 나가 **save_run_log 가 실행되지 않는다** —
+        #   2026-08-06 에 MAP·pure_pursuit 주행 로그가 하나도 안 남던 진짜 원인.
+        #   (stanley 는 이 가드가 있어서 그 주행만 로그가 남아 있었다)
+        if rclpy.ok():
+            node.publish_stop()
         node.save_run_log()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

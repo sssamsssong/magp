@@ -35,6 +35,7 @@ import yaml
 from PIL import Image
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 
@@ -44,6 +45,8 @@ from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, ColorRGBA
 from visualization_msgs.msg import Marker, MarkerArray
+
+from race_stack.paths import repo_root
 
 # ── 저장소 루트 (주행 종료 시 실주행 로그 저장용, gen_waypoints.py와 동일한 관례) ──
 # 이 파일: <repo>/src/race_stack/race_stack/stanley_controller.py
@@ -57,8 +60,8 @@ _PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # <repo
 #   (2026-08-04 실차). 래치로 구독해야 마지막 값을 받는다.
 LATCHED_IN = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
-_REPO_ROOT = (os.path.expanduser(os.environ['RACE_WS']) if os.environ.get('RACE_WS')
-              else os.path.dirname(os.path.dirname(_PKG_DIR)))
+# 로그 저장 위치는 race_stack.paths 가 단독으로 정한다 (규칙이 갈리지 않도록).
+_REPO_ROOT = repo_root()
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -1520,8 +1523,15 @@ def main():
     node = StanleyController()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # SIGTERM(race.sh kill_stack)은 ExternalShutdownException 으로 올라온다.
         pass
+    except Exception:
+        # 컨텍스트가 이미 내려간 뒤 executor 내부(wait set 등)에서 나는 예외는
+        # 종료 잡음일 뿐이다. 살아 있는 상태의 예외만 그대로 올린다.
+        # (RCLError 는 rclpy 의 private 모듈에만 있어 타입으로 못 잡는다)
+        if rclpy.ok():
+            raise
     finally:
         # Ctrl-C 로 컨텍스트가 이미 닫힌 뒤면 발행이 예외를 던진다.
         # 종료 경로에서만 나는 노이즈라 조건을 두고 조용히 넘긴다.
@@ -1529,7 +1539,8 @@ def main():
             node._publish_cmd(0.0, 0.0)
         node.save_run_log()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

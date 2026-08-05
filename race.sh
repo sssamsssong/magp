@@ -38,6 +38,10 @@ export RACE_WS="$WS"
 # ~/f1tenth_ws/race.sh 는 이 repo로 가는 심링크 — readlink -f 로 실제 위치(~/yax)를
 # 찾아야 race_script.yaml 을 제대로 읽는다 (심링크 경유 실행 시 launch가 즉사하던 버그)
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# 주행 로그(logs/)는 실행 워크스페이스가 아니라 **git repo** 에 쌓여야 한다.
+# RACE_WS(~/f1tenth_ws)를 쓰던 시절엔 로그가 repo 밖에 떨어져 커밋·공유가 안 됐다
+# (2026-08-06 발견). logs/README.md 가 전제하는 "git 으로 공유" 를 성립시킨다.
+export RACE_REPO="$SCRIPT_DIR"
 RACE_SCRIPT="$SCRIPT_DIR/race_script.yaml"
 PKG_SHARE_MAPS="$WS/src/race_stack/maps"
 PKG_SHARE_WP="$WS/src/race_stack/waypoints"

@@ -82,9 +82,12 @@ from ackermann_msgs.msg import AckermannDriveStamped
 from sensor_msgs.msg import Imu, Joy
 from std_msgs.msg import Float64
 
-_REPO = (os.path.expanduser(os.environ['RACE_WS']) if os.environ.get('RACE_WS')
-         else os.path.dirname(os.path.dirname(os.path.dirname(
-             os.path.dirname(os.path.abspath(__file__))))))
+# 슬립 CSV 도 팀 공유 대상이라 **git repo** 안에 쌓여야 한다.
+# 경로 규칙은 race_stack.paths 하나로 유지한다 — 두 군데서 따로 정하면 로그가
+# 두 곳으로 갈린다 (2026-08-06 에 실제로 갈려 있었다).
+from race_stack.paths import repo_root
+
+_REPO = repo_root()
 _OUT = os.path.join(_REPO, 'logs', 'slip_tests')
 
 BOX_W = 64          # 테두리 안쪽 표시 폭(칸). 한글은 2칸이라 len() 으로는 못 센다
