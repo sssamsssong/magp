@@ -218,6 +218,16 @@ case "$CMD" in
     exec ros2 run race_stack keyboard_teleop --ros-args -p max_speed:=$(get_yaml speed.mapping_max) ;;
   joy)
     exec ros2 launch race_stack joystick.launch.py ;;
+  slip)
+    # 수동 주행으로 타이어 슬립 데이터 수집 (AMCL·컨트롤러 불필요).
+    # 별도 터미널에서 ./race.sh joy 로 조종하면서 이걸 띄운다.
+    shift || true
+    NAME=""
+    [ "${1:-}" = "--name" ] && { NAME=${2:?이름을 주세요}; }
+    exec ros2 run race_stack slip_logger --ros-args \
+      -p name:="$NAME" \
+      -p servo_gain:="$(python3 -c "import yaml;print(yaml.safe_load(open('$SCRIPT_DIR/config/vesc.yaml'))['/**']['ros__parameters']['steering_angle_to_servo_gain'])")" \
+      -p servo_offset:="$(python3 -c "import yaml;print(yaml.safe_load(open('$SCRIPT_DIR/config/vesc.yaml'))['/**']['ros__parameters']['steering_angle_to_servo_offset'])")" ;;
   log)
     NAME=${2:?웨이포인트 이름을 주세요: ./race.sh log my_track_wp}
     exec ros2 run race_stack waypoint_logger --ros-args -p output:="$PKG_SHARE_WP/$NAME.csv" ;;

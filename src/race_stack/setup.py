@@ -46,6 +46,7 @@ setup(
             'scan_deskew        = race_stack.scan_deskew:main',
             'auto_localize      = race_stack.auto_localize:main',
             'localization_monitor = race_stack.localization_monitor:main',
+            'slip_logger        = race_stack.slip_logger:main',
         ],
     },
 )

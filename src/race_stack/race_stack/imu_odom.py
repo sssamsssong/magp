@@ -81,6 +81,10 @@ class ImuOdom(Node):
         #   EKF 는 rad/s·m/s² 를 전제하므로 원시 토픽을 물리면 각속도를 57 배로
         #   읽는다. 여기서 단위만 바꿔 표준 토픽으로 다시 낸다 (자세·적분 없음).
         self.declare_parameter('imu_out_topic', '/imu/data')
+        # 재발행 메시지의 frame. 원시 메시지는 frame_id 가 비어 있어
+        # (vesc_driver.cpp 가 stamp 만 채운다) robot_localization 이 축을
+        # 변환할 근거가 없다. imu_link 로 태그하고 static TF 로 회전을 준다.
+        self.declare_parameter('imu_frame', 'imu_link')
         self.declare_parameter('accel_units', 'g')       # g | ms2
         self.declare_parameter('yaw_axis', 'z')
         self.declare_parameter('yaw_sign', 1.0)
@@ -111,6 +115,7 @@ class ImuOdom(Node):
         self.last_odom = None
         self.last_report = None
 
+        self._imu_frame = str(self.p('imu_frame'))
         self.to_ms2 = (9.80665
                        if str(self.p('accel_units')).lower() == 'g' else 1.0)
 
@@ -152,7 +157,12 @@ class ImuOdom(Node):
         if self.imu_pub is None:
             return
         o = Imu()
-        o.header = msg.header
+        o.header.stamp = msg.header.stamp
+        # ★ 원시 메시지는 frame_id 가 비어 있다 — 여기서 채워야 EKF 가
+        #   base_link↔imu_link static TF 로 축(전방=-y, 좌측=+x)을 바로잡는다.
+        #   축을 여기서 직접 돌리지 않는 이유: 그러면 레버암(센서~무게중심
+        #   거리)이 무시된다. TF 에 맡기면 회전과 병진을 함께 처리한다.
+        o.header.frame_id = self._imu_frame
         o.angular_velocity.x = msg.angular_velocity.x * self.to_rad
         o.angular_velocity.y = msg.angular_velocity.y * self.to_rad
         o.angular_velocity.z = msg.angular_velocity.z * self.to_rad
