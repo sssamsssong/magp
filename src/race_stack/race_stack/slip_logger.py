@@ -30,10 +30,18 @@
       ← →   목표 정상원 반경 변경
       B     테스트 시작 / 종료
 
-  절차: 화살표로 (속도, 반경) 을 고른다 → 그 반경의 원 위에 차를 놓고 **정지**
-        → B → 3초 바이어스 자동측정 → "출발하세요!" → 그 원을 그리며 주행
-        → 다 돌았거나 미끄러지면 정지 후 B → 자동 저장, 측정 횟수 +1
-        → 화살표로 설정만 바꿔 바로 다음 테스트
+  ★ 시험법은 **정반경 램프**(constant-radius ramp) 다. 반경을 고정하고 속도를
+    천천히 올린다. 슬립이 생기면 같은 반경을 유지하려고 조향을 더 줘야 하고,
+    그 증가분이 곧 K_us 다 — 화면의 "실제/기구학" 이 1.00 에서 떨어지는 순간이
+    슬립 시작점이다.
+
+  절차: ←→ 로 반경을 고른다 → 그 반경의 원 위에 놓고 **정지** → B
+        → 3초 바이어스 자동측정 → "출발하세요!"
+        → 그 반경을 유지하며 **속도를 천천히** 올린다 (0.3 ㎧² 이하.
+           1.0→2.5 ㎧ 를 10초 정도. 더 빠르면 정상상태 판정에서 걸러진다)
+        → 미끄러지거나 원을 못 유지하면 정지 후 B → 자동 저장
+        ↑↓ 는 램프 목표 속도(안내용)일 뿐이다. 측정 칸은 **실측 속도로 자동
+        분류**되므로, 한 번의 램프가 여러 속도 칸을 한꺼번에 채운다.
 
 ★ 축·단위 (2026-08-02 imu_axis_check.py 실측)
       차량 전방 = IMU -y,  차량 좌측 = IMU +x,  위 = +z
@@ -151,6 +159,8 @@ class SlipLogger(Node):
         self._ss_buf = []
         self._prev_joy = None
         self._msg = ''
+        # 속도 대역별 (실제 ψ̇)/(기구학 ψ̇). 1.00 에서 떨어지는 대역이 슬립 시작점.
+        self._band = {}
 
         os.makedirs(_OUT, exist_ok=True)
         self.counts = self._load_counts()
@@ -171,6 +181,19 @@ class SlipLogger(Node):
             return json.load(open(self._cfile()))
         except Exception:
             return {}
+
+    def _vbin(self, v):
+        """실측 속도를 속도 격자에 붙인다.
+
+        정반경 램프는 속도가 연속으로 오르므로, 사람이 고른 목표가 아니라
+        **그 표본이 실제로 얼마에서 찍혔는지**로 분류해야 한다. 그래야 한 번의
+        램프가 여러 칸을 채운다. 격자 간격의 절반을 넘게 벗어나면 버린다.
+        """
+        if not self.speeds:
+            return None
+        i = int(np.argmin([abs(v - s) for s in self.speeds]))
+        half = (self.speeds[1] - self.speeds[0]) / 2 if len(self.speeds) > 1 else 0.25
+        return self.speeds[i] if abs(v - self.speeds[i]) <= half else None
 
     def _key(self, v=None, r=None):
         v = self.speeds[self.iv] if v is None else v
@@ -296,8 +319,14 @@ class SlipLogger(Node):
                 or a[:, 2].ptp() > float(p('ss_delta_tol'))
                 or a[:, 3].ptp() > float(p('ss_wz_tol'))):
             return False
-        self.ss.append((float(a[:, 2].mean()), float(a[:, 4].mean()),
-                        float(a[:, 1].mean()), float(a[:, 3].mean())))
+        sd, say = float(a[:, 2].mean()), float(a[:, 4].mean())
+        sv, swz = float(a[:, 1].mean()), float(a[:, 3].mean())
+        self.ss.append((sd, say, sv, swz))
+        vb = self._vbin(sv)
+        if vb is not None:
+            wk = sv * math.tan(sd) / self.L
+            if abs(wk) > 0.05:
+                self._band.setdefault(vb, []).append(swz / wk)
         self._ss_buf.clear()
         return True
 
@@ -320,14 +349,21 @@ class SlipLogger(Node):
             for row in self.rows:
                 w.writerow([f'{row[0]-t0:.4f}'] + [f'{x:.5f}' for x in row[1:9]]
                            + [row[9]])
-        k = self._key()
-        self.counts[k] = self.counts.get(k, 0) + 1
+        # ★ 고른 목표가 아니라 **실제로 측정된 속도 대역**을 채운다.
+        #   정반경 램프 한 번이 여러 속도 칸을 동시에 채우는 게 정상이다.
+        for vb, ratios in self._band.items():
+            if len(ratios) >= 2:
+                kk = self._key(vb, r)
+                self.counts[kk] = self.counts.get(kk, 0) + 1
         try:
             json.dump(self.counts, open(self._cfile(), 'w'))
         except Exception:
             pass
-        self._msg = (f'저장 {os.path.basename(path)} — '
-                     f'{len(self.rows)}표본, 정상상태 {len(self.ss)}점')
+        filled = ', '.join(f'{vb:.1f}㎧' for vb in sorted(self._band)
+                           if len(self._band[vb]) >= 2) or '없음'
+        self._msg = (f'저장 {os.path.basename(path)} — {len(self.rows)}표본, '
+                     f'정상상태 {len(self.ss)}점, 채운 속도대역: {filled}')
+        self._band = {}
         self._fit_all()
 
     # ── 전체 데이터로 K_us 회귀 ────────────────────────────────────────
@@ -403,18 +439,35 @@ class SlipLogger(Node):
             _, cv, cd, cw, cwk, _, cay, _, cb, _ = self.rows[-1]
             ratio = (cw / cwk) if abs(cwk) > 0.05 else float('nan')
             rad = (cv / cw) if abs(cw) > 0.05 else float('nan')
-            A(_row(f'  {time.time() - self.t_state:5.1f}초    v {cv:4.2f} (목표 {v:.1f})'
-                   f'    δ {math.degrees(cd):+6.1f}° (목표 {math.degrees(delta):.1f}°)'))
-            A(_row(f'  실제 반경 {rad:5.2f}m (목표 {r:.1f})   a_y {cay:+5.2f}㎧²'
-                   f'   ψ̇ {math.degrees(cw):+6.1f}°/s'))
-            # 실제/기구학 < 1 = 명령한 만큼 안 돈다 = 언더스티어(전륜 슬립)
-            A(_row(f'  실제/기구학 {ratio:5.2f}   β {math.degrees(cb):+5.1f}°'
-                   f'   정상상태 {len(self.ss)}점'))
+            A(_row(f'  {time.time() - self.t_state:5.1f}초   v {cv:4.2f}㎧'
+                   f'   δ {math.degrees(cd):+6.1f}°'
+                   f'   실제 반경 {rad:5.2f}m (목표 {r:.1f})'))
+            A(_row(f'  a_y {cay:+5.2f}㎧² ({cay / lim * 100:3.0f}%)'
+                   f'   ψ̇ {math.degrees(cw):+6.1f}°/s'
+                   f'   정상상태 {len(self.ss)}점   β {math.degrees(cb):+5.1f}°'))
+            # ── 속도 대역별 실제/기구학 — 이게 슬립 시작점을 보여준다 ──
+            # 1.00 = 명령한 만큼 돈다(슬립 없음). 1 보다 작으면 덜 도는 것,
+            # 즉 전륜이 미끄러지는 언더스티어다.
+            cells, onset = '', None
+            for ss_ in self.speeds:
+                rs = self._band.get(ss_, [])
+                if rs:
+                    m = float(np.mean(rs[-5:]))
+                    cells += f'  {ss_:.1f}:{m:.2f}'
+                    if onset is None and m < 0.95:
+                        onset = (ss_, m)
+                else:
+                    cells += f'  {ss_:.1f}:—'
+            A(_row('  속도별 실제/기구학' + cells))
+            if onset:
+                A(_row(f'  ⚠ 슬립 시작 — {onset[0]:.1f}㎧ 에서 {onset[1]:.2f}'
+                       f'  (반경 {r:.1f}m 기준)'))
         elif self.state == BIAS:
             left = float(self.get_parameter('bias_sec').value) - (time.time() - self.t_state)
             A(_row(f'  바이어스 측정 중… {max(left, 0):.1f}초  (움직이지 마세요)'))
         else:
-            A(_row(f'  B = 테스트 시작   (반경 {r:.1f}m 원 위에 놓고 정지한 뒤)'))
+            A(_row(f'  B = 시작  →  반경 {r:.1f}m 를 유지하며 속도를 천천히 올리세요'))
+            A(_row(f'      (0.3㎧² 이하. 1.0→2.5㎧ 를 10초 정도)'))
 
         A('╠' + bar + '╣')
         fit = getattr(self, 'fit', None)
