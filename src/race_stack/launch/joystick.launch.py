@@ -119,15 +119,19 @@ def generate_launch_description():
             # (맵핑은 천천히 돌아야 품질이 좋아 값을 분리해 둔다. mapping 과
             #  mapping-joy 는 race.sh 가 speed.mapping_max 를 직접 읽으므로
             #  이 값에 영향받지 않는다)
-            # ★ 슬립 리그(./race.sh slip)는 자기 상한을 환경변수로 주입한다.
-            #   슬립을 내려면 자율주행보다 높은 속도가 필요한데, 예전엔 이 값을
-            #   공유해서 리그 상한을 올리면 자율주행 상한까지 같이 올라갔다.
+            # ★ 리그성 도구(슬립/곡률캘리브레이션 등)는 자기 상한을 환경변수로
+            #   주입한다. 그런 도구는 자율주행보다 높은 속도가 필요한데, 예전엔
+            #   이 값을 공유해서 리그 상한을 올리면 자율주행 상한까지 같이
+            #   올라갔다. RACE_TELEOP_MAX_* 가 범용 이름이고, RACE_SLIP_MAX_* 는
+            #   slip.launch.py 전용으로 남겨둔 예전 이름(하위호환, 우선순위 낮음).
             'max_speed':        float(os.environ.get(
+                'RACE_TELEOP_MAX_SPEED', os.environ.get(
                 'RACE_SLIP_MAX_SPEED',
-                joy_cfg.get('max_speed', speed.get('mapping_max', 1.0)))),
+                joy_cfg.get('max_speed', speed.get('mapping_max', 1.0))))),
             'max_steer':        float(os.environ.get(
+                'RACE_TELEOP_MAX_STEER', os.environ.get(
                 'RACE_SLIP_MAX_STEER',
-                cfg.get('pure_pursuit', {}).get('max_steer', 0.36))),
+                cfg.get('pure_pursuit', {}).get('max_steer', 0.36)))),
         }])]))
 
     return LaunchDescription(nodes)

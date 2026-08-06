@@ -20,6 +20,9 @@
 #    ./race.sh joy             조이스틱 수동 조종 (브링업 포함)
 #    ./race.sh log <이름>      웨이포인트 기록 (수동주행하며 레이싱라인 녹화)
 #    ./race.sh waypoints [맵]  SLAM 맵에서 레이싱라인 생성 (GUI, 디스플레이 필요)
+#    ./race.sh waypoints-kappa [맵]  위와 동일 + 조향각 물리한계(곡률) 제약
+#                              → <맵>_wp_kappa.csv 로 따로 저장, 랩타임 비교용
+#    ./race.sh curvprobe       곡률-속도 캘리브레이션 리그 (slip과 별개 도구)
 #    ./race.sh savepose        ★ 지금 AMCL 위치를 초기 추정으로 저장
 #                              RViz "2D Pose Estimate" 로 맵과 스캔을 맞춘 뒤 실행하면
 #                              다음 실행부터 그 위치에서 시작 (맵-스캔 어긋남 해소)
@@ -226,6 +229,11 @@ case "$CMD" in
     # 타이어 슬립 데이터 수집. 조종(조이스틱)까지 한 번에 올린다.
     # ←→ = 시험 조향각(= L스틱 최대값), ↑↓ = 램프 목표 속도, B = 시작/종료
     exec ros2 launch race_stack slip.launch.py ;;
+  curvprobe)
+    # 곡률-속도 캘리브레이션 리그. slip 과 별개 도구/설정(curv_probe: 섹션).
+    # 풀조향(좌 또는 우 끝까지) 유지한 채 속도만 서서히 올린다. B = 시작/종료.
+    # 분석: ros2 run race_stack curvature_probe -- --analyze
+    exec ros2 launch race_stack curvature_probe.launch.py ;;
   log)
     NAME=${2:?웨이포인트 이름을 주세요: ./race.sh log my_track_wp}
     exec ros2 run race_stack waypoint_logger --ros-args -p output:="$PKG_SHARE_WP/$NAME.csv" ;;
@@ -235,6 +243,15 @@ case "$CMD" in
       exec ros2 run race_stack gen_waypoints -- --map "$NAME"
     else
       exec ros2 run race_stack gen_waypoints
+    fi ;;
+  waypoints-kappa)
+    # gen_waypoints 와 동일하되 조향각 물리 한계(곡률) 제약이 들어간 버전.
+    # 결과는 <맵이름>_wp_kappa.csv 로 따로 저장되어 기존 결과와 랩타임 비교 가능.
+    NAME=${2:-}
+    if [ -n "$NAME" ]; then
+      exec ros2 run race_stack gen_waypoints_kappa -- --map "$NAME"
+    else
+      exec ros2 run race_stack gen_waypoints_kappa
     fi ;;
   savepose)
     # 지금 AMCL 이 믿고 있는 위치를 race_script.yaml 의 초기 추정으로 굳힌다.
