@@ -10,10 +10,11 @@
   브링업 로그는 기동 직후에만 나오고 이후 조용하다.
 """
 import os
+import time
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, TimerAction
+from launch.actions import ExecuteProcess, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 import yaml
@@ -30,12 +31,15 @@ def generate_launch_description():
     # 서보 캘리브레이션은 config/vesc.yaml 이 원본이다. 여기서 다시 적지 않는다 —
     # 두 곳에 적으면 반드시 갈라진다.
     gain, offset = -0.761, 0.425
+    s_min, s_max = 0.15, 0.85       # 기구 스토퍼 — 이것도 vesc.yaml 이 원본이다
     for p in (os.path.join(os.path.expanduser(os.environ.get('RACE_WS', '~/yax')),
                            'config', 'vesc.yaml'), vesc):
         try:
             v = yaml.safe_load(open(p))['/**']['ros__parameters']
             gain = float(v['steering_angle_to_servo_gain'])
             offset = float(v['steering_angle_to_servo_offset'])
+            s_min = float(v.get('servo_min', s_min))
+            s_max = float(v.get('servo_max', s_max))
             break
         except Exception:
             continue
@@ -75,16 +79,37 @@ def generate_launch_description():
             parameters=[{
                 'servo_gain':    gain,
                 'servo_offset':  offset,
+                'servo_min':     s_min,
+                'servo_max':     s_max,
                 'wheelbase':     wb,
+                # base_link→laser static TF (f1tenth_stack bringup: 0.27 0 0.11)
+                'lidar_x':       float(sl.get('lidar_x', 0.27)),
+                'enable_lin_slip': bool(sl.get('enable_lin_slip', False)),
                 'bias_sec':      float(sl.get('bias_sec',   3.0)),
                 'cal_sec':       float(sl.get('cal_sec',    5.0)),
                 'delta_lin':     float(sl.get('delta_lin', -1.0)),
                 'delta_ang':     float(sl.get('delta_ang', -1.0)),
-                'max_scan_m':    float(sl.get('max_scan_m', 4.0)),
+                'max_scan_m':    float(sl.get('max_scan_m', 10.0)),
+                'icp_points':    int(sl.get('icp_points',   400)),
                 'icp_hz':        float(sl.get('icp_hz',    10.0)),
                 'lpf_hz':        float(sl.get('lpf_hz',     8.0)),
+                'lidar_lpf_hz':  float(sl.get('lidar_lpf_hz', 2.0)),
                 'min_speed':     float(sl.get('min_speed',  0.3)),
             }])]))
+
+        # ── 원시 토픽 기록 ────────────────────────────────────────────
+        # ICP 튜닝(max_scan_m, icp_hz, 이상치 제거)은 CSV 로는 못 한다 —
+        # CSV 에는 이미 추정이 끝난 결과만 남는다. 원시 /scan 을 남겨야
+        # 젯슨에서 차를 굴리지 않고 노트북에서 재생하며 고칠 수 있다.
+        if bool(sl.get('record_bag', True)):
+            repo = os.path.expanduser(os.environ.get('RACE_REPO', '~/yax'))
+            out  = os.path.join(repo, 'logs', 'slip_tests',
+                                time.strftime('bag_%Y%m%d_%H%M%S'))
+            nodes.append(ExecuteProcess(
+                cmd=['ros2', 'bag', 'record', '-o', out,
+                     '/scan', '/odom', '/sensors/imu/raw',
+                     '/commands/servo/position'],
+                output='log'))
     else:
         # ── 기존 원-그리기 슬립 리그 ────────────────────────────────
         nodes.append(TimerAction(period=5.0, actions=[Node(

@@ -50,6 +50,8 @@ setup(
             'localization_monitor = race_stack.localization_monitor:main',
             'slip_logger        = race_stack.slip_logger:main',
             'slip_friction      = race_stack.slip_friction:main',
+            'slip_replay        = race_stack.slip_replay:main',
+            'odom_scale         = race_stack.odom_scale:main',
             'curvature_probe    = race_stack.curvature_probe:main',
             'set_speed_kappa    = race_stack.set_speed_kappa:main',
             'steer_trim         = race_stack.steer_trim:main',
