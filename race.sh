@@ -230,10 +230,25 @@ case "$CMD" in
     # ←→ = 시험 조향각(= L스틱 최대값), ↑↓ = 램프 목표 속도, B = 시작/종료
     exec ros2 launch race_stack slip.launch.py ;;
   curvprobe)
-    # 곡률-속도 캘리브레이션 리그. slip 과 별개 도구/설정(curv_probe: 섹션).
-    # 풀조향(좌 또는 우 끝까지) 유지한 채 속도만 서서히 올린다. B = 시작/종료.
-    # 분석: ros2 run race_stack curvature_probe -- --analyze
-    exec ros2 launch race_stack curvature_probe.launch.py ;;
+    # 곡률-속도 계단 캘리브레이션 리그. slip 과 별개 도구/설정(curv_probe: 섹션).
+    # 브링업은 백그라운드, curvature_probe 노드는 키보드 raw 입력이 필요해
+    # mapping 과 같은 패턴으로 포그라운드에서 직접 띄운다.
+    # 조작: SPACE=다음 속도단계  q=정지+저장+종료   분석: --analyze
+    ros2 launch race_stack curvature_probe.launch.py &
+    LAUNCH_PID=$!
+    sleep 5
+    trap "kill $LAUNCH_PID 2>/dev/null" EXIT
+    ros2 run race_stack curvature_probe --ros-args \
+      -p full_lock_steer:=$(get_yaml curv_probe.full_lock_steer) \
+      -p steer_sign:=$(get_yaml curv_probe.steer_sign) \
+      -p speed_start:=$(get_yaml curv_probe.speed_start) \
+      -p speed_step:=$(get_yaml curv_probe.speed_step) \
+      -p speed_max:=$(get_yaml curv_probe.speed_max) \
+      -p accel_limit:=$(get_yaml curv_probe.accel_limit) \
+      -p min_hold_sec:=$(get_yaml curv_probe.min_hold_sec) \
+      -p kappa_max:=$(get_yaml curv_probe.kappa_max) \
+      -p mu:=$(get_yaml curv_probe.mu)
+    exit 0 ;;
   log)
     NAME=${2:?웨이포인트 이름을 주세요: ./race.sh log my_track_wp}
     exec ros2 run race_stack waypoint_logger --ros-args -p output:="$PKG_SHARE_WP/$NAME.csv" ;;
