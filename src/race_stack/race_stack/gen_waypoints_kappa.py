@@ -60,14 +60,18 @@ MAPS_DIR  = os.path.join(_PKG_DIR, 'maps')
 WP_DIR    = os.path.join(_PKG_DIR, 'waypoints')
 
 # ── 물리 파라미터 (main에서 args로 덮어씀) ───────────────────────────────────
+# A_LAT_MAX: curvature_probe 08/07 실측(좌회전 풀락 스윕, v=2.00~2.25㎧ 슬립
+# 포화구간 a_lat=v²·κ_achieved 역산 평균) 기반. 0.9g(8.83)는 실측보다 훨씬
+# 낙관적이라 랩타임 최적화 단계에서 곡률 비용을 과소평가했었다(set_speed_kappa.py
+# 참고 — 그쪽은 이미 이 값으로 속도만 사후 재계산 중, 여긴 경로 형태 자체).
 RESOLUTION = 0.05
 ORIGIN     = (0.0, 0.0)
 G_GRAV     = 9.81
-A_LAT_MAX  = 0.9 * G_GRAV
+A_LAT_MAX  = 3.7
 A_LON_ACC  = 5.0
 A_LON_BRK  = 8.0
-V_MAX      = 4.0
-V_MIN      = 1.0
+V_MAX      = 6.0
+V_MIN      = 0.5
 SAFETY_M   = 0.4
 N_OPT      = 200
 N_FINAL    = 400
@@ -1098,10 +1102,12 @@ def main():
     p = argparse.ArgumentParser(
         description='SLAM 맵에서 레이싱 라인 웨이포인트 생성 (곡률-제약 버전)')
     p.add_argument('--map',    default=None,  help='맵 이름 (생략 시 대화형 선택)')
-    p.add_argument('--vmax',   type=float, default=4.0,  help='최대 속도 (m/s)')
-    p.add_argument('--vmin',   type=float, default=1.0,  help='최소 속도 (m/s)')
+    p.add_argument('--vmax',   type=float, default=6.0,  help='최대 속도 (m/s)')
+    p.add_argument('--vmin',   type=float, default=0.5,  help='최소 속도 (m/s)')
     p.add_argument('--safety', type=float, default=0.2,  help='벽 안전 마진 (m, 실차 복도는 0.2 권장)')
-    p.add_argument('--mu',     type=float, default=0.9,  help='마찰 계수')
+    p.add_argument('--mu',     type=float, default=0.377,
+                    help='마찰 계수 — A_LAT_MAX=mu*9.81. 기본값은 curvature_probe '
+                         '08/07 실측(A_LAT_MAX=3.7) 역산치, 0.9(=8.83) 아님')
     p.add_argument('--acc',    type=float, default=5.0,  help='가속도 (m/s²)')
     p.add_argument('--brk',    type=float, default=8.0,  help='감속도 (m/s²)')
     p.add_argument('--wheelbase', type=float, default=WHEELBASE,

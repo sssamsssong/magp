@@ -53,6 +53,7 @@ setup(
             'slip_replay        = race_stack.slip_replay:main',
             'odom_scale         = race_stack.odom_scale:main',
             'curvature_probe    = race_stack.curvature_probe:main',
+            'set_speed_kappa    = race_stack.set_speed_kappa:main',
         ],
     },
 )
