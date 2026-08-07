@@ -16,6 +16,9 @@ __pycache__/
 # Claude Code 로컬 전용 설정
 .claude/settings.local.json
 
+# Claude Code 스킬 (개인용, 팀 공유 안 함)
+.claude/skills/
+
 # Claude Code 대화 기록 (개인용, 팀 공유 안 함)
 chat_log/
 
