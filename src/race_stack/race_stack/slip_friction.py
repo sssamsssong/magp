@@ -50,24 +50,54 @@ def _scan_xy(msg: LaserScan, max_r: float) -> np.ndarray:
 
 
 def _icp(src: np.ndarray, dst: np.ndarray,
-         max_iter: int = 12, tol: float = 5e-4) -> tuple[float, float, float]:
-    """연속 스캔 ICP. 반환: (tx, ty, dθ) = 차체 변위 (dt로 나누면 속도).
+         init: tuple[float, float, float] = (0.0, 0.0, 0.0),
+         n_src: int = 400,
+         max_iter: int = 12,
+         tol: float = 5e-4) -> tuple[float, float, float, bool, float]:
+    """스캔 정합 ICP. 반환: (tx, ty, dθ, ok) = 차체 변위 (dt로 나누면 속도).
 
     물리적 의미:
       · 차가 전진 dx   → tx = +dx  → v_x = tx/dt > 0
       · 차가 좌이동 dy → ty = +dy  → v_y = ty/dt > 0
       · 차가 좌회전 dθ → dθ = +dθ  → ω   = dθ/dt > 0
+
+    ★★ 반환값은 **차체 운동**이다 — ICP 가 직접 찾는 src→dst 변환의 역 (2026-08-07).
+      차가 앞으로 가면 정지한 벽은 차체 좌표계에서 **뒤로** 흐르므로, ICP 가
+      찾는 변환은 차의 운동과 부호가 반대다. 예전 코드는 그 변환을 그대로
+      속도로 썼다 — 전진 중 v̂_x 가 음수로 나왔고, 따라서 |v_wheel − v̂_x| 는
+      항상 ≈2v 가 되어 슬립 판정과 자동 임계값 교정이 통째로 무의미했다.
+      (합성 점군 검증: 차 +0.20m 전진 → 옛 코드 반환 −0.20)
+
+    ★ init 도 같은 **차체 운동** 규약으로 받는다. 베이스라인 100ms 에서는
+      항등 초기값으로 수렴하지 않는다 — 2㎧면 그 사이 20cm 를 움직이는데
+      이는 ICP 수렴 반경 밖이다. 호출자가 여러 후보를 넣고 **잔차(rms)로
+      고르도록** 되어 있다. 초기값 하나만 쓰면 0 에 락인된다 (2026-08-07:
+      vx_l=0 → init=0 → ICP 가 0 반환 → vx_l 이 영원히 0. 실측에서 v_wheel
+      2.1㎧ 정속인데 vx_lidar 가 0.0~0.4 에 갇힌 원인이 정확히 이것).
+
+    반환 rms 는 인라이어 평균 대응거리 — 후보 간 비교에만 쓴다.
+
+    ★ dst 는 **절대 솎지 않는다** (2026-08-07). KD-tree 를 200점으로 만들면
+      최근접점 간격이 실제 점간격의 5배가 되고, 그 양자화 오차(3m 거리에서
+      수 cm)가 정작 우리가 재려는 횡변위(수 mm~cm)보다 커진다. 비용이 드는
+      건 질의 쪽(src)뿐이라 src 만 솎으면 된다 — 트리 생성은 O(n log n) 로
+      1000점이어도 무시할 만하다.
     """
     from scipy.spatial import cKDTree
 
-    if len(src) > 200:
-        src = src[np.random.choice(len(src), 200, replace=False)]
-    if len(dst) > 200:
-        dst = dst[np.random.choice(len(dst), 200, replace=False)]
+    if len(src) > n_src:
+        src = src[np.random.choice(len(src), n_src, replace=False)]
 
     tree = cKDTree(dst)
-    R = np.eye(2)
-    t = np.zeros(2)
+
+    # 차체 운동 규약의 init 을 ICP 내부 규약(src→dst 변환)으로 뒤집어 넣는다:
+    #   R_icp = R(−dθ),  t_icp = −R_icp · (dx, dy)
+    dx0, dy0, dth0 = float(init[0]), float(init[1]), float(init[2])
+    c, s = math.cos(-dth0), math.sin(-dth0)
+    R = np.array([[c, -s], [s, c]])
+    t = -R @ np.array([dx0, dy0])
+    ok = False
+    rms = float('inf')
 
     for _ in range(max_iter):
         src_t  = src @ R.T + t
@@ -75,7 +105,8 @@ def _icp(src: np.ndarray, dst: np.ndarray,
         thr    = np.percentile(d, 70) * 2.0
         mask   = d < thr
         if mask.sum() < 8:
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, False, float('inf')
+        rms = float(np.sqrt(np.mean(d[mask] ** 2)))
 
         sm, dm = src[mask], dst[ix[mask]]
         ms, md = sm.mean(0), dm.mean(0)
@@ -87,12 +118,15 @@ def _icp(src: np.ndarray, dst: np.ndarray,
         tn  = md - Rn @ ms
         thn = math.atan2(Rn[1, 0], Rn[0, 0])
         dth = abs(thn - math.atan2(R[1, 0], R[0, 0]))
+        ok  = True
 
         if np.hypot(tn[0] - t[0], tn[1] - t[1]) + dth < tol:
             R, t = Rn, tn;  break
         R, t = Rn, tn
 
-    return float(t[0]), float(t[1]), math.atan2(R[1, 0], R[0, 0])
+    # src→dst 변환 (R, t) 의 역 (Rᵀ, −Rᵀt) 이 곧 차가 움직인 양이다.
+    d = -R.T @ t
+    return float(d[0]), float(d[1]), -math.atan2(R[1, 0], R[0, 0]), ok, rms
 
 
 # ── 노드 ─────────────────────────────────────────────────────────────
@@ -115,6 +149,20 @@ class SlipFriction(Node):
         d('wheelbase',    0.33)
         d('servo_gain',   -0.761)
         d('servo_offset', 0.425)
+        # 기구 스토퍼. vesc.yaml 의 servo_min/max 와 같은 값이어야 한다.
+        d('servo_min',    0.15)   # → 좌 락 +0.361 rad (20.7°)
+        d('servo_max',    0.85)   # → 우 락 −0.558 rad (32.0°)
+
+        # ★ base_link → laser 전방 거리 [m] (2026-08-07 추가).
+        #   ICP 가 재는 건 **LiDAR 위치**의 속도인데 슬립각은 차체 기준이다.
+        #   레버암 때문에 v_y_laser = v_y_base + ω·x 만큼 요레이트가 새어든다.
+        #   ω 가 80°/s 면 0.27×1.4 = 0.38㎧ — 우리가 재려는 횡속도보다 크다.
+        #   실측(2026-08-07): 보정 전 |β| 중앙값 8.9°, 보정 후 1.8°.
+        #   값은 f1tenth_stack bringup 의 static TF (0.27 0 0.11) 에서 왔다.
+        #   ※ 데이터로 회귀하면 0.37~0.385m 가 나오는데 그 초과분은 실제
+        #     후륜 슬립이다(횡속도 0 인 점이 후축 뒤로 밀린다). 그걸 레버암에
+        #     넣어버리면 정작 재려는 신호를 지운다 — 반드시 TF 기하값을 쓸 것.
+        d('lidar_x',      0.27)
         d('gyro_units',   'deg')
         d('accel_units',  'g')
 
@@ -126,10 +174,40 @@ class SlipFriction(Node):
         d('delta_lin',   -1.0)    # m/s
         d('delta_ang',   -1.0)    # rad/s
 
+        # ★ 종방향 슬립 판정은 기본 OFF 다 (2026-08-07 실측·검증).
+        #   D_lin 은 |v_wheel − v̂_x| 인데, 연속 스캔 정합으로는 v̂_x 를 얻을 수
+        #   없다. 트랙처럼 **진행 방향과 나란한 벽**이 지배적인 장면에서는
+        #   종방향으로 얼마를 움직였든 스캔이 똑같아 보인다 — 잔차 지형을
+        #   재보면 dx 를 0→0.36m 로 훑어도 잔차가 20.2~21.2mm 로 평평하다.
+        #   정보가 없으므로 초기값·반복횟수·사거리 어떤 튜닝으로도 안 된다.
+        #   (실측: v_wheel 2.1㎧ 정속인데 vx_lidar 가 0.0~0.4 에 갇힘)
+        #
+        #   같은 기하가 횡방향은 오히려 강하게 구속한다 — dy 를 ±0.1m 옮기면
+        #   잔차가 20.6 → 107mm 로 치솟는다. 그래서 v̂_y 와 ω̂ 는 쓸 수 있다
+        #   (v_y 오차 0.018㎧). 슬립각 α 에 필요한 건 이쪽이다.
+        #
+        #   참고한 2509.15423 이 v̂_x 를 쓴 건 스캔 정합이 아니라 **지도 기반
+        #   EKF 위치추정**이라서다. 지도가 있으면 절대 위치로 종방향이 관측된다.
+        #   켜려면 AMCL 을 띄우고 그 pose 를 미분해 쓰는 쪽이 맞다.
+        d('enable_lin_slip', False)
+
         # ICP
-        d('max_scan_m',   4.0)
-        d('icp_hz',       10.0)   # 속도: 40Hz 스캔에서 몇 Hz로 ICP?
-        d('lpf_hz',       8.0)
+        # ★ 4.0 은 너무 짧다 (2026-08-07 실측). Hokuyo 는 20m 를 보는데 4m 로
+        #   자르면 복도 끝·모서리가 잘려 나가고 **진행 방향과 나란한 옆벽만**
+        #   남는다. 그러면 종방향 이동이 기하학적으로 관측 불가능해진다
+        #   (개구 문제). 실제로 v_wheel=2.1㎧ 정속 주행 중 vx_lidar 가 0.0~0.4
+        #   로 죽어 있었고, 회전만 멀쩡히 추정됐다(ω corr 0.71 vs v corr −0.17)
+        #   — 회전은 옆벽만으로도 구속되기 때문이다.
+        d('max_scan_m',   10.0)
+        d('icp_points',   400)    # ICP 질의점 수 (많을수록 분산↓, 비용↑)
+        d('icp_hz',       10.0)   # ★ 정합 베이스라인이기도 하다 (10Hz → 100ms)
+        d('lpf_hz',       8.0)    # IMU (a_x, a_y, ω_z) LPF 컷오프
+        # LiDAR 속도는 IMU 와 갱신율이 10배 차이라 컷오프를 따로 갖는다.
+        # 2.0Hz 는 옛 코드의 **실효** 컷오프(≈1.3Hz)를 그대로 재현하는 값이다
+        # — 옛 lpf_hz=8.0 은 25ms 로 계산한 alpha 를 100ms 마다 적용한 결과라
+        # 이름값(8Hz)과 전혀 달랐다. 갱신율 10Hz 에서 8Hz 컷오프는 나이퀴스트를
+        # 넘어 사실상 필터가 없는 것과 같으니 그 값을 물려받으면 안 된다.
+        d('lidar_lpf_hz', 2.0)
 
         # 출력
         d('min_speed',    0.3)     # 이 이상에서만 추정
@@ -138,15 +216,21 @@ class SlipFriction(Node):
         self.L   = float(p('wheelbase'))
         self.sg  = float(p('servo_gain'))
         self.so  = float(p('servo_offset'))
+        self.s_lo = min(float(p('servo_min')), float(p('servo_max')))
+        self.s_hi = max(float(p('servo_min')), float(p('servo_max')))
+        self.lidar_x = float(p('lidar_x'))
         self.to_rad = math.pi/180 if str(p('gyro_units')).lower().startswith('deg') else 1.0
         self.to_ms2 = G if str(p('accel_units')).lower() == 'g' else 1.0
         self.bias_sec = float(p('bias_sec'))
         self.cal_sec  = float(p('cal_sec'))
         self.d_lin    = float(p('delta_lin'))
         self.d_ang    = float(p('delta_ang'))
+        self.en_lin   = bool(p('enable_lin_slip'))
         self.max_scan_m = float(p('max_scan_m'))
+        self.icp_pts    = int(p('icp_points'))
         self.icp_dt_min = 1.0 / max(float(p('icp_hz')), 1.0)
         self.lpf_hz   = float(p('lpf_hz'))
+        self.lidar_lpf_hz = float(p('lidar_lpf_hz'))
         self.min_speed = float(p('min_speed'))
 
         # 센서 상태
@@ -159,10 +243,10 @@ class SlipFriction(Node):
         # ICP 상태
         self._scan_prev   = None
         self._scan_prev_t = None
-        self._icp_last    = 0.0
         self.vx_l = self.vy_l = self.wz_l = 0.0
         self._icp_ok = False
         self._icp_age = 999.0
+        self.icp_rms = float('nan')
 
         # 슬립 & μ
         self.slip_lin = self.slip_ang = False
@@ -195,38 +279,85 @@ class SlipFriction(Node):
 
         self.get_logger().info('slip_friction 준비 완료')
 
+    def vy_base(self) -> float:
+        """LiDAR 위치의 횡속도를 차체(base_link) 기준으로 옮긴다.
+
+        v_y_base = v_y_laser − ω · x_laser  (레버암 제거). 슬립각 α 계산은
+        반드시 이 값을 써야 한다 — 위 lidar_x 파라미터 주석 참고.
+        """
+        return self.vy_l - self.lidar_x * self.wz_l
+
     # ── 입력 콜백 ────────────────────────────────────────────────────
     def _odom_cb(self, msg: Odometry):
         self.v_wheel = float(msg.twist.twist.linear.x)
 
     def _servo_cb(self, msg: Float64):
-        self.delta = (float(msg.data) - self.so) / self.sg
+        # ★ 이 토픽은 **클립 전** 지령값이다 (2026-08-07). 실제로 자르는 건
+        #   vesc_driver 의 servo_min/max 이므로 여기서 같이 잘라야 실각도다.
+        #   안 자르면 좌회전에서 20.7°(기구 락) 를 31.5°(지령) 로 기록하고,
+        #   ω_kin = v·tan(δ)/L 이 1.5배 부풀어 그게 통째로 가짜 각슬립이 된다
+        #   — 2026-08-07 로그에서 각슬립이 79~91% 행에 찍힌 주원인.
+        s = min(max(float(msg.data), self.s_lo), self.s_hi)
+        self.delta = (s - self.so) / self.sg
 
     def _scan_cb(self, msg: LaserScan):
         now = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         pts = _scan_xy(msg, self.max_scan_m)
 
-        if (self._scan_prev is not None
-                and self._scan_prev_t is not None
-                and now - self._icp_last >= self.icp_dt_min):
+        if self._scan_prev is None or self._scan_prev_t is None:
+            self._scan_prev, self._scan_prev_t = pts, now
+            return
 
-            dt = now - self._scan_prev_t
-            if 0.005 < dt < 0.5 and len(pts) >= 20 and len(self._scan_prev) >= 20:
-                try:
-                    tx, ty, dth = _icp(self._scan_prev, pts, max_iter=12)
-                    # LPF
-                    a = dt / (dt + 1.0 / (2 * math.pi * max(self.lpf_hz, 0.1)))
+        # ★ 기준 스캔은 ICP 를 실제로 돌린 시점에만 갱신한다 (2026-08-07).
+        #   예전엔 매 스캔 갱신해서, icp_hz 를 낮춰도 정합 베이스라인은 항상
+        #   스캔 간격(40Hz → 25ms)이었다. v_y = 0.2㎧ 면 그 사이 횡변위가 5mm
+        #   — LiDAR 거리 노이즈와 같은 자릿수라 슬립각이 노이즈에 묻혔다.
+        #   이제 icp_hz 가 곧 베이스라인이다 (10Hz → 100ms → 같은 조건 20mm).
+        dt = now - self._scan_prev_t
+        if dt < self.icp_dt_min:
+            return
+
+        if 0.005 < dt < 0.5 and len(pts) >= 20 and len(self._scan_prev) >= 20:
+            try:
+                # ── 다중 시작 + 잔차 선택 ────────────────────────────
+                # 초기값 하나로는 0 에 락인된다(위 _icp docstring). 후보를
+                # 여러 개 돌리고 정합 잔차가 가장 작은 것을 고른다.
+                #
+                # ★ 휠·자이로 후보를 넣어도 순환논법이 아니다 — 그 값을
+                #   **믿는** 게 아니라 출발점으로만 쓰고, 채택 여부는 스캔
+                #   정합 잔차가 정하기 때문이다. 휠이 미끄러지고 있으면 그
+                #   후보는 잔차가 커져서 탈락하거나, ICP 가 실제 운동으로
+                #   끌려가 수렴한다. 어느 쪽이든 답은 스캔이 정한다.
+                cands = [(0.0, 0.0, 0.0),
+                         (self.v_wheel * dt, 0.0, self.wz_f * dt)]
+                if self._icp_ok:
+                    cands.append((self.vx_l * dt, self.vy_l * dt, self.wz_l * dt))
+
+                best = None
+                for c in cands:
+                    res = _icp(self._scan_prev, pts, init=c, n_src=self.icp_pts)
+                    if res[3] and (best is None or res[4] < best[4]):
+                        best = res
+
+                ok = best is not None
+                if ok:
+                    tx, ty, dth = best[0], best[1], best[2]
+                    self.icp_rms = best[4]
+                    # LPF — alpha 는 **실제 갱신 간격** dt 로 계산된다. 예전엔
+                    # 스캔 간격(25ms)으로 계산해 놓고 100ms 마다 적용해서,
+                    # 설정한 컷오프와 실효 컷오프가 4배 어긋나 있었다.
+                    a = dt / (dt + 1.0 / (2 * math.pi * max(self.lidar_lpf_hz, 0.1)))
                     self.vx_l  += a * (tx / dt - self.vx_l)
                     self.vy_l  += a * (ty / dt - self.vy_l)
                     self.wz_l  += a * (dth / dt - self.wz_l)
                     self._icp_ok  = True
                     self._icp_age = 0.0
-                    self._icp_last = now
-                except Exception:
+                else:
                     self._icp_ok = False
+            except Exception:
+                self._icp_ok = False
 
-        self._scan_prev   = pts
-        self._scan_prev_t = now
+        self._scan_prev, self._scan_prev_t = pts, now
 
     def _imu_cb(self, msg: Imu):
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
@@ -317,7 +448,9 @@ class SlipFriction(Node):
         kin_wz = self.v_wheel * math.tan(self.delta) / self.L
 
         # eq. 9, 13 (2509.15423)
-        self.slip_lin = icp_fresh and (abs(self.v_wheel - self.vx_l) > self.d_lin)
+        # 종방향은 관측 불가라 기본 OFF — 위 enable_lin_slip 주석 참고.
+        self.slip_lin = (self.en_lin and icp_fresh
+                         and abs(self.v_wheel - self.vx_l) > self.d_lin)
         self.slip_ang = icp_fresh and (abs(kin_wz - self.wz_l) > self.d_ang)
         no_slip = not self.slip_lin and not self.slip_ang
 
@@ -336,6 +469,7 @@ class SlipFriction(Node):
             round(self.wz_f,    5),
             round(self.vx_l,    5),
             round(self.vy_l,    5),
+            round(self.vy_base(), 5),
             round(self.wz_l,    5),
             round(self.ax_f,    5),
             round(self.ay_f,    5),
@@ -355,8 +489,10 @@ class SlipFriction(Node):
         with open(path, 'w', newline='') as f:
             w = csv.writer(f)
             w.writerow(['# slip_friction — 2509.15423 방식'])
+            # vy_base = vy_lidar − ω·lidar_x (레버암 제거). α 계산엔 이걸 쓸 것.
+            # vx_lidar 는 진단용으로만 남긴다 — 종방향은 관측 불가 (아래 참고).
             w.writerow(['t', 'v_wheel', 'delta', 'wz_imu',
-                        'vx_lidar', 'vy_lidar', 'wz_lidar',
+                        'vx_lidar', 'vy_lidar', 'vy_base', 'wz_lidar',
                         'ax', 'ay', 'wz_kin',
                         'rho', 'slip_lin', 'slip_ang', 'mu_hat'])
             for row in self._rows:
@@ -386,13 +522,16 @@ class SlipFriction(Node):
         A('╠' + bar + '╣')
 
         if self.phase == RUN:
-            A(_row(f'  v_wheel={self.v_wheel:5.2f}㎧   '
-                   f'v̂_x_lidar={self.vx_l:+5.2f}   '
-                   f'v̂_y={self.vy_l:+5.2f}'))
-            lin_err = abs(self.v_wheel - self.vx_l)
+            vyb  = self.vy_base()
+            beta = math.degrees(math.atan2(vyb, max(abs(self.v_wheel), 0.3)))
+            A(_row(f'  v_x={self.v_wheel:5.2f}㎧(휠)  '
+                   f'v̂_y={vyb:+5.2f}㎧(차체)  '
+                   f'β={beta:+5.1f}°  (레버암 {self.lidar_x:.2f}m 보정)'))
             ang_err = abs(kin_wz - self.wz_l)
-            A(_row(f'  Δv_lin={lin_err:.3f}㎧ (임계{self.d_lin:.3f})  '
-                   f'Δω_ang={math.degrees(ang_err):.1f}°/s (임계{math.degrees(self.d_ang):.1f})'))
+            lin_txt = (f'Δv_lin={abs(self.v_wheel - self.vx_l):.2f}(임계{self.d_lin:.2f})'
+                       if self.en_lin else 'Δv_lin=OFF(종방향 관측불가)')
+            A(_row(f'  {lin_txt}  '
+                   f'Δω={math.degrees(ang_err):.1f}°/s(임계{math.degrees(self.d_ang):.1f})'))
             A(_row(f'  ω_kin={math.degrees(kin_wz):+5.1f}°/s  '
                    f'ω_lidar={math.degrees(self.wz_l):+5.1f}°/s  '
                    f'ω_imu={math.degrees(self.wz_f):+5.1f}°/s'))
