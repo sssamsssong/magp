@@ -52,6 +52,7 @@ setup(
             'slip_friction      = race_stack.slip_friction:main',
             'curvature_probe    = race_stack.curvature_probe:main',
             'set_speed_kappa    = race_stack.set_speed_kappa:main',
+            'steer_trim         = race_stack.steer_trim:main',
         ],
     },
 )

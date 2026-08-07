@@ -23,6 +23,7 @@
 #    ./race.sh waypoints-kappa [맵]  위와 동일 + 조향각 물리한계(곡률) 제약
 #                              → <맵>_wp_kappa.csv 로 따로 저장, 랩타임 비교용
 #    ./race.sh curvprobe       곡률-속도 캘리브레이션 리그 (slip과 별개 도구)
+#    ./race.sh steertrim       조향 중립값 자동 캘리브레이션 (IMU 기반, 전/후진 반복)
 #    ./race.sh savepose        ★ 지금 AMCL 위치를 초기 추정으로 저장
 #                              RViz "2D Pose Estimate" 로 맵과 스캔을 맞춘 뒤 실행하면
 #                              다음 실행부터 그 위치에서 시작 (맵-스캔 어긋남 해소)
@@ -248,6 +249,26 @@ case "$CMD" in
       -p min_hold_sec:=$(get_yaml curv_probe.min_hold_sec) \
       -p kappa_max:=$(get_yaml curv_probe.kappa_max) \
       -p mu:=$(get_yaml curv_probe.mu)
+    exit 0 ;;
+  steertrim)
+    # 조향 트림 자동 캘리브레이션. steer_trim: 섹션, curv_probe/slip과 별개.
+    # 조작: q=즉시중단(저장안함)  s=이번 다리 끝나면 저장+종료
+    # ★ 전진·후진 각 test_dist(기본 2m)만큼 자율 주행하니 앞뒤로 공간 확보할 것.
+    ros2 launch race_stack steer_trim.launch.py &
+    LAUNCH_PID=$!
+    sleep 5
+    trap "kill $LAUNCH_PID 2>/dev/null" EXIT
+    ros2 run race_stack steer_trim --ros-args \
+      -p test_speed:=$(get_yaml steer_trim.test_speed) \
+      -p test_dist:=$(get_yaml steer_trim.test_dist) \
+      -p accel_limit:=$(get_yaml steer_trim.accel_limit) \
+      -p max_trim:=$(get_yaml steer_trim.max_trim) \
+      -p kappa_tol:=$(get_yaml steer_trim.kappa_tol) \
+      -p correction_damp:=$(get_yaml steer_trim.correction_damp) \
+      -p max_iters:=$(get_yaml steer_trim.max_iters) \
+      -p front_safety_m:=$(get_yaml steer_trim.front_safety_m) \
+      -p rear_safety_m:=$(get_yaml steer_trim.rear_safety_m) \
+      -p auto_write:=$(get_yaml steer_trim.auto_write)
     exit 0 ;;
   log)
     NAME=${2:?웨이포인트 이름을 주세요: ./race.sh log my_track_wp}
