@@ -63,20 +63,44 @@ def generate_launch_description():
             os.path.join(share, 'launch', 'joystick.launch.py')))]
 
     # 브링업·teleop 이 자리를 잡은 뒤 패널을 띄운다 (그래야 첫 화면이 안 깨진다)
-    nodes.append(TimerAction(period=5.0, actions=[Node(
-        package='race_stack', executable='slip_logger',
-        name='slip_logger', output='screen',
-        parameters=[{
-            'servo_gain':   gain,
-            'servo_offset': offset,
-            'wheelbase':    float(cfg.get('pure_pursuit', {}).get('wheelbase', 0.33)),
-            'radii':        [float(x) for x in sl.get('radii', [1.0, 1.5, 2.0, 3.0])],
-            'speeds':       [float(x) for x in sl.get('speeds',
-                                                      [1.0, 1.5, 2.0, 2.5, 3.0])],
-            'target_runs':  int(sl.get('target_runs', 3)),
-            'lever_x':      float(sl.get('lever_x', 0.0)),
-            'mu':           float(sl.get('mu', 0.7)),
-            'dpad_x_invert': bool(sl.get('dpad_x_invert', False)),
-            'dpad_y_invert': bool(sl.get('dpad_y_invert', False)),
-        }])]))
+    # race_script.yaml [slip] 에 mode: friction 이면 LiDAR+IMU 추정기를 대신 쓴다.
+    slip_mode = str(sl.get('mode', 'rig'))   # 기본: 기존 원-그리기 리그
+    wb = float(cfg.get('pure_pursuit', {}).get('wheelbase', 0.33))
+
+    if slip_mode == 'friction':
+        # ── LiDAR+IMU 마찰계수 추정기 (2509.15423) ─────────────────
+        nodes.append(TimerAction(period=5.0, actions=[Node(
+            package='race_stack', executable='slip_friction',
+            name='slip_friction', output='screen',
+            parameters=[{
+                'servo_gain':    gain,
+                'servo_offset':  offset,
+                'wheelbase':     wb,
+                'bias_sec':      float(sl.get('bias_sec',   3.0)),
+                'cal_sec':       float(sl.get('cal_sec',    5.0)),
+                'delta_lin':     float(sl.get('delta_lin', -1.0)),
+                'delta_ang':     float(sl.get('delta_ang', -1.0)),
+                'max_scan_m':    float(sl.get('max_scan_m', 4.0)),
+                'icp_hz':        float(sl.get('icp_hz',    10.0)),
+                'lpf_hz':        float(sl.get('lpf_hz',     8.0)),
+                'min_speed':     float(sl.get('min_speed',  0.3)),
+            }])]))
+    else:
+        # ── 기존 원-그리기 슬립 리그 ────────────────────────────────
+        nodes.append(TimerAction(period=5.0, actions=[Node(
+            package='race_stack', executable='slip_logger',
+            name='slip_logger', output='screen',
+            parameters=[{
+                'servo_gain':   gain,
+                'servo_offset': offset,
+                'wheelbase':    wb,
+                'radii':        [float(x) for x in sl.get('radii', [1.0, 1.5, 2.0, 3.0])],
+                'speeds':       [float(x) for x in sl.get('speeds',
+                                                          [1.0, 1.5, 2.0, 2.5, 3.0])],
+                'target_runs':  int(sl.get('target_runs', 3)),
+                'lever_x':      float(sl.get('lever_x', 0.0)),
+                'mu':           float(sl.get('mu', 0.7)),
+                'dpad_x_invert': bool(sl.get('dpad_x_invert', False)),
+                'dpad_y_invert': bool(sl.get('dpad_y_invert', False)),
+            }])]))
     return LaunchDescription(nodes)

@@ -49,6 +49,7 @@ setup(
             'auto_localize      = race_stack.auto_localize:main',
             'localization_monitor = race_stack.localization_monitor:main',
             'slip_logger        = race_stack.slip_logger:main',
+            'slip_friction      = race_stack.slip_friction:main',
             'curvature_probe    = race_stack.curvature_probe:main',
         ],
     },
