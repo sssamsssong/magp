@@ -262,6 +262,22 @@ class SlipFriction(Node):
         #   vesc.yaml 의 speed_to_erpm_gain 을 고치면 이 값을 1.0 으로 되돌릴 것.
         d('speed_scale',  0.911)
 
+        # ── Voser 원형 주행 리그 (D-pad 로 조향각·속도 상한 선택) ─────────
+        # 조향은 joystick_teleop 의 디지털 모드로 **직진 또는 고정각** 둘뿐이고,
+        # 그 고정각을 여기서 정한다. rig 모드와 같은 조작감이 되도록 D-pad
+        # 좌우=반경, 상하=속도 상한으로 맞췄다.
+        #
+        # ★ 반경으로 고르는 이유: 바닥에 원을 그려놓고 도는 시험이라 사람은
+        #   반경으로 생각한다. 조향각은 δ = atan(L/r) 로 환산해서 넣는다.
+        d('radii',  [0.8, 1.0, 1.2, 1.5, 2.0])      # m
+        d('speeds', [1.0, 1.5, 2.0, 2.5, 3.0, 3.5]) # m/s (상한)
+        d('steer_limit_topic', '/slip/steer_limit')
+        d('speed_limit_topic', '/slip/speed_limit')
+        d('axis_dpad_x', 6)          # F710 실측: 6=Hat0X, 7=Hat0Y
+        d('axis_dpad_y', 7)
+        d('dpad_x_invert', False)
+        d('dpad_y_invert', False)
+
         p = lambda n: self.get_parameter(n).value
         self.L   = float(p('wheelbase'))
         self.sg  = float(p('servo_gain'))
@@ -284,6 +300,13 @@ class SlipFriction(Node):
         self.lidar_lpf_hz = float(p('lidar_lpf_hz'))
         self.min_speed = float(p('min_speed'))
         self.speed_scale = max(float(p('speed_scale')), 1e-3)
+
+        # 리그 선택 상태
+        self.radii  = [float(x) for x in p('radii')]
+        self.speeds = [float(x) for x in p('speeds')]
+        self.i_r = len(self.radii) // 2
+        self.i_v = 0                      # 항상 가장 낮은 속도부터 시작한다
+        self._prev_dpad = None
 
         # 센서 상태
         self.v_wheel = 0.0
@@ -332,6 +355,11 @@ class SlipFriction(Node):
 
         # ROS
         from sensor_msgs.msg import Joy
+        self.lim_pub = self.create_publisher(Float64, p('steer_limit_topic'), 10)
+        self.spd_pub = self.create_publisher(Float64, p('speed_limit_topic'), 10)
+        self.create_subscription(Joy, '/joy', self._joy_cb, 10)
+        # joystick_teleop 의 오버라이드는 타임아웃이 있다 — 계속 재발행해야 한다.
+        self.create_timer(0.2, self._pub_limits)
         self.create_subscription(LaserScan, p('scan_topic'), self._scan_cb, 10)
         self.create_subscription(Odometry,  p('odom_topic'), self._odom_cb, 20)
         self.create_subscription(Imu, p('imu_topic'), self._imu_cb,
@@ -342,6 +370,45 @@ class SlipFriction(Node):
         self.create_timer(1.0, self._auto_save)
 
         self.get_logger().info('slip_friction 준비 완료')
+
+    # ── 리그 조작 ────────────────────────────────────────────────────
+    def steer_now(self) -> float:
+        """선택된 반경에 대응하는 조향각 [rad]. δ = atan(L/r)."""
+        return math.atan(self.L / max(self.radii[self.i_r], 1e-3))
+
+    def _joy_cb(self, msg):
+        p = lambda n: self.get_parameter(n).value
+        ax, ay = int(p('axis_dpad_x')), int(p('axis_dpad_y'))
+        dx = float(msg.axes[ax]) if len(msg.axes) > ax else 0.0
+        dy = float(msg.axes[ay]) if len(msg.axes) > ay else 0.0
+        if bool(p('dpad_x_invert')):
+            dx = -dx
+        if bool(p('dpad_y_invert')):
+            dy = -dy
+        prev, self._prev_dpad = self._prev_dpad, (dx, dy)
+        if prev is None:
+            return
+        pdx, pdy = prev
+        # 상승 엣지에서만 한 칸 — 누르고 있어도 계속 넘어가지 않는다
+        if dy > 0.5 and pdy <= 0.5:
+            self.i_v = min(self.i_v + 1, len(self.speeds) - 1)
+        elif dy < -0.5 and pdy >= -0.5:
+            self.i_v = max(self.i_v - 1, 0)
+        if dx > 0.5 and pdx <= 0.5:
+            self.i_r = max(self.i_r - 1, 0)
+        elif dx < -0.5 and pdx >= -0.5:
+            self.i_r = min(self.i_r + 1, len(self.radii) - 1)
+
+    def _pub_limits(self):
+        """조향각·속도 상한을 joystick_teleop 에 계속 알린다.
+
+        ★ 오버라이드는 **낮추는 방향으로만** 먹는다 (joystick_teleop._limit).
+          따라서 race_script.yaml 의 slip.max_steer / slip.max_speed 가
+          여기서 고를 수 있는 값의 천장이다 — 그보다 큰 값을 고르면 조용히
+          무시되므로, 리스트를 그 안에 두어야 한다.
+        """
+        m = Float64();  m.data = float(self.steer_now());  self.lim_pub.publish(m)
+        m = Float64();  m.data = float(self.speeds[self.i_v]);  self.spd_pub.publish(m)
 
     def _update_mu_bin(self, v_true: float, mu_k: float):
         """속도 구간별로 μ_k 상위 표본만 보관한다.
@@ -618,6 +685,25 @@ class SlipFriction(Node):
         lines = ['\033[2J\033[H', '╔' + bar + '╗']
         A = lines.append
         A(_row(f'  마찰계수 추정기 (2509.15423)     [{_PHASE[self.phase]:^10}]'))
+        A('╠' + bar + '╣')
+
+        # ── 리그 설정 (모든 단계에서 보인다 — 출발 전에 맞춰야 하므로) ──
+        r  = self.radii[self.i_r]
+        dg = math.degrees(self.steer_now())
+        vs = self.speeds[self.i_v]
+        # 이 반경·속도에서 기대되는 횡가속 (한계 근처인지 가늠용)
+        g_exp = vs * vs / max(r, 1e-3) / G
+        A(_row(f'  ←→ 반경 {r:4.2f}m (조향 {dg:4.1f}°)   '
+               f'↑↓ 속도상한 {vs:4.2f}㎧  → {g_exp:.2f}g'))
+        # 기구 스토퍼는 좌우 비대칭이다. 선택각이 좌 락을 넘으면 좌회전 시
+        # 서보가 잘려 **기록된 각도와 실제 각도가 어긋난다** — 반드시 알린다.
+        lock_l = abs((self.s_lo - self.so) / self.sg)
+        lock_r = abs((self.s_hi - self.so) / self.sg)
+        warn = ''
+        if self.steer_now() > min(lock_l, lock_r) + 1e-6:
+            side = '우' if lock_r > lock_l else '좌'
+            warn = f'  ⚠ {side}회전만 (반대쪽 락 {math.degrees(min(lock_l,lock_r)):.1f}°)'
+        A(_row(f'     조향은 스틱 온/오프 — 직진 아니면 {dg:.1f}° 고정{warn}'))
         A('╠' + bar + '╣')
 
         if self.phase == RUN:

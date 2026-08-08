@@ -128,6 +128,8 @@ def generate_launch_description():
             'max_steer':        float(os.environ.get(
                 'RACE_SLIP_MAX_STEER',
                 cfg.get('pure_pursuit', {}).get('max_steer', 0.36))),
+            # 디지털 조향 — Voser 원형 주행용. slip.launch.py 가 env 로 켠다.
+            'steer_discrete':   os.environ.get('RACE_SLIP_STEER_DISCRETE', '') == '1',
         }])]))
 
     return LaunchDescription(nodes)

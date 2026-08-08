@@ -78,6 +78,14 @@ class JoystickTeleop(Node):
         self.declare_parameter('debug',            False)
         self.declare_parameter('max_speed',        1.0)
         self.declare_parameter('max_steer',        0.36)
+
+        # ★ 디지털 조향 (2026-08-09). 켜면 스틱이 비례가 아니라 **온/오프**로
+        #   동작한다 — 중립이면 직진(0), 임계를 넘기면 그 방향의 상한각 고정.
+        #   Voser 정속 원형 주행처럼 "조향각을 정확히 고정한 채 속도만 올리는"
+        #   시험에서 필요하다. 사람 손으로 비례 스틱을 일정하게 유지하는 건
+        #   불가능하고, 조향이 흔들리면 준정상상태 표본이 통째로 날아간다.
+        self.declare_parameter('steer_discrete',     False)
+        self.declare_parameter('steer_discrete_thr', 0.5)
         # 슬립 시험용 조향 상한 오버라이드를 받을 토픽. slip_logger 가 시험할
         # 조향각을 여기로 쏘면, 스틱을 끝까지 밀어도 그 각도까지만 나간다.
         # 사람이 목표 각도를 손으로 맞추는 것보다 훨씬 재현성이 높다.
@@ -103,6 +111,8 @@ class JoystickTeleop(Node):
         self.debug         = p('debug')
         self.max_speed     = p('max_speed')
         self.max_steer     = p('max_steer')
+        self.steer_disc    = bool(p('steer_discrete'))
+        self.steer_disc_th = float(p('steer_discrete_thr'))
         self._steer_lim = None        # (값, 수신시각) — 없으면 max_steer 사용
         self._speed_lim = None
         self._lim_logged = None
@@ -263,7 +273,11 @@ class JoystickTeleop(Node):
         #   방향으로만** 쓴다 — max_steer 를 넘기면 기구 스토퍼를 밀게 된다.
         #   타임아웃을 두어 slip_logger 가 죽으면 자동으로 원래 상한으로 돌아온다.
         lim = self._limit(self._steer_lim, self.max_steer, 'steer')
-        steer = float(max(-lim, min(lim, steer * lim)))
+        if self.steer_disc:
+            # 직진(0) 또는 고정각(±lim) 두 가지뿐. 중간값이 없다.
+            steer = 0.0 if abs(steer) < self.steer_disc_th else math.copysign(lim, steer)
+        else:
+            steer = float(max(-lim, min(lim, steer * lim)))
         speed = float(max(-self.max_speed, min(self.max_speed, speed)))
 
         if self.debug:

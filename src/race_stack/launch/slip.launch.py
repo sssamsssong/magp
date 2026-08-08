@@ -56,19 +56,26 @@ def generate_launch_description():
     #     않기 때문이다. (그래서 quiet:=true 도 여태 동작하지 않고 있었다.
     #     slip 패널이 다른 노드 출력에 깨지던 원인)
     #     include 는 같은 프로세스에서 늦게 평가되므로 os.environ 이 그대로 보인다.
+    slip_mode = str(sl.get('mode', 'rig'))   # 기본: 기존 원-그리기 리그
+
     os.environ['RACE_QUIET'] = '1'
     if 'max_speed' in sl:
         os.environ['RACE_SLIP_MAX_SPEED'] = str(float(sl['max_speed']))
     if 'max_steer' in sl:
         os.environ['RACE_SLIP_MAX_STEER'] = str(float(sl['max_steer']))
+    # ★ friction 모드는 조향을 정확히 고정해야 하므로 스틱을 디지털로 쓴다
+    #   (직진 0 또는 선택각). 사람 손으로 비례 스틱을 일정하게 유지할 수 없고,
+    #   조향이 흔들리면 준정상상태 표본이 통째로 날아간다.
+    #   ※ include 를 만들기 **전에** 설정한다 — 다른 env 와 같은 자리.
+    os.environ.pop('RACE_SLIP_STEER_DISCRETE', None)
+    if slip_mode == 'friction':
+        os.environ['RACE_SLIP_STEER_DISCRETE'] = '1'
 
     nodes = [IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(share, 'launch', 'joystick.launch.py')))]
 
     # 브링업·teleop 이 자리를 잡은 뒤 패널을 띄운다 (그래야 첫 화면이 안 깨진다)
-    # race_script.yaml [slip] 에 mode: friction 이면 LiDAR+IMU 추정기를 대신 쓴다.
-    slip_mode = str(sl.get('mode', 'rig'))   # 기본: 기존 원-그리기 리그
     wb = float(cfg.get('pure_pursuit', {}).get('wheelbase', 0.33))
 
     if slip_mode == 'friction':
@@ -99,6 +106,14 @@ def generate_launch_description():
                 # 줄자 실측(odom_scale 6회). vesc.yaml 의 speed_to_erpm_gain 을
                 # 고치면 이 값을 1.0 으로 되돌릴 것 — 아니면 이중 보정된다.
                 'speed_scale':   float(sl.get('speed_scale', 0.911)),
+                # D-pad 로 고를 반경/속도. 값은 slip.max_steer / max_speed 를
+                # 넘으면 조용히 무시되므로 그 안에 두어야 한다.
+                'radii':         [float(x) for x in sl.get(
+                                     'radii', [0.8, 1.0, 1.2, 1.5, 2.0])],
+                'speeds':        [float(x) for x in sl.get(
+                                     'speeds', [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])],
+                'dpad_x_invert': bool(sl.get('dpad_x_invert', False)),
+                'dpad_y_invert': bool(sl.get('dpad_y_invert', False)),
             }])]))
 
         # ── 원시 토픽 기록 ────────────────────────────────────────────
