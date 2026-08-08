@@ -297,7 +297,7 @@ def optimize(wp: np.ndarray, kappa: np.ndarray, p: VehicleParams,
 
 # ── race_script.yaml 업데이트 ──────────────────────────────────────────────
 
-def update_race_script(best: dict):
+def update_race_script(best: dict, mode: str):
     with open(_RACE_SCRIPT) as f:
         text = f.read()
 
@@ -311,17 +311,17 @@ def update_race_script(best: dict):
             text, flags=re.MULTILINE,
         )
 
-    # limits.grip_util.default (4-space indent, unique key in this context)
+    # limits.grip_util — 현재 mode 키에 기록 (default는 컨트롤러가 읽지 않음)
     if 'grip_util' in best:
         text = re.sub(
-            r'^(    default:)\s+\S+',
+            rf'^(    {mode}:)\s+\S+',
             rf'\g<1> {round(best["grip_util"], 4)}',
             text, flags=re.MULTILINE,
         )
 
     with open(_RACE_SCRIPT, 'w') as f:
         f.write(text)
-    print(f'  → {_RACE_SCRIPT} 업데이트 완료')
+    print(f'  → {_RACE_SCRIPT} 업데이트 완료  (grip_util → limits.grip_util.{mode})')
 
 
 # ── 메인 ──────────────────────────────────────────────────────────────────
@@ -353,9 +353,13 @@ def main():
     )
     mu_eff = p.mu * p.pac_D
 
-    # grip_util 기준값: limits.grip_util.default 또는 단일값
+    # grip_util 기준값: 현재 mode 키 → default → 0.6 순으로 폴백
+    mode   = cfg.get('mode', 'q1')
     gu_cfg = lim.get('grip_util', 0.6)
-    grip_util_base = float(gu_cfg['default'] if isinstance(gu_cfg, dict) else gu_cfg)
+    if isinstance(gu_cfg, dict):
+        grip_util_base = float(gu_cfg.get(mode, gu_cfg.get('default', 0.6)))
+    else:
+        grip_util_base = float(gu_cfg)
 
     v_min      = float(cfg.get('speed', {}).get('min_speed', 0.3))
     max_steer  = float(cfg.get('pure_pursuit', {}).get('max_steer', 0.36))
@@ -391,7 +395,7 @@ def main():
     print(f'  μ={p.mu}  B={p.pac_B} C={p.pac_C} D={p.pac_D} E={p.pac_E}')
     print(f'  μ_eff={mu_eff:.4f}  (= μ × pac_D, 실효 그립)')
     print(f'  m={p.m}kg  lf={p.lf}  lr={p.lr}  max_steer={max_steer}rad')
-    print(f'  v_min={v_min}  trials={args.trials}  timeout={args.timeout}s')
+    print(f'  mode={mode}  v_min={v_min}  trials={args.trials}  timeout={args.timeout}s')
     print()
     print('  기준값:')
     for k, v in baseline.items():
@@ -426,7 +430,7 @@ def main():
 
     if not args.no_write:
         print()
-        update_race_script(best)
+        update_race_script(best, mode)
     else:
         print('\n  (--no-write 지정: race_script.yaml 미기록)')
 
