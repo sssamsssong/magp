@@ -4,7 +4,7 @@ StanleyController — Q1/Q2/Q3 unified controller for race_stack.
 
   q1    : racing-line following, CSV speed, moderate
   q2    : racing-line + LiDAR obstacle avoidance (lateral target shift)
-  q3    : racing-line following, aggressive speed (set q3_max higher)
+  q3    : racing-line following, aggressive speed (raise limits.grip_util)
 
 Subscriptions:
   /amcl_pose    PoseWithCovarianceStamped  — AMCL localization
@@ -230,7 +230,7 @@ class StanleyController(ObstacleAvoidMixin, Node):
         def p(n): return self.get_parameter(n).value
 
         self.mode       = p('mode')
-        self.max_speed  = p('max_speed')
+        self.max_speed  = p('max_speed')   # 미사용 — 프로파일이 대신한다
         self.min_speed  = p('min_speed')
         self.max_steer  = p('max_steer')
         self.gain       = p('stanley_gain')

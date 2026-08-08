@@ -71,8 +71,11 @@ def generate_launch_description():
             f'race.launch.py: invalid controller "{controller}". '
             f'Valid: {sorted(VALID_CONTROLLERS)}')
 
-    max_speed = float(cfg['speed'][f'{mode}_max'])
-    min_speed = float(cfg['speed']['min_speed'])
+    # ★ q*_max 는 삭제됐다 (2026-08-09) — 속도는 물리(limits.grip_util)가 정한다.
+    #   max_speed 는 컨트롤러가 더 이상 클램프에 쓰지 않지만, 파라미터 선언이
+    #   남아 있어 값은 넘겨준다. hard_cap(0=끔) 이 유일한 천장이다.
+    max_speed = float(cfg['speed'].get('hard_cap', 0.0)) or 99.0
+    min_speed = float(cfg['speed'].get('min_speed', 0.3))
 
     # ---------- bench(박스 위) 모드 ----------
     # 차를 박스에 올려두고 토픽/RViz/조향만 확인하는 용도. 바퀴는 절대 돌리지 않는다.

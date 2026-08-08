@@ -254,7 +254,6 @@ class MapController(Node):
 
         self.get_logger().info(
             f'MapController ready (mode={self.mode} '
-            f'max_speed={self.p("max_speed"):.2f} '
             f'grip_util={self.p("grip_util"):.2f})')
 
     def p(self, name):
@@ -574,8 +573,9 @@ class MapController(Node):
         steer = a * self._steer_prev + (1.0 - a) * steer
         self._steer_prev = steer
 
-        speed = float(np.clip(self._v_profile[near],
-                              self.p('min_speed'), self.p('max_speed')))
+        # 프로파일이 이미 물리(마찰원)와 min_speed·hard_cap 을 다 반영했다.
+        # 여기서 다시 max_speed 로 자르면 상한이 부활해 등속 주행이 된다.
+        speed = float(self._v_profile[near])
 
         self.get_logger().info(
             f'[MAP] κ={self._curvature[near]:.3f}  '
