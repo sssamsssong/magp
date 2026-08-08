@@ -64,4 +64,18 @@ echo "  mode=$MODE  controller=$CTRL  map=$MAP"
 echo "  config: $RACE_SCRIPT"
 echo "============================================"
 
-exec ros2 launch race_stack sim_race.launch.py
+ros2 launch race_stack sim_race.launch.py &
+_LAUNCH_PID=$!
+
+_cleanup() {
+    kill -SIGINT "$_LAUNCH_PID" 2>/dev/null
+    sleep 0.8
+    # rviz2 는 SIGINT 를 무시하는 경우가 있어 SIGKILL 로 강제 종료
+    pkill -SIGKILL -x rviz2 2>/dev/null || true
+    wait "$_LAUNCH_PID" 2>/dev/null
+}
+trap '_cleanup; exit 0' SIGINT SIGTERM SIGHUP
+
+wait "$_LAUNCH_PID" || true
+# 정상 종료 시에도 rviz2 잔존 프로세스 정리
+pkill -SIGKILL -x rviz2 2>/dev/null || true

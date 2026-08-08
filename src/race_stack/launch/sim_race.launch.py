@@ -124,11 +124,13 @@ def generate_launch_description():
         output='screen',
         parameters=[{'autostart': True, 'node_names': ['map_server']}])
 
+    _start_gate = bool(cfg.get('mission', {}).get('start_gate', False))
     sim_bridge = Node(
         package='race_stack',
         executable='sim_bridge',
         name='sim_bridge',
-        output='screen')
+        output='screen',
+        parameters=[{'start_gate': _start_gate}])
 
     # ── 물리 시뮬레이터 선택 ──────────────────────────────────────────────
     if physics == 'bicycle':
@@ -247,12 +249,30 @@ def generate_launch_description():
                 'bound_dir':       bound_dir,
             }])
 
-    return LaunchDescription([
-        physics_node,
-        rviz,
-        rsp,
-        map_server,
-        lifecycle,
+    # ── mission_manager (start_gate=True 일 때만) ─────────────────────────
+    m = cfg.get('mission', {})
+    start_gate = bool(m.get('start_gate', False))
+
+    mission_node = Node(
+        package='race_stack', executable='mission_manager',
+        name='mission_manager', output='screen',
+        parameters=[{
+            'laps':          int(  m.get('laps',          0)),
+            'time_limit_sec': int( m.get('time_limit_sec', 0)),
+            'start_gate':    start_gate,
+            'start_button':  int(  m.get('start_button',  1)),
+            'start_key':     bool( m.get('start_key',     True)),
+            'start_x':       float(m.get('start_x',       0.0)),
+            'start_y':       float(m.get('start_y',       0.0)),
+            'start_radius':  float(m.get('start_radius',  1.5)),
+        }]) if start_gate else None
+
+    nodes = [
+        physics_node, rviz, rsp, map_server, lifecycle,
         sim_bridge,
         TimerAction(period=3.0, actions=[ctrl_node]),
-    ])
+    ]
+    if mission_node:
+        nodes.append(mission_node)
+
+    return LaunchDescription(nodes)
