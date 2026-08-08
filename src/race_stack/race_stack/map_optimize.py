@@ -27,6 +27,7 @@ import argparse
 import csv
 import math
 import os
+import re
 import sys
 
 import numpy as np
@@ -307,18 +308,24 @@ def optimize(wp: np.ndarray, kappa: np.ndarray, p: VehicleParams,
 
 def update_race_script(best: dict):
     with open(_RACE_SCRIPT) as f:
-        cfg = yaml.safe_load(f)
+        text = f.read()
 
-    mc = cfg.setdefault('map', {})
-    mc['l1_min']      = round(best['l1_min'],      4)
-    mc['l1_k']        = round(best['l1_k'],        4)
-    mc['steer_alpha'] = round(best['steer_alpha'],  4)
-    mc['speed_scale'] = round(best['speed_scale'],  4)
-    mc['a_brake']     = round(best['a_brake'],      4)
+    keys = {
+        'l1_min':      best['l1_min'],
+        'l1_k':        best['l1_k'],
+        'steer_alpha': best['steer_alpha'],
+        'speed_scale': best['speed_scale'],
+        'a_brake':     best['a_brake'],
+    }
+    for key, val in keys.items():
+        text = re.sub(
+            rf'^(  {key}:)\s+\S+',
+            rf'\g<1> {round(val, 4)}',
+            text, flags=re.MULTILINE,
+        )
 
     with open(_RACE_SCRIPT, 'w') as f:
-        yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False,
-                  sort_keys=False)
+        f.write(text)
     print(f'  → {_RACE_SCRIPT} 업데이트 완료')
 
 
