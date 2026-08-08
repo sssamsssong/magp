@@ -451,9 +451,15 @@ def generate_launch_description():
                 'pac_c':         float(mp.get('pac_c',       1.3)),
                 'pac_d':         float(mp.get('pac_d',       1.15)),
                 'pac_e':         float(mp.get('pac_e',      -0.5)),
-                'a_brake':       float(mp.get('a_brake',     6.0902)),
+                # ★ 속도 프로파일의 유일한 노브. 마찰 예산에 곱한다 (속도가 아니라).
+                'grip_util':     float(mp.get('grip_util',   0.6)),
+                # 0 이면 물리에서 자동: 가속=μ_eff·g·lf/L(후륜하중), 제동=μ_eff·g
+                'a_lon_acc':     float(mp.get('a_lon_acc',   0.0)),
+                'a_lon_brk':     float(mp.get('a_lon_brk',   0.0)),
+                # ↓ 폐기. 옛 설정이 죽지 않게만 남겨둔다 (컨트롤러가 경고하고 무시)
+                'a_brake':       float(mp.get('a_brake',     0.0)),
                 'speed_scale':   float(mp.get('speed_scale', 1.0)),
-                'mu_cap':        bool( mp.get('mu_cap',      False)),
+                'mu_cap':        bool( mp.get('mu_cap',      True)),
                 'steer_alpha':   float(mp.get('steer_alpha', 0.1981)),
                 'reverse_check': bool( mp.get('reverse_check', True)),
                 # AMCL 첫 pose 전까지의 위치 가정 (stanley 와 같은 값을 쓴다).
