@@ -77,17 +77,24 @@ def _load_waypoints(path: str) -> np.ndarray:
     with open(path) as f:
         for r in csv.DictReader(f):
             rows.append([float(r['x']), float(r['y']), float(r['speed'])])
-    return np.array(rows)
+    wp = np.array(rows)
+    # 연속 중복 포인트 제거 (arc length=0 → CubicSpline 오류 방지)
+    keep = np.concatenate([[True], np.linalg.norm(np.diff(wp[:, :2], axis=0), axis=1) > 1e-6])
+    return wp[keep]
 
 
 def _precompute_kappa(wp: np.ndarray) -> np.ndarray:
     """각 웨이포인트의 곡률 [1/m]."""
     from scipy.interpolate import CubicSpline
     pts = wp[:, :2]
+    # 마지막 포인트가 첫 포인트와 동일한 폐루프면 제거
+    if np.linalg.norm(pts[-1] - pts[0]) < 1e-6:
+        pts = pts[:-1]
     n = len(pts)
     ds = np.linalg.norm(np.diff(pts, axis=0), axis=1)
     s = np.concatenate([[0.0], np.cumsum(ds)])
-    s_ext = np.append(s, s[-1] + np.linalg.norm(pts[0] - pts[-1]))
+    gap = np.linalg.norm(pts[0] - pts[-1])
+    s_ext = np.append(s, s[-1] + max(gap, 1e-6))
     x_ext = np.append(pts[:, 0], pts[0, 0])
     y_ext = np.append(pts[:, 1], pts[0, 1])
     cs_x = CubicSpline(s_ext, x_ext, bc_type='periodic')

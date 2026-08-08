@@ -3,7 +3,7 @@ map_name: sohot_clean
 waypoints: forza_opt_wp
 sim:
   sx: 8.63
-  sy: -2.50
+  sy: -2.5
   stheta: 0.049
   physics: bicycle
 sim_vehicle:
@@ -206,11 +206,11 @@ wall_avoid:
   lpf: 0.25
   min_range: 0.12
 map:
-  l1_min: 2.1686
-  l1_k: 0.5844
-  steer_alpha: 0.7514
-  speed_scale: 1.0
-  a_brake: 6.2521
+  l1_min: 2.4685
+  l1_k: 0.6957
+  steer_alpha: 0.8215
+  speed_scale: 1.0492
+  a_brake: 3.627
   mu_cap: false
   mu: 0.4
   mass: 3.354
