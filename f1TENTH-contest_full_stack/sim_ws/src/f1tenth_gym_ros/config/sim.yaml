@@ -17,9 +17,9 @@ bridge:
     scan_beams: 1080
     scan_distance_to_base_link: 0.275
     scan_fov: 4.7
-    stheta: -2.7802
+    stheta: -2.6605
     stheta1: 0.0
-    sx: 12.4015
+    sx: 12.2313
     sx1: 2.0
-    sy: 3.3872
+    sy: 3.513
     sy1: 0.5
