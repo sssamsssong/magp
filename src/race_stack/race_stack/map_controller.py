@@ -58,6 +58,8 @@ from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import Bool, ColorRGBA, Float64
+
+from race_stack.speed_profile import solve_profile
 from visualization_msgs.msg import Marker
 
 from race_stack.stanley_controller import _REPO_ROOT, _normalize
@@ -150,6 +152,9 @@ class MapController(Node):
         #   v ∝ √η 라 코너는 √η 배로 줄지만, 직선은 a_lon 과 구간 길이가
         #   지배하므로 균일하게 안 줄어든다 — 그게 물리적으로 맞다.
         self.declare_parameter('grip_util',   0.6)
+        # 물리와 무관한 안전 천장. 0 = 끔(기본). μ 나 η 가 틀려도 이 속도는
+        # 안 넘는다는 마지막 방어선이 필요할 때만 켠다.
+        self.declare_parameter('hard_cap',    0.0)
 
         # 종방향 상한 [m/s²]. 0 이하면 물리에서 자동 유도한다:
         #   가속 — 후륜구동이라 **후축 하중분율**이 한계다.  a = μ_eff·g·lf/L
@@ -311,30 +316,17 @@ class MapController(Node):
 
     # ── 사전 계산: 역방향 스윕 속도 프로파일 ───────────────────────────
     def _compute_speed_profile(self):
-        n = len(self.wp)
-        ds = np.linalg.norm(np.roll(self.wp[:, :2], -1, axis=0) - self.wp[:, :2],
-                            axis=1)
-
-        ds  = np.maximum(ds, 1e-3)
-        kap = np.maximum(np.abs(self._curvature), 1e-4)
-
-        v_max = float(self.p('max_speed'))
-        v_min = float(self.p('min_speed'))
-        eta   = float(np.clip(self.p('grip_util'), 0.05, 1.0))
-
-        # 실효 그립 = mu × pac_d (MAP 논문 III-B: peak = μ·Fz·D). mu 혼자가 아니다.
-        mu_eff = float(self.p('mu')) * float(self.p('pac_d'))
-        a_g    = eta * mu_eff * GRAVITY          # 타이어 예산 = 마찰원 반지름
-
-        lf, lr = float(self.p('lf')), float(self.p('lr'))
-        L = max(lf + lr, 1e-6)
-        a_acc = float(self.p('a_lon_acc'))
-        a_brk = float(self.p('a_lon_brk'))
-        if a_acc <= 0.0:
-            a_acc = a_g * lf / L                 # 후륜구동 = 후축 하중분율이 한계
-        if a_brk <= 0.0:
-            a_brk = a_g
-        a_acc, a_brk = min(a_acc, a_g), min(a_brk, a_g)
+        """마찰원 결합 forward-backward. 로직은 speed_profile 모듈 (컨트롤러 공용)."""
+        v, info = solve_profile(
+            self.wp[:, 0], self.wp[:, 1], self.wp[:, 2],
+            mu_eff=float(self.p('mu')) * float(self.p('pac_d')),
+            grip_util=float(self.p('grip_util')),
+            lf=float(self.p('lf')), lr=float(self.p('lr')),
+            v_min=float(self.p('min_speed')),
+            a_lon_acc=float(self.p('a_lon_acc')),
+            a_lon_brk=float(self.p('a_lon_brk')),
+            hard_cap=float(self.p('hard_cap')),
+            curvature=self._curvature)
 
         if abs(float(self.p('speed_scale')) - 1.0) > 1e-6:
             self.get_logger().error(
@@ -342,52 +334,16 @@ class MapController(Node):
                 f"속도를 배수로 스케일하면 요구 횡가속이 제곱으로 변해 어느 코너가 "
                 f"한계인지까지 바뀐다. grip_util 로 마찰 예산을 조절할 것.")
         if float(self.p('a_brake')) > 0.0:
-            self.get_logger().warn(
-                f"a_brake 는 폐기됐다 — a_lon_brk 를 쓸 것 (현재 {a_brk:.2f}㎧²). "
-                f"옛 기본값 6.09㎧² 는 이 노면 총 그립({mu_eff*GRAVITY:.2f}㎧²)의 "
-                f"1.5배라 물리적으로 불가능한 감속선을 그렸다.")
+            self.get_logger().warn("a_brake 는 폐기됐다 — a_lon_brk 를 쓸 것.")
 
-        # ── 1) 곡률 한계 ────────────────────────────────────────────────
-        v = np.sqrt(a_g / kap)
-        csv_v = self.wp[:, 2]
-        if np.all(csv_v > 0.0):
-            # CSV 는 **상한으로만** 쓴다 — 설계자가 의도적으로 낮춰둔 구간(피트
-            # 진입 등)은 존중하되, μ 가 다른 노면에서 만든 낙관적 값은 물리가 이긴다.
-            v = np.minimum(v, csv_v)
-        v = np.minimum(v, v_max)
-
-        # ── 2·3) 마찰원 결합 역방향/전진 패스 ───────────────────────────
-        #   돌면서 동시에 세게 밟거나 설 수는 없다:
-        #       a_lon_avail = a_cap · √(1 − (a_lat/a_g)²)
-        #   이 한 줄이 코너 진입에서 **더 일찍** 감속하고 탈출에서 **더 늦게**
-        #   가속하게 만든다 — 순진한 프로파일과 실제 레이싱 프로파일의 차이다.
-        #   a_lat 이 v 에 의존하므로 수렴할 때까지 반복한다.
-        def lon_avail(vi, ki, cap):
-            r = min(vi * vi * ki / max(a_g, 1e-9), 1.0)
-            return cap * math.sqrt(max(0.0, 1.0 - r * r))
-
-        for _ in range(5):
-            for i in range(n - 1, -1, -1):            # 역방향 — 다음 코너까지 설 수 있게
-                j = (i + 1) % n
-                v[i] = min(v[i], math.sqrt(v[j] ** 2
-                                           + 2.0 * lon_avail(v[i], kap[i], a_brk) * ds[i]))
-            for i in range(n):                        # 전진 — 낼 수 있는 만큼만
-                j = (i + 1) % n
-                v[j] = min(v[j], math.sqrt(v[i] ** 2
-                                           + 2.0 * lon_avail(v[i], kap[i], a_acc) * ds[i]))
-            v = np.minimum(v, v_max)
-
-        # v_min 은 **맨 마지막에** 건다. 패스 도중에 올리면 제동 제약이 깨진다.
-        v = np.maximum(v, v_min)
-
-        a_lat = v * v * kap
         self.get_logger().info(
-            f'속도 프로파일 η={eta:.2f}  그립예산 {a_g:.2f}㎧² '
-            f'(μ_eff {mu_eff:.3f}, 가속 {a_acc:.2f} / 제동 {a_brk:.2f})')
+            f"속도 프로파일 η={info['eta']:.2f}  예산 {info['a_g']:.2f}㎧² "
+            f"(가속 {info['a_acc']:.2f} / 제동 {info['a_brk']:.2f})")
         self.get_logger().info(
-            f'  v {v.min():.2f}~{v.max():.2f}㎧ (중앙 {float(np.median(v)):.2f}) '
-            f'| 요구 a_lat 최대 {a_lat.max():.2f}㎧² ({100*a_lat.max()/a_g:.0f}% of 예산) '
-            f'| 상한 {v_max:.1f} 에 걸린 구간 {100*float(np.mean(v >= v_max - 1e-6)):.0f}%')
+            f"  v {info['v_min']:.2f}~{info['v_max']:.2f}㎧ (중앙 {info['v_med']:.2f}) "
+            f"| 예상 랩 {info['lap_time']:.1f}s"
+            + (f" | ⚠ hard_cap 에 걸린 구간 {100*info['capped']:.0f}%"
+               if info['capped'] > 0.01 else ''))
         return v
 
     def _friction_cap(self):

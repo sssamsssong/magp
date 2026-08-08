@@ -37,6 +37,21 @@ def generate_launch_description():
     # sys.argv를 직접 파싱한다 (LaunchConfiguration은 파이썬 로직에서 못 씀)
     import sys
     mode = cfg['mode']
+    # ── 속도 프로파일 공통 설정 (2026-08-09) ───────────────────────────
+    #  grip_util 은 컨트롤러 셋(map/stanley/gap_follower)이 **공유**한다.
+    #  모드별로 위험도를 다르게 두고 싶으면 limits.grip_util.<mode> 로 준다 —
+    #  q*_max 같은 평평한 상한 대신 **마찰 예산 사용률**로 표현하는 것이 물리적이다.
+    _lim = cfg.get('limits', {})
+    _mp0 = cfg.get('map', {})
+    _gu  = _lim.get('grip_util', 0.6)
+    grip_util = float(_gu.get(mode, _gu.get('default', 0.6))
+                      if isinstance(_gu, dict) else _gu)
+    a_lon_acc = float(_lim.get('a_lon_acc', 0.0))
+    a_lon_brk = float(_lim.get('a_lon_brk', 0.0))
+    hard_cap  = float(cfg.get('speed', {}).get('hard_cap', 0.0))
+    veh = dict(mu=float(_mp0.get('mu', 0.348)), pac_d=float(_mp0.get('pac_d', 1.15)),
+               lf=float(_mp0.get('lf', 0.1757)), lr=float(_mp0.get('lr', 0.1441)))
+
     controller = cfg.get('controller', 'auto')
     bench = False
     for a in sys.argv:
@@ -351,6 +366,15 @@ def generate_launch_description():
                 'waypoint_file':   wp_csv,
                 'max_speed':       max_speed,
                 'min_speed':       min_speed,
+                # ★ 마찰원 속도 프로파일 (map_controller 와 같은 코드)
+                'grip_util':       grip_util,
+                'a_lon_acc':       a_lon_acc,
+                'a_lon_brk':       a_lon_brk,
+                'hard_cap':        hard_cap,
+                'mu':              veh['mu'],
+                'pac_d':           veh['pac_d'],
+                'lf':              veh['lf'],
+                'lr':              veh['lr'],
                 'max_steer':       float(pp.get('max_steer', 0.36)),
                 'wheelbase':       float(pp.get('wheelbase',  0.33)),
                 'stanley_gain':    float(sc.get('gain',           0.8)),
@@ -452,10 +476,11 @@ def generate_launch_description():
                 'pac_d':         float(mp.get('pac_d',       1.15)),
                 'pac_e':         float(mp.get('pac_e',      -0.5)),
                 # ★ 속도 프로파일의 유일한 노브. 마찰 예산에 곱한다 (속도가 아니라).
-                'grip_util':     float(mp.get('grip_util',   0.6)),
+                'grip_util':     grip_util,
+                'hard_cap':      hard_cap,
                 # 0 이면 물리에서 자동: 가속=μ_eff·g·lf/L(후륜하중), 제동=μ_eff·g
-                'a_lon_acc':     float(mp.get('a_lon_acc',   0.0)),
-                'a_lon_brk':     float(mp.get('a_lon_brk',   0.0)),
+                'a_lon_acc':     a_lon_acc,
+                'a_lon_brk':     a_lon_brk,
                 # ↓ 폐기. 옛 설정이 죽지 않게만 남겨둔다 (컨트롤러가 경고하고 무시)
                 'a_brake':       float(mp.get('a_brake',     0.0)),
                 'speed_scale':   float(mp.get('speed_scale', 1.0)),
@@ -522,6 +547,10 @@ def generate_launch_description():
             package='race_stack', executable='gap_follower',
             name='gap_follower', output='screen',
             parameters=[{'max_speed': max_speed, 'min_speed': min_speed,
+                         # ★ 조향각 → 곡률 → 마찰 예산으로 속도를 제한한다
+                         'grip_util': grip_util, 'hard_cap': hard_cap,
+                         'mu': veh['mu'], 'pac_d': veh['pac_d'],
+                         'wheelbase': float(cfg['pure_pursuit']['wheelbase']),
                          'car_width': float(gf['car_width']),
                          'disparity_threshold': float(gf['disparity_threshold']),
                          'max_range': float(gf['max_range']),

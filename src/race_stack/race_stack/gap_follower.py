@@ -14,6 +14,8 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 
 from sensor_msgs.msg import LaserScan
+
+from race_stack.speed_profile import steer_speed_limit
 from std_msgs.msg import Bool
 from ackermann_msgs.msg import AckermannDriveStamped
 
@@ -29,6 +31,17 @@ class GapFollower(Node):
     def __init__(self):
         super().__init__('gap_follower')
         # --- 파라미터 (race_script.yaml → launch에서 주입됨) ---
+        # ── 물리 기반 속도 한계 (2026-08-09) ────────────────────────────
+        # 반응형이라 레이싱라인이 없지만, **자기가 내리려는 조향각이 곧 곡률**이다:
+        #     κ = |tan δ| / L   →   v ≤ √(η·μ_eff·g / κ)
+        # 예전의 "조향이 크면 0.6배" 같은 임의 계수와 달리, 노면(μ)이나 차량
+        # 기하가 바뀌면 자동으로 따라간다.
+        self.declare_parameter('grip_util', 0.6)
+        self.declare_parameter('mu',        0.348)   # race_script.yaml [map] 원본
+        self.declare_parameter('pac_d',     1.15)
+        self.declare_parameter('wheelbase', 0.32)
+        # 물리와 무관한 안전 천장. 0 = 끔(기본).
+        self.declare_parameter('hard_cap',  0.0)
         self.declare_parameter('max_speed', 2.0)
         self.declare_parameter('min_speed', 1.0)
         self.declare_parameter('car_width', 0.40)
@@ -105,10 +118,18 @@ class GapFollower(Node):
         # 전방 ±10도 평균거리 기반 속도 (가까우면 감속)
         front_mask = np.abs(a) < np.deg2rad(10)
         front_dist = float(np.mean(r[front_mask])) if front_mask.any() else 0.0
-        speed = np.clip(self.p('speed_gain') * front_dist,
-                        self.p('min_speed'), self.p('max_speed'))
-        # 조향이 클수록 감속
-        speed *= max(0.4, 1.0 - abs(steer) / self.p('max_steer') * 0.6)
+        # 전방 여유에서 오는 상한 (벽이 가까우면 감속) — 이건 물리가 아니라 안전이다
+        speed = self.p('speed_gain') * front_dist
+
+        # ★ 조향각 → 곡률 → 마찰 예산 안에서의 최대 속도 (물리)
+        v_phys = steer_speed_limit(steer, self.p('wheelbase'),
+                                   self.p('mu') * self.p('pac_d'),
+                                   self.p('grip_util'))
+        speed = min(speed, v_phys)
+        cap = float(self.p('hard_cap'))
+        if cap > 0:
+            speed = min(speed, cap)
+        speed = max(speed, self.p('min_speed'))
 
         msg = AckermannDriveStamped()
         msg.header.stamp = self.get_clock().now().to_msg()

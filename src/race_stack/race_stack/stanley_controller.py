@@ -47,6 +47,7 @@ from sensor_msgs.msg import LaserScan
 # ★ Frenet 회피 로직은 obstacle_avoid 로 **이동**했다 (2026-08-09).
 #   컨트롤러마다 복붙하지 않으려는 것 — frenet_planner 노드와 MAP 이
 #   같은 코드를 쓴다. 로직은 한 글자도 안 바뀌었다.
+from race_stack.speed_profile import solve_profile
 from race_stack.obstacle_avoid import (ObstacleAvoidMixin, _load_map,
                                        _world_to_img)
 from std_msgs.msg import Bool, ColorRGBA
@@ -98,6 +99,21 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self.declare_parameter('init_x',           0.0)
         self.declare_parameter('init_y',           0.0)
         self.declare_parameter('init_yaw',         0.0)
+        # ── 속도 프로파일 ───────────────────────────────────────────────
+        # ★ 2026-08-09: clip(v, min, max) 만 쓰던 것을 마찰원 프로파일로 바꿨다.
+        #   예전에는 max_speed 가 CSV 속도보다 낮으면 **전 구간이 그 값으로 잘려
+        #   등속 주행**이 됐다 — q1_max=1 인데 CSV 가 0.75~6.0㎧ 라 직선에서도
+        #   코너에서도 똑같이 1㎧ 로 돌았다. 곡률 프로파일이 있으나 마나였다.
+        #   이제 grip_util(η) 로 마찰 예산을 조절한다. map_controller 와 같은 코드.
+        self.declare_parameter('grip_util',  0.6)
+        self.declare_parameter('a_lon_acc',  0.0)   # 0=자동(후륜 하중분율)
+        self.declare_parameter('a_lon_brk',  0.0)   # 0=자동(예산 전체)
+        self.declare_parameter('hard_cap',   0.0)   # 0=끔. 물리 무관 안전천장
+        # 차량 물리 — race_script.yaml [map] 이 원본이다 (같은 차이므로 공유)
+        self.declare_parameter('mu',     0.348)
+        self.declare_parameter('pac_d',  1.15)
+        self.declare_parameter('lf',     0.1757)
+        self.declare_parameter('lr',     0.1441)
         self.declare_parameter('max_speed',        5.0)
         self.declare_parameter('min_speed',        1.0)
         self.declare_parameter('max_steer',        0.36)
@@ -295,6 +311,7 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self._wp_ds = 0.1
         if self.wps is not None and len(self.wps) > 10:
             self.kappa, self._wp_ds = self._precompute_curvature()
+            self._v_profile = self._build_speed_profile()
             self.get_logger().info(
                 f'curvature precomputed: |κ|max={np.abs(self.kappa).max():.2f} '
                 f'(spacing {self._wp_ds:.3f}m)')
@@ -643,13 +660,40 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self._steer_prev = steer
 
         # ── target speed from CSV ──────────────────────────────────────
-        cmd_v = float(wps[nearest, 2]) * self.vel_scale
+        # ★ 마찰원 프로파일에서 읽는다 (CSV×배수 + clip 아님 — 위 grip_util 주석)
+        cmd_v = float(self._v_profile[nearest])
         if self.mode == 'q2' and not self.lane_free:
             cmd_v *= self.obs_decel
-        cmd_v = float(np.clip(cmd_v, self.min_speed, self.max_speed))
+        cmd_v = max(cmd_v, self.min_speed)
 
         self._pub_wp_marker(target)
         return steer, cmd_v
+
+    def _build_speed_profile(self):
+        """마찰원 결합 forward-backward. map_controller 와 **같은 코드**를 쓴다."""
+        p = lambda n: self.get_parameter(n).value
+        v, info = solve_profile(
+            self.wps[:, 0], self.wps[:, 1], self.wps[:, 2],
+            mu_eff=float(p('mu')) * float(p('pac_d')),
+            grip_util=float(p('grip_util')),
+            lf=float(p('lf')), lr=float(p('lr')),
+            v_min=float(p('min_speed')),
+            a_lon_acc=float(p('a_lon_acc')), a_lon_brk=float(p('a_lon_brk')),
+            hard_cap=float(p('hard_cap')),
+            curvature=np.abs(self.kappa))
+        if abs(float(self.vel_scale) - 1.0) > 1e-6:
+            self.get_logger().error(
+                f'vel_scale={self.vel_scale} 은 **무시된다** (폐기됨). 속도를 배수로 '
+                f'스케일하면 요구 횡가속이 제곱으로 변한다. grip_util 을 쓸 것.')
+        self.get_logger().info(
+            f"속도 프로파일 η={info['eta']:.2f}  예산 {info['a_g']:.2f}㎧² "
+            f"(가속 {info['a_acc']:.2f} / 제동 {info['a_brk']:.2f})")
+        self.get_logger().info(
+            f"  v {info['v_min']:.2f}~{info['v_max']:.2f}㎧ (중앙 {info['v_med']:.2f}) "
+            f"| 예상 랩 {info['lap_time']:.1f}s"
+            + (f" | ⚠ hard_cap 에 걸린 구간 {100*info['capped']:.0f}%"
+               if info['capped'] > 0.01 else ''))
+        return v
 
     def _precompute_curvature(self, span: float = 0.2, smooth: int = 5):
         """각 웨이포인트의 부호 있는 곡률(좌회전 +)을 로드 시 1회 계산.
