@@ -106,15 +106,19 @@ class MapController(Node):
         # ★ mass/lf/lr 은 조향 결과에 영향을 주지 않는다 — F_yf/(mu·Fzf) 를 계산할
         #   때 대수적으로 약분되어 a_lat/(mu·g) 만 남는다. 하중이동을 넣게 될 때를
         #   대비해 형태만 남겨둔 것이고, 실제로 조향을 바꾸는 건 mu 하나다.
-        self.declare_parameter('mass', 3.74)
-        self.declare_parameter('lf',   0.15875)
-        self.declare_parameter('lr',   0.17145)
-        self.declare_parameter('mu',   1.0489)
+        # 실측 (2026-08-09): m=3.354kg, 앞1510g/뒤1840g, L=0.32m
+        self.declare_parameter('mass', 3.354)
+        self.declare_parameter('lf',   0.1757)
+        self.declare_parameter('lr',   0.1441)
+        # mu: 대회(우레탄)=1.0~1.3, 연습(화강석)=0.8 권장
+        self.declare_parameter('mu',   1.0)
 
         # ── Pacejka Magic Formula ───────────────────────────────────────
-        self.declare_parameter('pac_b',  3.629)
+        # 우리 차 추정 (2026-08-09): F1TENTH 폼 타이어 기반, MAP 논문 대비
+        #   B 소폭 상향(차량 경량으로 접지압 낮음), D 소폭 하향(타이어 상태 불확실)
+        self.declare_parameter('pac_b',  3.8)
         self.declare_parameter('pac_c',  1.3)
-        self.declare_parameter('pac_d',  1.2084)
+        self.declare_parameter('pac_d',  1.15)
         self.declare_parameter('pac_e', -0.5)
 
         # ── 속도 프로파일 ───────────────────────────────────────────────
