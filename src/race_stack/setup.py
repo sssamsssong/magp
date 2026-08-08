@@ -57,6 +57,7 @@ setup(
             'set_speed_kappa    = race_stack.set_speed_kappa:main',
             'steer_trim         = race_stack.steer_trim:main',
             'gen_lut            = race_stack.vehicle_sim:main',
+            'vehicle_sim_node   = race_stack.vehicle_sim_node:main',
             'sysid_nn           = race_stack.sysid_nn:main',
         ],
     },

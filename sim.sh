@@ -31,9 +31,14 @@ CMD=${1:-}
 source /opt/ros/humble/setup.bash
 [ -f "$WS/install/setup.bash" ] && source "$WS/install/setup.bash"
 
-if [ "$CMD" != "race" ] && ! ros2 pkg prefix race_stack &>/dev/null; then
-    # 노트북 환경: race_stack 없음 → gym으로 자동 전환
+if ! ros2 pkg prefix race_stack &>/dev/null; then
+    # race_stack 없음 → gym으로 자동 전환 (노트북/미빌드 환경)
     exec "$GYM_SH" "$@"
+fi
+
+if [ -z "$CMD" ]; then
+    # race_stack 있어도 인자 없으면 gym 메뉴로 (옵션 5 = Race Stack)
+    exec "$GYM_SH"
 fi
 
 # ── race_stack 시뮬 (젯슨) ──────────────────────────────────────────────

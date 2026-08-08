@@ -1,7 +1,12 @@
-"""sim_race.launch.py — f1tenth_gym_ros + StanleyController 통합 런치.
+"""sim_race.launch.py — 통합 시뮬레이션 런치.
 
-race_script.yaml 의 stanley/speed/waypoints/map 설정을 그대로 사용해
-시뮬레이터에서 실차 알고리즘을 구동한다.
+race_script.yaml 의 설정을 그대로 사용해 시뮬레이터에서 실차 알고리즘을 구동한다.
+
+  physics: gym     → f1tenth_gym_ros (기본, 선형 타이어)
+  physics: bicycle → vehicle_sim_node (Pacejka 자전거 모델, race_script.yaml map: 파라미터)
+
+  controller 는 race_script.yaml controller: 필드를 따른다.
+  (map / stanley / pure_pursuit 지원)
 
 실행:
   export RACE_WS=~/f1tenth_ws
@@ -9,9 +14,6 @@ race_script.yaml 의 stanley/speed/waypoints/map 설정을 그대로 사용해
   source ~/yax/f1TENTH-contest_full_stack/sim_ws/install/setup.bash
   source ~/f1tenth_ws/install/setup.bash
   ros2 launch race_stack sim_race.launch.py
-
-  또는 race.sh 사용:
-  ./race.sh sim
 """
 import math
 import os
@@ -42,7 +44,7 @@ def generate_launch_description():
                  else get_package_share_directory('race_stack'))
 
     map_name = cfg['map_name']
-    map_base = os.path.join(race_data, 'maps', map_name)  # 확장자 없음
+    map_base = os.path.join(race_data, 'maps', map_name)
     map_yaml = map_base + '.yaml'
     wp_csv   = os.path.join(race_data, 'waypoints', cfg['waypoints'] + '.csv')
 
@@ -53,66 +55,54 @@ def generate_launch_description():
 
     map_img_ext = '.png' if os.path.exists(map_base + '.png') else '.pgm'
 
-    # ── 스폰 위치 (race_script.yaml [sim] 섹션, 없으면 기본값) ─────────
+    # ── 스폰 위치 ─────────────────────────────────────────────────────────
     sim_cfg = cfg.get('sim', {})
     sx      = float(sim_cfg.get('sx',     0.853))
     sy      = float(sim_cfg.get('sy',     4.111))
     stheta  = float(sim_cfg.get('stheta', math.pi))
+    physics = sim_cfg.get('physics', 'gym')   # 'gym' | 'bicycle'
 
-    # ── 차량 물리 파라미터 (race_script.yaml [sim_vehicle] 섹션) ─────────────
-    sv = cfg.get('sim_vehicle', {})
-    veh_params = {
-        'veh_mu':          float(sv.get('mu',          1.0489)),
-        'veh_C_Sf':        float(sv.get('C_Sf',        4.718)),
-        'veh_C_Sr':        float(sv.get('C_Sr',        5.4562)),
-        'veh_lf':          float(sv.get('lf',          0.15875)),
-        'veh_lr':          float(sv.get('lr',          0.17145)),
-        'veh_h':           float(sv.get('h',           0.074)),
-        'veh_m':           float(sv.get('m',           3.74)),
-        'veh_I':           float(sv.get('I',           0.04712)),
-        'veh_s_max':       float(sv.get('s_max',       0.4189)),
-        'veh_sv_max':      float(sv.get('sv_max',      3.2)),
-        'veh_a_max':       float(sv.get('a_max',       9.51)),
-        'veh_v_max':       float(sv.get('v_max',       20.0)),
-        'veh_steer_delay': int(  sv.get('steer_delay', 2)),
+    # ── 컨트롤러 선택 ─────────────────────────────────────────────────────
+    mode       = cfg.get('mode', 'q1')
+    controller = cfg.get('controller', 'map')
+    max_speed  = float(cfg['speed'].get(f'{mode}_max', cfg['speed']['q1_max']))
+    min_speed  = float(cfg['speed']['min_speed'])
+
+    # ── map: 섹션 파라미터 ────────────────────────────────────────────────
+    mc = cfg.get('map', {})
+    map_params = {
+        'odom_topic':   '/odom',
+        'waypoint_file': wp_csv,
+        'mode':          mode,
+        'max_speed':     max_speed,
+        'min_speed':     min_speed,
+        'mu':            float(mc.get('mu',          1.0)),
+        'mass':          float(mc.get('mass',         3.354)),
+        'lf':            float(mc.get('lf',           0.1757)),
+        'lr':            float(mc.get('lr',           0.1441)),
+        'pac_b':         float(mc.get('pac_b',        3.8)),
+        'pac_c':         float(mc.get('pac_c',        1.3)),
+        'pac_d':         float(mc.get('pac_d',        1.15)),
+        'pac_e':         float(mc.get('pac_e',       -0.5)),
+        'l1_min':        float(mc.get('l1_min',       0.90)),
+        'l1_k':          float(mc.get('l1_k',         0.35)),
+        'speed_scale':   float(mc.get('speed_scale',  2.0)),
+        'steer_alpha':   float(mc.get('steer_alpha',  0.1981)),
+        'a_brake':       float(mc.get('a_brake',      6.0902)),
+        'wheelbase':     float(mc.get('lf', 0.1757)) + float(mc.get('lr', 0.1441)),
+        'max_steer':     float(cfg.get('pure_pursuit', {}).get('max_steer', 0.36)),
+        'init_x':        sx,
+        'init_y':        sy,
+        'init_yaw':      stheta,
     }
 
-    # ── 컨트롤러 파라미터 ─────────────────────────────────────────────────
-    mode      = cfg.get('mode', 'q1')
-    max_speed = float(cfg['speed'].get(f'{mode}_max', cfg['speed']['q1_max']))
-    min_speed = float(cfg['speed']['min_speed'])
-    sc        = cfg.get('stanley', {})
-    pp        = cfg.get('pure_pursuit', {})
-    bound_dir = sc.get('bound_dir', '') or os.path.join(race_data, 'maps', map_name)
-
-    # ── f1tenth_gym_ros 패키지 공유 디렉토리 ──────────────────────────────
+    # ── RViz / RSP / 맵 서버 (공통) ──────────────────────────────────────
     sim_share = get_package_share_directory('f1tenth_gym_ros')
-    sim_yaml  = os.path.join(sim_share, 'config', 'sim.yaml')
 
-    # ── 노드 정의 ─────────────────────────────────────────────────────────
-
-    # 1. gym 물리 시뮬레이터
-    gym_bridge = Node(
-        package='f1tenth_gym_ros',
-        executable='gym_bridge',
-        name='bridge',
-        output='screen',
-        parameters=[sim_yaml,
-                    {'map_path':    map_base,
-                     'map_img_ext': map_img_ext,
-                     'num_agent':   1,
-                     'kb_teleop':   False,
-                     'sx':     sx,
-                     'sy':     sy,
-                     'stheta': stheta,
-                     **veh_params}])
-
-    # 2. RViz
     rviz = Node(
         package='rviz2', executable='rviz2', name='rviz',
         arguments=['-d', os.path.join(sim_share, 'launch', 'gym_bridge.rviz')])
 
-    # 3. 차량 URDF 발행 (RViz 시각화용)
     rsp = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
@@ -121,7 +111,6 @@ def generate_launch_description():
             ['xacro ', os.path.join(sim_share, 'launch', 'ego_racecar.xacro')])}],
         remappings=[('/robot_description', 'ego_robot_description')])
 
-    # 4. 맵 서버 (RViz 지도 표시)
     map_server = Node(
         package='nav2_map_server',
         executable='map_server',
@@ -135,50 +124,135 @@ def generate_launch_description():
         output='screen',
         parameters=[{'autostart': True, 'node_names': ['map_server']}])
 
-    # 5. sim_bridge: /ego_racecar/odom → /amcl_pose + /odom + /race/enabled
     sim_bridge = Node(
         package='race_stack',
         executable='sim_bridge',
         name='sim_bridge',
         output='screen')
 
-    # 6. StanleyController (시뮬 초기화 3초 대기 후 기동)
-    stanley = Node(
-        package='race_stack',
-        executable='stanley_controller',
-        name='stanley_controller',
-        output='screen',
-        parameters=[{
-            'mode':            mode,
-            'waypoint_file':   wp_csv,
-            'max_speed':       max_speed,
-            'min_speed':       min_speed,
-            'max_steer':       float(pp.get('max_steer',       0.36)),
-            'wheelbase':       float(pp.get('wheelbase',       0.33)),
-            'stanley_gain':    float(sc.get('gain',            0.8)),
-            'stanley_k':       float(sc.get('k',               1.0)),
-            'stanley_ks':      float(sc.get('ks',              1.5)),
-            'vel_scale':       float(sc.get('vel_scale',       1.0)),
-            'obstacle_decel':  float(sc.get('obstacle_decel',  0.85)),
-            'obs2lane_dist':   float(sc.get('obs2lane_dist',   0.25)),
-            'interp_scale':    int(  sc.get('interp_scale',    20)),
-            'lookahead_min':   float(sc.get('lookahead_min',   0.5)),
-            'lookahead_max':   float(sc.get('lookahead_max',   2.0)),
-            'lookahead_gain':  float(sc.get('lookahead_gain',  7.0)),
-            'ff_gain':         float(sc.get('ff_gain',         1.0)),
-            'ff_preview_sec':  float(sc.get('ff_preview_sec',  0.10)),
-            'steer_lpf':       float(sc.get('steer_lpf',       1.0)),
-            # Q2 장애물 감지 (맵·경계 파일)
-            'map_yaml':        map_yaml,
-            'bound_dir':       bound_dir,
-        }])
+    # ── 물리 시뮬레이터 선택 ──────────────────────────────────────────────
+    if physics == 'bicycle':
+        physics_node = Node(
+            package='race_stack',
+            executable='vehicle_sim_node',
+            name='vehicle_sim',
+            output='screen',
+            parameters=[{
+                'mu':      map_params['mu'],
+                'mass':    map_params['mass'],
+                'lf':      map_params['lf'],
+                'lr':      map_params['lr'],
+                'pac_b':   map_params['pac_b'],
+                'pac_c':   map_params['pac_c'],
+                'pac_d':   map_params['pac_d'],
+                'pac_e':   map_params['pac_e'],
+                'sx':      sx,
+                'sy':      sy,
+                'stheta':  stheta,
+                'a_max':   float(cfg.get('sim_vehicle', {}).get('a_max', 9.51)),
+                'a_brake': map_params['a_brake'],
+                's_max':   map_params['max_steer'],
+            }])
+    else:
+        sv = cfg.get('sim_vehicle', {})
+        veh_params = {
+            'veh_mu':          float(sv.get('mu',          1.0489)),
+            'veh_C_Sf':        float(sv.get('C_Sf',        4.718)),
+            'veh_C_Sr':        float(sv.get('C_Sr',        5.4562)),
+            'veh_lf':          float(sv.get('lf',          0.15875)),
+            'veh_lr':          float(sv.get('lr',          0.17145)),
+            'veh_h':           float(sv.get('h',           0.074)),
+            'veh_m':           float(sv.get('m',           3.74)),
+            'veh_I':           float(sv.get('I',           0.04712)),
+            'veh_s_max':       float(sv.get('s_max',       0.4189)),
+            'veh_sv_max':      float(sv.get('sv_max',      3.2)),
+            'veh_a_max':       float(sv.get('a_max',       9.51)),
+            'veh_v_max':       float(sv.get('v_max',       20.0)),
+            'veh_steer_delay': int(  sv.get('steer_delay', 2)),
+        }
+        physics_node = Node(
+            package='f1tenth_gym_ros',
+            executable='gym_bridge',
+            name='bridge',
+            output='screen',
+            parameters=[os.path.join(sim_share, 'config', 'sim.yaml'),
+                        {'map_path':    map_base,
+                         'map_img_ext': map_img_ext,
+                         'num_agent':   1,
+                         'kb_teleop':   False,
+                         'sx': sx, 'sy': sy, 'stheta': stheta,
+                         **veh_params}])
+
+    # ── 컨트롤러 노드 선택 ────────────────────────────────────────────────
+    sc = cfg.get('stanley', {})
+    pp = cfg.get('pure_pursuit', {})
+    bound_dir = sc.get('bound_dir', '') or os.path.join(race_data, 'maps', map_name)
+
+    if controller == 'map':
+        ctrl_node = Node(
+            package='race_stack',
+            executable='map_controller',
+            name='map_controller',
+            output='screen',
+            parameters=[map_params])
+
+    elif controller == 'pure_pursuit':
+        ctrl_node = Node(
+            package='race_stack',
+            executable='pure_pursuit',
+            name='pure_pursuit',
+            output='screen',
+            parameters=[{
+                'odom_topic':   '/odom',
+                'waypoint_file': wp_csv,
+                'mode':          mode,
+                'max_speed':     max_speed,
+                'min_speed':     min_speed,
+                'l1_min':  float(pp.get('l1_min',  0.5)),
+                'l1_k':    float(pp.get('l1_k',    0.2)),
+                'max_steer': float(pp.get('max_steer', 0.36)),
+                'wheelbase': float(pp.get('wheelbase', 0.33)),
+                'speed_scale': float(pp.get('speed_scale', 1.0)),
+                'steer_alpha': float(pp.get('steer_alpha', 0.3)),
+                'init_x': sx, 'init_y': sy, 'init_yaw': stheta,
+            }])
+
+    else:  # stanley
+        ctrl_node = Node(
+            package='race_stack',
+            executable='stanley_controller',
+            name='stanley_controller',
+            output='screen',
+            parameters=[{
+                'mode':            mode,
+                'waypoint_file':   wp_csv,
+                'max_speed':       max_speed,
+                'min_speed':       min_speed,
+                'max_steer':       float(pp.get('max_steer',       0.36)),
+                'wheelbase':       float(pp.get('wheelbase',       0.33)),
+                'stanley_gain':    float(sc.get('gain',            0.8)),
+                'stanley_k':       float(sc.get('k',               1.0)),
+                'stanley_ks':      float(sc.get('ks',              1.5)),
+                'vel_scale':       float(sc.get('vel_scale',       1.0)),
+                'obstacle_decel':  float(sc.get('obstacle_decel',  0.85)),
+                'obs2lane_dist':   float(sc.get('obs2lane_dist',   0.25)),
+                'interp_scale':    int(  sc.get('interp_scale',    20)),
+                'lookahead_min':   float(sc.get('lookahead_min',   0.5)),
+                'lookahead_max':   float(sc.get('lookahead_max',   2.0)),
+                'lookahead_gain':  float(sc.get('lookahead_gain',  7.0)),
+                'ff_gain':         float(sc.get('ff_gain',         1.0)),
+                'ff_preview_sec':  float(sc.get('ff_preview_sec',  0.10)),
+                'steer_lpf':       float(sc.get('steer_lpf',       1.0)),
+                'map_yaml':        map_yaml,
+                'bound_dir':       bound_dir,
+            }])
 
     return LaunchDescription([
-        gym_bridge,
+        physics_node,
         rviz,
         rsp,
         map_server,
         lifecycle,
         sim_bridge,
-        TimerAction(period=3.0, actions=[stanley]),
+        TimerAction(period=3.0, actions=[ctrl_node]),
     ])

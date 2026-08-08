@@ -12,6 +12,7 @@ from rclpy.node import Node
 import numpy as np
 import csv
 import os
+import yaml
 from ackermann_msgs.msg import AckermannDriveStamped
 from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped
@@ -23,41 +24,57 @@ from f1tenth_racing.pure_pursuit_node import WAYPOINTS_MAP, _MAPS_DIR
 WAYPOINTS_PATH = os.path.join(_MAPS_DIR, f'{WAYPOINTS_MAP}_waypoints.csv')
 
 
+def _load_race_script():
+    """race_script.yaml의 map 섹션을 읽어 파라미터 dict 반환. 실패시 빈 dict."""
+    d = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(12):
+        p = os.path.join(d, 'race_script.yaml')
+        if os.path.isfile(p):
+            try:
+                cfg = yaml.safe_load(open(p))
+                return cfg.get('map', {})
+            except Exception:
+                return {}
+        d = os.path.dirname(d)
+    return {}
+
+
 class MAPController(Node):
     def __init__(self):
         super().__init__('map_controller')
         self._near_idx    = 0
         self._initialized = False
 
+        rs = _load_race_script()
+
         # ── 차량 파라미터 ──────────────────────────────────────────────────
-        self.WHEELBASE   = 0.33        # lf+lr = 0.15875+0.17145
+        lf = rs.get('lf', 0.1757)
+        lr = rs.get('lr', 0.1441)
+        self.WHEELBASE   = lf + lr
         self.MAX_STEER   = 0.4189      # gym s_max [rad]
-        self.SPEED_SCALE = 1.0
+        self.SPEED_SCALE = rs.get('speed_scale', 2.0)
 
         # ── L1 가이던스 파라미터 ──────────────────────────────────────────
-        self.L1_MIN = 0.2725
-        self.L1_K   = 0.2750
+        self.L1_MIN = rs.get('l1_min', 0.90)
+        self.L1_K   = rs.get('l1_k',   0.35)
 
-        # ── 차량 동역학 (f1tenth_gym 기본값) ─────────────────────────────
-        self.MASS = 3.74
-        self.LF   = 0.15875
-        self.LR   = 0.17145
-        self.MU   = 1.0489
+        # ── 차량 동역학 ───────────────────────────────────────────────────
+        self.MASS = rs.get('mass', 3.354)
+        self.LF   = lf
+        self.LR   = lr
+        self.MU   = rs.get('mu',   1.0)
 
         # ── Pacejka Magic Formula 파라미터 ───────────────────────────────
-        # gym ST 선형 타이어: F_yf = mu * C_Sf * Fzf * alpha  (C_Sf=4.718)
-        # Pacejka 소각도 근사: Fy_norm ≈ B*C*D*alpha → BCD = C_Sf = 4.718
-        # B = C_Sf / (C*D) = 4.718 / (1.3*1.0) = 3.629
-        self.PAC_B = 3.629   # gym C_Sf=4.718 등가 (기존 10.0: BCD=13, 2.8배 과추정)
-        self.PAC_C = 1.3
-        self.PAC_D = 1.2084
-        self.PAC_E = -0.5
+        self.PAC_B = rs.get('pac_b', 3.8)
+        self.PAC_C = rs.get('pac_c', 1.3)
+        self.PAC_D = rs.get('pac_d', 1.15)
+        self.PAC_E = rs.get('pac_e', -0.5)
 
         # ── 속도 프로파일 파라미터 ────────────────────────────────────────
         self.A_BRAKE = 6.0902
 
         # ── 조향 저역통과 필터 ────────────────────────────────────────────
-        self.STEER_ALPHA = 0.1981
+        self.STEER_ALPHA = rs.get('steer_alpha', 0.1981)
         self._steer_prev = 0.0
         self._cur_speed  = 0.0
 
