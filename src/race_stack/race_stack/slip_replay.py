@@ -43,6 +43,150 @@ def read_bag(path):
     return out
 
 
+G = 9.80665
+
+
+def voser_mu(bag, speed_scale, min_g_turn=0.15):
+    """정속 원형 주행 bag 에서 노면 마찰계수 μ 를 두 가지로 뽑는다.
+
+    왜 두 가지인가 (2026-08-09)
+    ──────────────────────────
+    μ = max(횡가속)/g 인데, "횡가속"을 무엇으로 재느냐가 갈린다.
+
+      μ_a = max|a_y,imu| / g        ← IMU 가속도계
+      μ_k = max(v_true·ω) / g       ← 오도메트리 × 자이로
+
+    a_y 는 **차체 롤에 오염된다**. 롤각 φ 만큼 기울면 가속도계는
+    a_lat·cos φ + g·sin φ 를 읽는다 — 6축 IMU 는 횡가속과 중력의 기울기
+    성분을 원리적으로 구분할 수 없다(랭크 부족). 실측에서 a_y 는 v·ω 보다
+    12.6% 컸고(R²=0.94~0.97, 절편 0 — 노이즈가 아니라 순수 스케일 편향),
+    선회 중 롤레이트 자이로가 9~10°/s 를 찍었다. 롤 기울기로 환산하면
+    7~10°/g 로, 오일 쇼크가 살아있는 RC 카에서 정상 범위다.
+
+    반면 μ_k 는 롤과 무관하다. ω 는 자이로와 LiDAR ICP 두 독립 센서가
+    기울기 1.01~1.06 으로 일치해 검증됐고, v 는 줄자 6회로 캘리브레이션했다.
+    **μ_k 를 기준으로 쓰고 μ_a 는 상한으로 본다.** 두 값의 차이가 곧 롤의
+    크기이므로, 쇼크를 묶는 별도 실험 없이 여기서 진단이 같이 나온다.
+
+    가속도계 스케일은 정지 구간의 중력 크기로 보정한다 (실측 1.036g).
+    """
+    import rosbag2_py
+    from rclpy.serialization import deserialize_message
+    from rosidl_runtime_py.utilities import get_message
+
+    rdr = rosbag2_py.SequentialReader()
+    rdr.open(rosbag2_py.StorageOptions(uri=bag, storage_id='sqlite3'),
+             rosbag2_py.ConverterOptions('', ''))
+    types = {t.name: t.type for t in rdr.get_all_topics_and_types()}
+    I, O = [], []
+    while rdr.has_next():
+        tp, data, ts = rdr.read_next()
+        if tp == '/sensors/imu/raw':
+            m = deserialize_message(data, get_message(types[tp]))
+            I.append([ts * 1e-9, m.linear_acceleration.x, m.linear_acceleration.y,
+                      m.linear_acceleration.z, m.angular_velocity.z])
+        elif tp == '/odom':
+            m = deserialize_message(data, get_message(types[tp]))
+            O.append([ts * 1e-9, m.twist.twist.linear.x])
+    if len(I) < 200 or len(O) < 50:
+        print('★ IMU/odom 표본이 부족하다');  return
+    I = np.array(I);  O = np.array(O)
+    ti = I[:, 0]
+
+    # ── 정지 구간으로 스케일·바이어스 (첫 3초) ──────────────────────
+    hz = 1.0 / max(np.median(np.diff(ti)), 1e-6)
+    n0 = int(min(3.0 * hz, len(I) // 4))
+    scale = float(np.median(np.linalg.norm(I[:n0, 1:4], axis=1)))
+    bx = float(np.median(I[:n0, 1]));  by = float(np.median(I[:n0, 2]))
+
+    # 축 매핑은 slip_friction 과 같다: a_y = +imu.x, a_x = −imu.y
+    ay = (I[:, 1] - bx) / scale          # [g]
+    ax = -(I[:, 2] - by) / scale         # [g]
+    wz = np.radians(I[:, 4])
+    v_true = np.interp(ti, O[:, 0], O[:, 1]) / speed_scale
+
+    print(f'\n{"="*64}\nVoser μ 측정')
+    print(f'  IMU {len(I)}샘플 @ {hz:.0f}Hz   가속도계 정지 스케일 {scale:.4f}g '
+          f'({100*(scale-1):+.1f}% 보정)')
+
+    # ── 준정상상태 필터 ─────────────────────────────────────────────
+    # ★ 이게 없으면 안 된다 (2026-08-09). μ 는 "지속 가능한 최대 횡가속"이라
+    #   과도구간을 빼야 한다. 안 거르고 max|a_y| 와 max(v·ω) 를 각각 구해
+    #   비를 내면 **서로 다른 시점의 값**을 비교하게 되어, 실제 1.126 인
+    #   비율이 1.6~1.8 로 부풀고 롤각이 17° 같은 불가능한 값으로 나온다.
+    # ★ 미분은 반드시 **구간 차분**으로 한다 (2026-08-09). 50Hz 신호를 1샘플
+    #   차분하면 자이로 노이즈 1°/s 가 50°/s² 로 증폭돼 필터가 전부를 걸러낸다
+    #   (실제로 원 주행 bag 이 2행만 남았다). 0.1초 창으로 넓히면 노이즈가
+    #   1/5 로 줄고 우리가 보려는 과도(수백 ms)는 그대로 잡힌다.
+    win = max(int(round(0.1 * hz)), 1)
+
+    def rate(x):
+        r = np.full_like(x, np.inf)
+        if len(x) > win:
+            dtv = ti[win:] - ti[:-win]
+            ok = dtv > 1e-4
+            r[win:][ok] = np.abs((x[win:] - x[:-win])[ok] / dtv[ok])
+        return r
+    qss = (rate(v_true) < 0.5) & (rate(wz) < math.radians(60))
+    turn = qss & (np.abs(v_true * wz) / G > min_g_turn) & (v_true > 0.5)
+    if turn.sum() < 50:
+        print(f'  ★ 준정상 선회 구간이 {turn.sum()}행뿐 — 정속 원형 주행이 맞는지,'
+              f'\n    또는 속도를 더 올려야 하는지 확인할 것')
+        return
+
+    mu_a = np.abs(ay)
+    mu_k = np.abs(v_true * wz) / G
+    rho  = np.hypot(ax, ay)              # 마찰원 (종+횡)
+
+    print(f'\n  속도 구간별 (준정상 선회 {turn.sum()}행 / 전체 {len(I)})')
+    print(f'  {"v_true[㎧]":>11} | {"n":>5} | {"μ_k 최대":>9} | {"μ_a 최대":>9} | {"ρ 최대":>8}')
+    print('  ' + '-' * 56)
+    edges = np.arange(0.5, max(v_true[turn].max(), 1.0) + 0.5, 0.5)
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        m = turn & (v_true >= lo) & (v_true < hi)
+        if m.sum() < 20:
+            continue
+        print(f'  {lo:4.1f}~{hi:4.1f}   | {m.sum():5d} | {mu_k[m].max():9.3f} | '
+              f'{mu_a[m].max():9.3f} | {rho[m].max():8.3f}')
+
+    ka, kk = mu_a[turn], mu_k[turn]
+    p99a, p99k = np.percentile(ka, 99), np.percentile(kk, 99)
+    print(f'\n  μ_k (롤 무관, 기준값)  최대 {kk.max():.3f}   99%p {p99k:.3f}')
+    print(f'  μ_a (롤 오염, 상한)    최대 {ka.max():.3f}   99%p {p99a:.3f}')
+    print(f'  마찰원 ρ 최대 {rho[turn].max():.3f}   99%p {np.percentile(rho[turn],99):.3f}')
+    # ── a_y 대 v·ω 는 **회귀 기울기**로 본다 (최대값 비가 아니라) ─────
+    # 둘 다 **g 단위**로 맞춘다 — ay 는 이미 g, v·ω 는 ㎧² 라 나눠야 한다.
+    # (안 맞추면 기울기가 1/9.81 배로 나와 1.13 이 0.115 로 보인다)
+    cx, cy = (v_true * wz)[turn] / G, ay[turn]
+    slope = float(np.polyfit(cx, cy, 1)[0])
+    r2 = float(np.corrcoef(cx, cy)[0, 1] ** 2)
+    print(f'\n  a_y = {slope:.3f}·(v·ω)   R²={r2:.3f}')
+    if r2 > 0.5 and slope > 1.02:
+        # 롤이면 a_y = a_lat(1 + g·k_roll) 꼴의 순수 스케일로 나타난다
+        print(f'    → 초과분 {100*(slope-1):+.1f}%. 롤이라면 롤 기울기 '
+              f'{math.degrees(slope-1):.1f}°/g 에 해당한다 (RC 카 정상범위 7~10°/g).')
+    elif r2 <= 0.5:
+        print(f'    → R² 가 낮다. 준정상 구간이 부족하거나 데이터가 흔들린다.')
+
+    print(f'\n  ★ vehicle_sim.py / map_controller 에는 **μ_k 99%p = {p99k:.4f}** 를 쓸 것.')
+    print(f'    최대값 대신 99%p 를 쓰는 이유: 단일 스파이크(충격·이상치)로')
+    print(f'    μ 가 통째로 오염되는 것을 막기 위해서다.')
+
+    # ── 한계에 실제로 닿았는가 ────────────────────────────────────────
+    # μ 는 "미끄러지기 직전"의 값이라야 의미가 있다. 속도를 올리는데도
+    # μ_k 가 계속 커지고 있으면 아직 포화 전이고, 그 값은 **하한**일 뿐이다.
+    lastbins = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        m = turn & (v_true >= lo) & (v_true < hi)
+        if m.sum() >= 20:
+            lastbins.append(np.percentile(mu_k[m], 99))
+    if len(lastbins) >= 3 and lastbins[-1] > lastbins[-3] * 1.05:
+        print(f'\n  ⚠ 속도를 올릴수록 μ_k 가 계속 증가하고 있다 '
+              f'({lastbins[-3]:.3f} → {lastbins[-1]:.3f}).')
+        print(f'    아직 마찰한계에 안 닿았다는 뜻이므로 이 값은 **하한**이다.')
+        print(f'    실제로 미끄러질 때까지 속도를 더 올려야 μ 가 나온다.')
+
+
 def _calib_lever(vw, vy, wz, max_g):
     """저속 정상원 주행에서 lidar_x 를 역산한다.
 
@@ -92,12 +236,32 @@ def main(argv=None):
     ap.add_argument('--servo-offset', type=float, default=0.425)
     ap.add_argument('--servo-min',type=float, default=0.15)
     ap.add_argument('--servo-max',type=float, default=0.85)
+    # 줄자 실측(odom_scale, 6회): 표시 속도 = 실제 × 0.911
+    ap.add_argument('--speed-scale', type=float, default=0.911,
+                    help='표시속도/실제속도. odom_scale 로 잰 값')
+    # ★ 디스큐 기본 OFF (2026-08-09 실측). 물리적으로는 옳지만 이 데이터에서
+    #   측정 가능한 이득이 없었다: |β| 중앙 2.5°→2.4°, 저요레이트 95%p 는
+    #   14.8°→16.4° 로 오히려 악화. 이유는 두 스캔이 같은 방식으로 찌그러지면
+    #   ICP 가 찾는 **상대** 변환에서 공통 성분이 상쇄되기 때문이다. 절대
+    #   왜곡(2.5㎧×25ms=6.3cm)이 아니라 스캔 간 왜곡 **차이**만 오차가 되는데,
+    #   등속 주행에서는 그게 작다. 급가감속·급조향이 많은 데이터에서는
+    #   달라질 수 있으므로 옵션은 남긴다.
+    ap.add_argument('--deskew', dest='deskew', action='store_true', default=False,
+                    help='모션 디스큐 (기본 꺼짐 — 위 주석 참고)')
+    ap.add_argument('--no-deskew', dest='deskew', action='store_false')
+    ap.add_argument('--voser-mu', action='store_true',
+                    help='정속 원형 주행 bag 에서 μ 를 뽑는다 (ICP 재생 없이 즉시)')
     ap.add_argument('--calib-lever', action='store_true',
                     help='저속 원 주행 bag 에서 lidar_x 를 역산한다')
     ap.add_argument('--calib-max-g', type=float, default=0.15,
                     help='캘리브레이션에 쓸 최대 횡가속 [g]. 이보다 크면 슬립이 '
                          '섞여 레버암이 부풀어 보인다')
     a = ap.parse_args([x for x in (argv or sys.argv[1:]) if x != '--'])
+
+    # μ 측정은 IMU·odom 만 있으면 되므로 ICP 재생(느림) 없이 바로 끝낸다.
+    if a.voser_mu:
+        voser_mu(a.bag, a.speed_scale)
+        return 0
 
     b = read_bag(a.bag)
     if not b['scan']:
@@ -119,7 +283,11 @@ def main(argv=None):
     rows = []
 
     for t, msg in b['scan']:
-        pts = _scan_xy(msg, a.max_scan)
+        # 디스큐는 **점군을 만들 때** 걸어야 한다 — ω 는 IMU 자이로, v 는 휠.
+        # /odom 의 각속도는 서보 지령 기반 기구학값이라 쓰면 안 된다.
+        gy_here = math.radians(g_of(t)) if a.deskew else 0.0
+        pts = _scan_xy(msg, a.max_scan,
+                       w=gy_here, v=v_of(t) / a.speed_scale if a.deskew else 0.0)
         if prev is None:
             prev, prev_t = pts, t;  continue
         dt = t - prev_t

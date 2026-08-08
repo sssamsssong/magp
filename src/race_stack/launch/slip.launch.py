@@ -89,6 +89,7 @@ def generate_launch_description():
                 'cal_sec':       float(sl.get('cal_sec',    5.0)),
                 'delta_lin':     float(sl.get('delta_lin', -1.0)),
                 'delta_ang':     float(sl.get('delta_ang', -1.0)),
+                'deskew':        bool(sl.get('deskew', False)),
                 'max_scan_m':    float(sl.get('max_scan_m', 10.0)),
                 'icp_points':    int(sl.get('icp_points',   400)),
                 'icp_hz':        float(sl.get('icp_hz',    10.0)),

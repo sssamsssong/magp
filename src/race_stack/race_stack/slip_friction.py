@@ -41,12 +41,51 @@ def _row(s):
 
 
 # ── LiDAR ICP ────────────────────────────────────────────────────────
-def _scan_xy(msg: LaserScan, max_r: float) -> np.ndarray:
+def _scan_xy(msg: LaserScan, max_r: float,
+             w: float = 0.0, v: float = 0.0,
+             fallback_scan_time: float = 0.025) -> np.ndarray:
+    """스캔을 차체 좌표 점군으로. w·v 를 주면 **모션 디스큐**까지 한다.
+
+    왜 디스큐가 필수인가 (2026-08-09)
+    ─────────────────────────────────
+    2D LiDAR 는 한 바퀴 도는 데 시간이 걸린다 (Hokuyo 40Hz → 25ms). 그 사이
+    차가 움직이면 첫 빔과 마지막 빔은 **다른 위치에서** 찍힌 것인데 메시지는
+    한 순간처럼 담는다. 크기를 재보면 이게 부수적 오차가 아니다:
+
+        2.5㎧ × 25ms        = 6.3cm   ← 스캔 내부 병진
+        ω 1.5rad/s × 25ms  = 2.15°   → 5m 점이 18cm 어긋남
+        정작 재려는 100ms 횡변위    = 2cm
+
+    스캔 내부 왜곡이 신호보다 3배 크다. ICP 가 v_y 를 못 맞추던 주된 이유로
+    유력하다 (실측 v_y 표준편차 0.238㎧ = α 로 ±6°).
+
+    ★ ω 는 **IMU 자이로**를 쓴다. /odom 의 각속도는 서보 지령 기반 기구학값
+      (vesc.yaml use_servo_cmd_to_calc_angular_velocity: true)이라 언더스티어
+      상황에서 실제의 ~1.9배로 나온다 — 그걸 쓰면 보정이 과하게 걸린다.
+
+    기준 시각은 header.stamp = **첫 빔**(urg_node 규약)이다. 빔 i 는 그보다
+    i·time_increment 만큼 뒤에 찍혔으므로, 그 시점 차체 자세를 되돌린다:
+        p_ref = R(ω·Δt)·p_i + (v·Δt, 0)
+    """
     n = len(msg.ranges)
-    a = np.arange(n, dtype=np.float32) * msg.angle_increment + msg.angle_min
-    r = np.asarray(msg.ranges, dtype=np.float32)
+    idx = np.arange(n, dtype=np.float64)
+    a = idx * msg.angle_increment + msg.angle_min
+    r = np.asarray(msg.ranges, dtype=np.float64)
     ok = np.isfinite(r) & (r > msg.range_min) & (r < max_r)
-    return np.c_[r[ok] * np.cos(a[ok]), r[ok] * np.sin(a[ok])].astype(np.float64)
+    x = r[ok] * np.cos(a[ok])
+    y = r[ok] * np.sin(a[ok])
+
+    if abs(w) > 1e-3 or abs(v) > 1e-2:
+        ti = float(msg.time_increment)
+        if ti <= 0.0:
+            st = float(msg.scan_time) if msg.scan_time > 0 else fallback_scan_time
+            ti = st / max(n, 1)
+        dt = idx[ok] * ti
+        th = w * dt
+        c, s = np.cos(th), np.sin(th)
+        x, y = c * x - s * y + v * dt, s * x + c * y
+
+    return np.c_[x, y]
 
 
 def _icp(src: np.ndarray, dst: np.ndarray,
@@ -198,6 +237,12 @@ class SlipFriction(Node):
         #   (개구 문제). 실제로 v_wheel=2.1㎧ 정속 주행 중 vx_lidar 가 0.0~0.4
         #   로 죽어 있었고, 회전만 멀쩡히 추정됐다(ω corr 0.71 vs v corr −0.17)
         #   — 회전은 옆벽만으로도 구속되기 때문이다.
+        # ★ 모션 디스큐 기본 OFF (2026-08-09 실측). 물리적으로는 옳지만
+        #   기존 bag 재생에서 이득이 없었다 — |β| 중앙 2.5°→2.4°, 저요레이트
+        #   95%p 는 14.8°→16.4° 로 오히려 악화. 두 스캔이 같은 방식으로
+        #   찌그러지면 ICP 의 **상대** 변환에서 공통 성분이 상쇄되기 때문이다.
+        #   급가감속이 많은 데이터에서는 달라질 수 있어 옵션은 남긴다.
+        d('deskew',       False)
         d('max_scan_m',   10.0)
         d('icp_points',   400)    # ICP 질의점 수 (많을수록 분산↓, 비용↑)
         d('icp_hz',       10.0)   # ★ 정합 베이스라인이기도 하다 (10Hz → 100ms)
@@ -226,6 +271,7 @@ class SlipFriction(Node):
         self.d_lin    = float(p('delta_lin'))
         self.d_ang    = float(p('delta_ang'))
         self.en_lin   = bool(p('enable_lin_slip'))
+        self.deskew     = bool(p('deskew'))
         self.max_scan_m = float(p('max_scan_m'))
         self.icp_pts    = int(p('icp_points'))
         self.icp_dt_min = 1.0 / max(float(p('icp_hz')), 1.0)
@@ -302,7 +348,12 @@ class SlipFriction(Node):
 
     def _scan_cb(self, msg: LaserScan):
         now = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        pts = _scan_xy(msg, self.max_scan_m)
+        # 디스큐에 쓸 ω 는 IMU 자이로(바이어스 제거·필터 후), v 는 휠 속도.
+        # 둘 다 이 노드가 이미 들고 있으므로 별도 노드/토픽이 필요 없고,
+        # 그 덕에 **이미 녹화된 bag 에도 같은 보정이 적용**된다.
+        pts = _scan_xy(msg, self.max_scan_m,
+                       w=(self.wz_f if self.deskew and self.phase == RUN else 0.0),
+                       v=(self.v_wheel if self.deskew else 0.0))
 
         if self._scan_prev is None or self._scan_prev_t is None:
             self._scan_prev, self._scan_prev_t = pts, now
