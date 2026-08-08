@@ -22,6 +22,7 @@ from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from rclpy.node import Node
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from tf2_ros import TransformBroadcaster
 
 from race_stack.vehicle_sim import VehicleParams, bicycle_ode
@@ -113,7 +114,13 @@ class VehicleSimNode(Node):
         self._odom_pub = self.create_publisher(Odometry, '/ego_racecar/odom', 10)
         self._traj_pub = self.create_publisher(Path, '/trajectory', 1)
         self.create_subscription(AckermannDriveStamped, '/drive', self._drive_cb, 10)
-        self.create_subscription(OccupancyGrid, '/map', self._map_cb, 1)
+        # nav2 map_server는 TRANSIENT_LOCAL(latched)로 발행 → 동일 QoS로 구독해야 수신됨
+        _map_qos = QoSProfile(
+            depth=1,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+        )
+        self.create_subscription(OccupancyGrid, '/map', self._map_cb, _map_qos)
         self._br = TransformBroadcaster(self)
 
         # ── 궤적 ──────────────────────────────────────────────────────────
