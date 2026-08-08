@@ -53,6 +53,9 @@ STEPS_PER_CTRL = max(1, round(CTRL_DT / DT))  # 적분 스텝 수 / 제어 주�
 
 TIMEOUT   = 40.0   # 최대 시뮬 시간 [s]
 PENALTY   = 5000.0
+# 트랙 경계까지 여유 (안전여유 0.35m - 차 반폭 0.11m = 0.24m)
+# 이 이상의 순간 CTE는 벽 충돌 위험 → 강한 패널티 적용
+CTE_WALL_M = 0.24
 
 DEPART_DIST = 3.0  # 출발 확인 거리 [m]
 ARRIVE_DIST = 1.5  # 도착 인식 거리 [m] (출발점으로 귀환)
@@ -162,7 +165,8 @@ def _pac_inv(Fy_req: float, alpha_lut: np.ndarray, Fy_lut: np.ndarray) -> float:
 # ── 한 에피소드 시뮬레이션 ─────────────────────────────────────────────────
 
 def run_episode(wp: np.ndarray, v_profile: np.ndarray, kappa: np.ndarray,
-                p: VehicleParams, params: dict) -> float:
+                p: VehicleParams, params: dict,
+                max_steer: float = 0.36) -> float:
     """MAP 컨트롤러 + 자전거 ODE 폐루프 시뮬.
 
     Returns
@@ -222,7 +226,7 @@ def run_episode(wp: np.ndarray, v_profile: np.ndarray, kappa: np.ndarray,
                 alpha_f = _pac_inv(F_yf / (p.mu * Fzf), alpha_lut, Fy_lut)
 
                 delta_kin = math.atan(wb * 2.0 * math.sin(eta) / max(L1, 1e-3))
-                raw = float(np.clip(delta_kin + alpha_f, -0.4189, 0.4189))
+                raw = float(np.clip(delta_kin + alpha_f, -max_steer, max_steer))
                 steer_cmd = steer_alpha * steer_cmd + (1.0 - steer_alpha) * raw
                 v_cmd     = float(v_profile[near_idx])
 
@@ -259,8 +263,15 @@ def run_episode(wp: np.ndarray, v_profile: np.ndarray, kappa: np.ndarray,
         if departed and dist_from_start < ARRIVE_DIST:
             # 완주
             mean_cte       = float(np.mean(cte_list)) if cte_list else 99.0
+            max_cte        = float(np.max(cte_list))  if cte_list else 99.0
             steer_rate_std = float(np.std(steer_rate_list)) if steer_rate_list else 99.0
-            return elapsed * 0.5 + mean_cte * 10.0 + steer_rate_std * 20.0
+            # 트랙 경계 = 레이싱라인 ± CTE_WALL_M (안전여유 0.35m - 차 반폭 0.11m)
+            # 이 이상 벗어나는 순간이 있으면 실제 시뮬에서 벽 충돌 → 강한 패널티
+            cte_wall_excess = max(0.0, max_cte - CTE_WALL_M)
+            return (elapsed * 0.5
+                    + mean_cte * 10.0
+                    + steer_rate_std * 20.0
+                    + cte_wall_excess * 300.0)
 
     # 타임아웃
     progress = min(near_idx / n, 0.99)
@@ -270,7 +281,8 @@ def run_episode(wp: np.ndarray, v_profile: np.ndarray, kappa: np.ndarray,
 # ── Optuna 최적화 ──────────────────────────────────────────────────────────
 
 def optimize(wp: np.ndarray, kappa: np.ndarray, p: VehicleParams,
-             baseline: dict, n_trials: int, timeout_s: float):
+             baseline: dict, n_trials: int, timeout_s: float,
+             max_steer: float = 0.36):
     best_scores = [999999.0]
 
     def objective(trial: optuna.Trial) -> float:
@@ -282,7 +294,7 @@ def optimize(wp: np.ndarray, kappa: np.ndarray, p: VehicleParams,
             'a_brake':     trial.suggest_float('a_brake',     3.0,  12.0),
         }
         v_profile = _build_speed_profile(wp, params['a_brake'], params['speed_scale'])
-        score = run_episode(wp, v_profile, kappa, p, params)
+        score = run_episode(wp, v_profile, kappa, p, params, max_steer=max_steer)
 
         tag = '★' if score < best_scores[0] else ' '
         if score < best_scores[0]:
@@ -363,6 +375,8 @@ def main():
         'speed_scale': float(mc.get('speed_scale',  2.0)),
         'a_brake':     float(mc.get('a_brake',      6.0902)),
     }
+    # pure_pursuit.max_steer = map_controller 와 vehicle_sim_node 양쪽의 조향 한계
+    max_steer = float(cfg.get('pure_pursuit', {}).get('max_steer', 0.36))
 
     # ── 웨이포인트 로드 ───────────────────────────────────────────────────
     if args.wp:
@@ -386,7 +400,7 @@ def main():
     print('=' * 70)
     print(f'  웨이포인트 : {wp_path}  ({len(wp)}개)')
     print(f'  μ={p.mu}  B={p.pac_B} C={p.pac_C} D={p.pac_D} E={p.pac_E}')
-    print(f'  m={p.m}kg  lf={p.lf}  lr={p.lr}')
+    print(f'  m={p.m}kg  lf={p.lf}  lr={p.lr}  max_steer={max_steer}rad')
     print(f'  trials={args.trials}  timeout={args.timeout}s')
     print()
     print('  기준값:')
@@ -396,7 +410,7 @@ def main():
 
     # 기준값 평가
     v_profile_base = _build_speed_profile(wp, baseline['a_brake'], baseline['speed_scale'])
-    score_base = run_episode(wp, v_profile_base, kappa, p, baseline)
+    score_base = run_episode(wp, v_profile_base, kappa, p, baseline, max_steer=max_steer)
     completed_base = score_base < PENALTY
     print(f'  기준값 score: {score_base:.2f}  '
           f'({"완주" if completed_base else "미완주"})')
@@ -405,7 +419,8 @@ def main():
           f'{"α":>5}  {"spd":>5}  {"brk":>5}')
     print('-' * 70)
 
-    study = optimize(wp, kappa, p, baseline, args.trials, args.timeout)
+    study = optimize(wp, kappa, p, baseline, args.trials, args.timeout,
+                     max_steer=max_steer)
 
     best   = study.best_params
     best_t = study.best_value
