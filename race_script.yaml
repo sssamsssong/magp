@@ -2,9 +2,9 @@ mode: q1
 map_name: sohot_clean
 waypoints: forza_opt_wp
 sim:
-  sx: 2.45
-  sy: 3.78
-  stheta: 3.14159
+  sx: 8.63
+  sy: -2.50
+  stheta: 0.049
   physics: bicycle
 sim_vehicle:
   mu: 0.4
