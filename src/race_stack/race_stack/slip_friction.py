@@ -257,6 +257,11 @@ class SlipFriction(Node):
         # 출력
         d('min_speed',    0.3)     # 이 이상에서만 추정
 
+        # ★ 줄자 실측(odom_scale, 6회): 표시 속도 = 실제 × 0.911.
+        #   μ_k 는 실제 속도로 계산해야 하므로 여기서 되돌린다.
+        #   vesc.yaml 의 speed_to_erpm_gain 을 고치면 이 값을 1.0 으로 되돌릴 것.
+        d('speed_scale',  0.911)
+
         p = lambda n: self.get_parameter(n).value
         self.L   = float(p('wheelbase'))
         self.sg  = float(p('servo_gain'))
@@ -278,6 +283,7 @@ class SlipFriction(Node):
         self.lpf_hz   = float(p('lpf_hz'))
         self.lidar_lpf_hz = float(p('lidar_lpf_hz'))
         self.min_speed = float(p('min_speed'))
+        self.speed_scale = max(float(p('speed_scale')), 1e-3)
 
         # 센서 상태
         self.v_wheel = 0.0
@@ -298,6 +304,18 @@ class SlipFriction(Node):
         self.slip_lin = self.slip_ang = False
         self.mu_hat   = 0.0
         self.rho_now  = 0.0
+
+        # ── μ_k (롤 무관) — Voser 원형 주행에서 한계 도달 판정용 ──────────
+        # 패널의 μ̂ 는 a_y 기반이라 차체 롤로 11% 부풀어 있다(2026-08-09 실측:
+        # a_y = 1.110·(v·ω), R²=0.896). 롤은 횡축만 오염시키므로 — 종축은
+        # 같은 데이터에서 기울기 −0.993 으로 멀쩡했다 — v·ω 쪽이 기준이다.
+        #
+        # 속도 구간별로 상위값을 모아 **평평해지는지**를 본다. 계속 커지면
+        # 아직 마찰한계 전이라 그 값은 하한일 뿐이다.
+        self.mu_k_now = 0.0
+        self._mu_bins = {}          # 속도구간 인덱스 → 상위 μ_k 리스트
+        self._MU_BIN  = 0.25        # m/s
+        self._MU_KEEP = 20          # 구간당 보관할 상위 표본 수
 
         # 단계 제어
         self.phase = IDLE
@@ -324,6 +342,31 @@ class SlipFriction(Node):
         self.create_timer(1.0, self._auto_save)
 
         self.get_logger().info('slip_friction 준비 완료')
+
+    def _update_mu_bin(self, v_true: float, mu_k: float):
+        """속도 구간별로 μ_k 상위 표본만 보관한다.
+
+        단순 최대값은 충격·이상치 하나로 통째로 오염된다. 상위 N개를 모아
+        중앙값을 쓰면 그런 스파이크에 견디면서도 "그 속도에서 낼 수 있었던
+        최대 횡가속"을 대표한다.
+        """
+        if v_true < self.min_speed:
+            return
+        b = int(v_true / self._MU_BIN)
+        lst = self._mu_bins.setdefault(b, [])
+        if len(lst) < self._MU_KEEP:
+            lst.append(mu_k);  lst.sort()
+        elif mu_k > lst[0]:
+            lst[0] = mu_k;  lst.sort()
+
+    def _mu_table(self):
+        """(속도, μ_k) 목록 — 표본이 충분한 구간만, 속도 오름차순."""
+        out = []
+        for b in sorted(self._mu_bins):
+            lst = self._mu_bins[b]
+            if len(lst) >= 8:
+                out.append(((b + 0.5) * self._MU_BIN, lst[len(lst) // 2]))
+        return out
 
     def vy_base(self) -> float:
         """LiDAR 위치의 횡속도를 차체(base_link) 기준으로 옮긴다.
@@ -510,6 +553,11 @@ class SlipFriction(Node):
         if no_slip:
             self.mu_hat = max(self.mu_hat, self.rho_now)
 
+        # ── μ_k = |v_실제 · ω| / g  (롤 무관) ─────────────────────────
+        v_true = self.v_wheel / self.speed_scale
+        self.mu_k_now = abs(v_true * self.wz_f) / G
+        self._update_mu_bin(abs(v_true), self.mu_k_now)
+
         # 기록
         if self._t0 is None:
             self._t0 = t
@@ -596,6 +644,26 @@ class SlipFriction(Node):
                    f'ρ={self.rho_now:.3f}g   '
                    f'μ̂={self.mu_hat:.4f}  '
                    f'ICP={"✔" if icp_ok else "✘("+f"{self._icp_age:.1f}s)"}'))
+
+            # ── Voser μ 패널 (롤 무관) ────────────────────────────────
+            tab = self._mu_table()[-6:]
+            A('╠' + bar + '╣')
+            A(_row(f'  μ_k={self.mu_k_now:.3f} (롤무관·기준)   '
+                   f'μ_a={self.rho_now:.3f} (a_y·롤포함)'))
+            if len(tab) >= 2:
+                A(_row('  v ㎧ │ ' + ' '.join(f'{v:5.2f}' for v, _ in tab)))
+                A(_row('  μ_k  │ ' + ' '.join(f'{m:5.3f}' for _, m in tab)))
+                # 평평해졌는가 — 마지막 3구간의 증가율로 판정
+                if len(tab) >= 3:
+                    a0, a1 = tab[-3][1], tab[-1][1]
+                    grow = (a1 - a0) / max(a0, 1e-6)
+                    if grow > 0.05:
+                        A(_row(f'  ↗ 아직 증가 중 ({100*grow:+.0f}%) — 속도를 더 올릴 것'))
+                    else:
+                        A(_row(f'  ■ 평평해짐 ({100*grow:+.0f}%) → μ ≈ {a1:.3f}  '
+                               f'여기가 한계다'))
+            else:
+                A(_row('  (속도 구간을 2개 이상 채우면 포화 판정이 나온다)'))
         else:
             A(_row(f'  {self._msg}'))
             if self.phase == CAL and self._cal_lin:

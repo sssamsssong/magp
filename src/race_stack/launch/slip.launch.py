@@ -96,6 +96,9 @@ def generate_launch_description():
                 'lpf_hz':        float(sl.get('lpf_hz',     8.0)),
                 'lidar_lpf_hz':  float(sl.get('lidar_lpf_hz', 2.0)),
                 'min_speed':     float(sl.get('min_speed',  0.3)),
+                # 줄자 실측(odom_scale 6회). vesc.yaml 의 speed_to_erpm_gain 을
+                # 고치면 이 값을 1.0 으로 되돌릴 것 — 아니면 이중 보정된다.
+                'speed_scale':   float(sl.get('speed_scale', 0.911)),
             }])]))
 
         # ── 원시 토픽 기록 ────────────────────────────────────────────
