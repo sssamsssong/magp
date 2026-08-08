@@ -1,5 +1,32 @@
 # yax — RoboRacer 2026 F1TENTH 저장소
 
+---
+
+## ⚠️ 두 번째 차량(car2)에서 작업 중이라면 — push 전 반드시 읽을 것
+
+**main 브랜치에 직접 push하지 마세요.**
+
+car1(1호차)과 car2(2호차)가 같은 저장소를 공유합니다.
+car2의 근본 세팅(VESC 캘리브레이션, 조향 파라미터 등)을 main에 바로 올리면
+**car1 설정이 덮여 대회 주행이 망가질 수 있습니다.**
+
+### 해야 할 것
+
+```bash
+# 브랜치 생성 후 작업
+git checkout -b car2/작업내용   # 예: car2/vesc-calib, car2/steering-fix
+git push -u origin car2/작업내용
+```
+
+브랜치에 올린 뒤 팀장(hj)에게 알려주세요. main 머지는 팀장이 검토 후 합니다.
+
+### main에 올려도 되는 것
+
+- 문서(docs/)
+- 두 차량 공통으로 검증된 코드 변경 (팀장 확인 후)
+
+---
+
 ## 저장소 정보
 
 - **원격:** `git@github.com:lloes098/26-jetson-f1tenth.git`
