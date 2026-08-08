@@ -29,7 +29,7 @@ A_LAT_MAX = 3.7
 A_LON_ACC = 5.0
 A_LON_BRK = 8.0
 V_MAX     = 6.0   # 직선 구간 상한
-V_MIN     = 1.0
+V_MIN     = 0.5   # race_script.yaml speed.min_speed 와 통일
 
 
 def _curvature(x, y):

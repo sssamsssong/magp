@@ -57,7 +57,9 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry, Path
-from std_msgs.msg import Bool, ColorRGBA
+from std_msgs.msg import Bool, ColorRGBA, Float64
+
+from race_stack.speed_profile import solve_profile
 from visualization_msgs.msg import Marker
 
 from race_stack.stanley_controller import _REPO_ROOT, _normalize
@@ -110,9 +112,27 @@ class MapController(Node):
         self.declare_parameter('mass', 3.354)
         self.declare_parameter('lf',   0.1757)
         self.declare_parameter('lr',   0.1441)
-        # mu: 2026-08-09 실측 추정 0.40 (연습장 화강석+먼지).
-        #     대회 우레탄은 다르니 현장에서 다시 잴 것. race_script.yaml map.mu 가 원본.
-        self.declare_parameter('mu',   0.40)
+        # ★ mu 는 마찰계수가 아니다 — **실효 최대 그립 = mu × pac_D** 다.
+        #   MAP 논문 III-B: "peak value D̃ is in fact μ·Fz,i·Di".
+        #   실측 실효 그립 0.40g(화강석+먼지) → mu = 0.40 / 1.15 = 0.348.
+        #   ※ gen_raceline 의 --mu 는 a_lat_max = mu·g 라 규약이 달라 0.40 이다.
+        #      두 값이 달라 보이는 건 정상이다. 헷갈리면 pac_D 를 같이 볼 것.
+        #   대회 우레탄은 다르니 현장에서 다시 잴 것. race_script.yaml map.mu 가 원본.
+        self.declare_parameter('mu',   0.348)
+
+        # ── Frenet 회피 (frenet_planner 노드가 /frenet/offset 로 준다) ──────
+        #   MAP 은 회피 로직을 직접 갖지 않는다 — Stanley 가 쓰던 것과 **같은 코드**를
+        #   독립 노드로 돌리고 여기서는 결과(횡오프셋 d)만 받는다.
+        #
+        #   ★ 타임아웃 폴백이 핵심이다. 노드가 죽거나 늦으면 d=0(레이싱라인)으로
+        #     돌아가야 한다. 조용히 옛 오프셋을 유지하면 장애물이 치워진 뒤에도
+        #     라인을 벗어난 채 달린다.
+        #
+        #   ★ 램프(shift_rate)도 필수다. 기준선을 계단으로 옮기면 목표점이 튀고
+        #     그게 곧 조향 킥이 된다 (Stanley 에서 "휘청휘청" 으로 관측된 것).
+        self.declare_parameter('frenet_enabled',    True)
+        self.declare_parameter('frenet_timeout',    0.5)   # s
+        self.declare_parameter('frenet_shift_rate', 0.9)   # m/s
 
         # ── Pacejka Magic Formula ───────────────────────────────────────
         # 우리 차 추정 (2026-08-09): F1TENTH 폼 타이어 기반, MAP 논문 대비
@@ -123,12 +143,36 @@ class MapController(Node):
         self.declare_parameter('pac_e', -0.5)
 
         # ── 속도 프로파일 ───────────────────────────────────────────────
-        self.declare_parameter('a_brake',     6.0902)
+        # ── 속도 프로파일 ────────────────────────────────────────────────
+        # ★ grip_util(η) 이 유일한 튜닝 노브다. 속도를 배수로 스케일하지 않는다.
+        #   속도를 k 배 하면 요구 횡가속은 **k² 배** 가 되어 비선형이고, 어느
+        #   코너가 한계인지까지 바뀐다 — 코너에 맞추면 직선이 느리고 직선에
+        #   맞추면 코너가 터진다. 어떤 k 로도 동시에 못 맞춘다.
+        #   대신 **마찰 예산**에 η 를 곱한다: a_lat_max = η·μ_eff·g.
+        #   v ∝ √η 라 코너는 √η 배로 줄지만, 직선은 a_lon 과 구간 길이가
+        #   지배하므로 균일하게 안 줄어든다 — 그게 물리적으로 맞다.
+        self.declare_parameter('grip_util',   0.6)
+        # 물리와 무관한 안전 천장. 0 = 끔(기본). μ 나 η 가 틀려도 이 속도는
+        # 안 넘는다는 마지막 방어선이 필요할 때만 켠다.
+        self.declare_parameter('hard_cap',    0.0)
+
+        # 종방향 상한 [m/s²]. 0 이하면 물리에서 자동 유도한다:
+        #   가속 — 후륜구동이라 **후축 하중분율**이 한계다.  a = μ_eff·g·lf/L
+        #   제동 — 네 바퀴를 다 쓰므로 타이어 예산 전체.      a = μ_eff·g
+        #   둘 다 마찰원 안으로 잘린다(min).
+        self.declare_parameter('a_lon_acc',   0.0)
+        self.declare_parameter('a_lon_brk',   0.0)
+
+        # ↓ 폐기됨. 남겨둔 건 옛 설정이 죽지 않게 하려는 것뿐이고, 1.0 이 아니면
+        #   경고하고 **무시한다**. 위 grip_util 을 쓸 것.
         self.declare_parameter('speed_scale', 1.0)
+        self.declare_parameter('a_brake',     0.0)   # 폐기 — a_lon_brk 로 대체
         # 마찰원 곡률 캡 v ≤ sqrt(mu·g/κ). 시뮬판은 이 캡이 꺼져 있어서
         # 기본값도 false 로 맞춘다 (시뮬↔실차 비교의 기준을 같게 하려고).
         # 고속 웨이포인트를 그대로 쓰면서 코너만 물리 한계로 눌러보고 싶을 때 켠다.
-        self.declare_parameter('mu_cap', False)
+        # ↓ 폐기 — 곡률 한계는 이제 **항상** 걸린다 (마찰원 프로파일의 1단계).
+        #   예전엔 기본이 False 라 코너 속도가 순전히 CSV(μ≈1.05 가정)에서 왔다.
+        self.declare_parameter('mu_cap', True)
 
         # ── 조향 필터 ───────────────────────────────────────────────────
         # 1차 LPF 계수 (0=끔, 1에 가까울수록 무겁다). 시뮬판 기본 0.1981.
@@ -194,6 +238,15 @@ class MapController(Node):
         self.create_subscription(
             Odometry, self.get_parameter('odom_topic').value, self.odom_cb, 10)
 
+        # Frenet 회피 오프셋
+        self._fr_d_cmd  = 0.0     # 노드가 보낸 목표 오프셋
+        self._fr_rx_t   = None    # 마지막 수신 시각 (타임아웃 판정)
+        self._fr_shift  = 0.0     # 실제로 적용 중인 값 (램프됨)
+        self._fr_warned = False
+        if bool(self.p('frenet_enabled')):
+            self.create_subscription(Float64, '/frenet/offset',
+                                     self._frenet_cb, 10)
+
         # 제어·발행을 50Hz 로 고정한다. AMCL 콜백에 걸어두면 주기가 들쭉날쭉하고
         # (2.5cm 이동마다) 정지 상태에서는 아예 돌지 않는다.
         self.create_timer(0.02, self._cmd_tick)
@@ -201,8 +254,7 @@ class MapController(Node):
 
         self.get_logger().info(
             f'MapController ready (mode={self.mode} '
-            f'max_speed={self.p("max_speed"):.2f} mu_cap='
-            f'{"on" if self.p("mu_cap") else "off"})')
+            f'grip_util={self.p("grip_util"):.2f})')
 
     def p(self, name):
         return self.get_parameter(name).value
@@ -263,43 +315,38 @@ class MapController(Node):
 
     # ── 사전 계산: 역방향 스윕 속도 프로파일 ───────────────────────────
     def _compute_speed_profile(self):
-        n = len(self.wp)
-        ds = np.linalg.norm(np.roll(self.wp[:, :2], -1, axis=0) - self.wp[:, :2],
-                            axis=1)
+        """마찰원 결합 forward-backward. 로직은 speed_profile 모듈 (컨트롤러 공용)."""
+        v, info = solve_profile(
+            self.wp[:, 0], self.wp[:, 1], self.wp[:, 2],
+            mu_eff=float(self.p('mu')) * float(self.p('pac_d')),
+            grip_util=float(self.p('grip_util')),
+            lf=float(self.p('lf')), lr=float(self.p('lr')),
+            v_min=float(self.p('min_speed')),
+            a_lon_acc=float(self.p('a_lon_acc')),
+            a_lon_brk=float(self.p('a_lon_brk')),
+            hard_cap=float(self.p('hard_cap')),
+            curvature=self._curvature)
 
-        v_max = float(self.p('max_speed'))
-        v_min = float(self.p('min_speed'))
-        csv_v = self.wp[:, 2] * float(self.p('speed_scale'))
-
-        if np.any(self.wp[:, 2] <= 0.0):
-            # speed 열이 없는 CSV — 곡률만으로 프로파일을 만든다.
-            self.get_logger().warn(
-                'CSV 에 speed 열이 없음 → 마찰원 곡률 캡으로 속도 프로파일 생성')
-            v = self._friction_cap()
-        else:
-            v = csv_v.copy()
-            if self.p('mu_cap'):
-                v = np.minimum(v, self._friction_cap())
-
-        # ★ 모드 상한을 스윕 **전에** 건다. 나중에 자르면 8m/s 로 만든 감속선이
-        #   실제 주행속도와 안 맞아 코너 진입 브레이킹이 헛돈다.
-        v = np.clip(v, v_min, v_max)
-
-        # 역방향 스윕 — 다음 점 속도에서 a_brake 로 거슬러 올라간 값 이하로 제한
-        a_brake = float(self.p('a_brake'))
-        for _ in range(3):
-            for i in range(n - 1, -1, -1):
-                j = (i + 1) % n
-                v[i] = min(v[i], math.sqrt(v[j] ** 2 + 2.0 * a_brake * ds[i]))
-        v = np.clip(v, v_min, v_max)
+        if abs(float(self.p('speed_scale')) - 1.0) > 1e-6:
+            self.get_logger().error(
+                f"speed_scale={self.p('speed_scale')} 은 **무시된다** (폐기됨). "
+                f"속도를 배수로 스케일하면 요구 횡가속이 제곱으로 변해 어느 코너가 "
+                f"한계인지까지 바뀐다. grip_util 로 마찰 예산을 조절할 것.")
+        if float(self.p('a_brake')) > 0.0:
+            self.get_logger().warn("a_brake 는 폐기됐다 — a_lon_brk 를 쓸 것.")
 
         self.get_logger().info(
-            f'속도 프로파일: {v.min():.2f}~{v.max():.2f} m/s '
-            f'(CSV {csv_v.min():.2f}~{csv_v.max():.2f}, 상한 {v_max:.2f})')
+            f"속도 프로파일 η={info['eta']:.2f}  예산 {info['a_g']:.2f}㎧² "
+            f"(가속 {info['a_acc']:.2f} / 제동 {info['a_brk']:.2f})")
+        self.get_logger().info(
+            f"  v {info['v_min']:.2f}~{info['v_max']:.2f}㎧ (중앙 {info['v_med']:.2f}) "
+            f"| 예상 랩 {info['lap_time']:.1f}s"
+            + (f" | ⚠ hard_cap 에 걸린 구간 {100*info['capped']:.0f}%"
+               if info['capped'] > 0.01 else ''))
         return v
 
     def _friction_cap(self):
-        """마찰원 한계속도 v = sqrt(mu·g/κ)."""
+        """마찰원 곡률 한계속도. (진단용 — 프로파일 계산은 _compute_speed_profile 안에서)"""
         return np.sqrt(float(self.p('mu')) * GRAVITY
                        / np.maximum(self._curvature, 1e-4))
 
@@ -320,6 +367,46 @@ class MapController(Node):
         return float(np.interp(clamped, self._pac_Fy_lut, self._pac_alpha_lut))
 
     # ── MAP 조향각 ─────────────────────────────────────────────────────
+    def _frenet_cb(self, msg: Float64):
+        self._fr_d_cmd = float(msg.data)
+        self._fr_rx_t = self.get_clock().now().nanoseconds * 1e-9
+        if self._fr_warned:
+            self._fr_warned = False
+            self.get_logger().info('frenet 오프셋 수신 재개')
+
+    def _frenet_shift(self, goal, near):
+        """목표점을 경로 법선 방향으로 램프된 오프셋만큼 민다.
+
+        법선은 **경로** 법선을 쓴다 — 차량 헤딩 법선을 쓰면 회피 조향으로 차가
+        돌 때마다 시프트 방향까지 같이 돌아 되먹임이 생긴다 (Stanley 주석과 같은 이유).
+        """
+        if not bool(self.p('frenet_enabled')):
+            return goal
+        now = self.get_clock().now().nanoseconds * 1e-9
+        fresh = (self._fr_rx_t is not None
+                 and now - self._fr_rx_t <= float(self.p('frenet_timeout')))
+        target = self._fr_d_cmd if fresh else 0.0
+        if not fresh and not self._fr_warned and self._fr_rx_t is not None:
+            self._fr_warned = True
+            self.get_logger().warn(
+                '/frenet/offset 끊김 — 레이싱라인으로 복귀한다 (회피 없음)',
+                throttle_duration_sec=2.0)
+
+        step = float(self.p('frenet_shift_rate')) / 50.0     # _cmd_tick 50Hz
+        self._fr_shift += float(np.clip(target - self._fr_shift, -step, step))
+        if abs(self._fr_shift) < 1e-3:
+            return goal
+
+        n = len(self.wp)
+        fwd = self.wp[(near + 1) % n, :2]
+        bwd = self.wp[(near - 1) % n, :2]
+        tang = fwd - bwd
+        tn = float(np.hypot(tang[0], tang[1]))
+        if tn < 1e-9:
+            return goal
+        left = np.array([-tang[1], tang[0]]) / tn
+        return goal + self._fr_shift * left
+
     def _steer_map(self, pos, yaw, goal) -> float:
         v = max(self.speed, 0.3)
         L1 = max(float(self.p('l1_min')), float(self.p('l1_k')) * v)
@@ -480,13 +567,15 @@ class MapController(Node):
             self._publish_cmd(0.0, 0.0)
             return
 
+        goal = self._frenet_shift(goal, near)
         steer = self._steer_map(self.pos, yaw, goal)
         a = float(self.p('steer_alpha'))
         steer = a * self._steer_prev + (1.0 - a) * steer
         self._steer_prev = steer
 
-        speed = float(np.clip(self._v_profile[near],
-                              self.p('min_speed'), self.p('max_speed')))
+        # 프로파일이 이미 물리(마찰원)와 min_speed·hard_cap 을 다 반영했다.
+        # 여기서 다시 max_speed 로 자르면 상한이 부활해 등속 주행이 된다.
+        speed = float(self._v_profile[near])
 
         self.get_logger().info(
             f'[MAP] κ={self._curvature[near]:.3f}  '

@@ -42,13 +42,23 @@ class VehicleParams:
     Iz: float = 0.050      # kg·m²  (estimated: m/12*(L²+tw²), tw≈0.27m)
 
     # Surface friction coefficient
-    mu: float = 0.40      # 2026-08-09 실측 추정 (구 1.0489). race_script.yaml map.mu 참고
+    # ★ 이 mu 는 마찰계수가 **아니다**. 실효 최대 그립 = mu × pac_D 다
+    #   (MAP 논문 III-B: "peak value D̃ is in fact μ·Fz,i·Di").
+    #   대조: 논문값 1.0489 × 1.2084 = 1.267g — 본문의 "1.25 g" 와 일치한다.
+    #
+    # ★ 불변식: mu × pac_D = 0.40 (실측 실효 그립). 하나를 바꾸면 둘 다 바꿀 것.
+    #   0.348 × 1.15 = 0.40 ✔
+    # ※ 아래 pac_* 는 race_script.yaml [map] 과 **같은 값이어야 한다** —
+    #   여기서 LUT 를 만들고 저기서 컨트롤러가 쓴다. 갈라지면 시뮬과 실차가
+    #   다른 타이어를 쓰게 된다 (2026-08-09 에 실제로 갈라져 있었다:
+    #   컨트롤러 B=3.8/D=1.15 vs 생성기 B=3.629/D=1.2084).
+    mu: float = 0.348
 
     # Pacejka magic formula — normalized by Fz
     # Consistent with map_controller: Fy = mu * Fz * D * pac_shape(alpha)
-    pac_B: float = 3.629
+    pac_B: float = 3.8      # ↓ race_script.yaml [map] 과 동기 유지
     pac_C: float = 1.3
-    pac_D: float = 1.2084   # shape peak (dimensionless)
+    pac_D: float = 1.15     # shape peak (dimensionless)
     pac_E: float = -0.5
 
     @property

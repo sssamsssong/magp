@@ -65,8 +65,16 @@ def generate_launch_description():
     # ── 컨트롤러 선택 ─────────────────────────────────────────────────────
     mode       = cfg.get('mode', 'q1')
     controller = cfg.get('controller', 'map')
-    max_speed  = float(cfg['speed'].get(f'{mode}_max', cfg['speed']['q1_max']))
-    min_speed  = float(cfg['speed']['min_speed'])
+    # ★ q*_max 삭제됨 (2026-08-09). 속도는 limits.grip_util 이 정한다.
+    max_speed  = float(cfg['speed'].get('hard_cap', 0.0)) or 99.0
+    min_speed  = float(cfg['speed'].get('min_speed', 0.3))
+    _lim = cfg.get('limits', {})
+    _gu  = _lim.get('grip_util', 0.6)
+    grip_util = float(_gu.get(mode, _gu.get('default', 0.6))
+                      if isinstance(_gu, dict) else _gu)
+    a_lon_acc = float(_lim.get('a_lon_acc', 0.0))
+    a_lon_brk = float(_lim.get('a_lon_brk', 0.0))
+    hard_cap  = float(cfg['speed'].get('hard_cap', 0.0))
 
     # ── map: 섹션 파라미터 ────────────────────────────────────────────────
     mc = cfg.get('map', {})
@@ -76,6 +84,10 @@ def generate_launch_description():
         'mode':          mode,
         'max_speed':     max_speed,
         'min_speed':     min_speed,
+        'grip_util':     grip_util,
+        'a_lon_acc':     a_lon_acc,
+        'a_lon_brk':     a_lon_brk,
+        'hard_cap':      hard_cap,
         'mu':            float(mc.get('mu',          1.0)),
         'mass':          float(mc.get('mass',         3.354)),
         'lf':            float(mc.get('lf',           0.1757)),

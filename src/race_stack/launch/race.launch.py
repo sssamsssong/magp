@@ -37,6 +37,21 @@ def generate_launch_description():
     # sys.argv를 직접 파싱한다 (LaunchConfiguration은 파이썬 로직에서 못 씀)
     import sys
     mode = cfg['mode']
+    # ── 속도 프로파일 공통 설정 (2026-08-09) ───────────────────────────
+    #  grip_util 은 컨트롤러 셋(map/stanley/gap_follower)이 **공유**한다.
+    #  모드별로 위험도를 다르게 두고 싶으면 limits.grip_util.<mode> 로 준다 —
+    #  q*_max 같은 평평한 상한 대신 **마찰 예산 사용률**로 표현하는 것이 물리적이다.
+    _lim = cfg.get('limits', {})
+    _mp0 = cfg.get('map', {})
+    _gu  = _lim.get('grip_util', 0.6)
+    grip_util = float(_gu.get(mode, _gu.get('default', 0.6))
+                      if isinstance(_gu, dict) else _gu)
+    a_lon_acc = float(_lim.get('a_lon_acc', 0.0))
+    a_lon_brk = float(_lim.get('a_lon_brk', 0.0))
+    hard_cap  = float(cfg.get('speed', {}).get('hard_cap', 0.0))
+    veh = dict(mu=float(_mp0.get('mu', 0.348)), pac_d=float(_mp0.get('pac_d', 1.15)),
+               lf=float(_mp0.get('lf', 0.1757)), lr=float(_mp0.get('lr', 0.1441)))
+
     controller = cfg.get('controller', 'auto')
     bench = False
     for a in sys.argv:
@@ -56,8 +71,11 @@ def generate_launch_description():
             f'race.launch.py: invalid controller "{controller}". '
             f'Valid: {sorted(VALID_CONTROLLERS)}')
 
-    max_speed = float(cfg['speed'][f'{mode}_max'])
-    min_speed = float(cfg['speed']['min_speed'])
+    # ★ q*_max 는 삭제됐다 (2026-08-09) — 속도는 물리(limits.grip_util)가 정한다.
+    #   max_speed 는 컨트롤러가 더 이상 클램프에 쓰지 않지만, 파라미터 선언이
+    #   남아 있어 값은 넘겨준다. hard_cap(0=끔) 이 유일한 천장이다.
+    max_speed = float(cfg['speed'].get('hard_cap', 0.0)) or 99.0
+    min_speed = float(cfg['speed'].get('min_speed', 0.3))
 
     # ---------- bench(박스 위) 모드 ----------
     # 차를 박스에 올려두고 토픽/RViz/조향만 확인하는 용도. 바퀴는 절대 돌리지 않는다.
@@ -351,6 +369,15 @@ def generate_launch_description():
                 'waypoint_file':   wp_csv,
                 'max_speed':       max_speed,
                 'min_speed':       min_speed,
+                # ★ 마찰원 속도 프로파일 (map_controller 와 같은 코드)
+                'grip_util':       grip_util,
+                'a_lon_acc':       a_lon_acc,
+                'a_lon_brk':       a_lon_brk,
+                'hard_cap':        hard_cap,
+                'mu':              veh['mu'],
+                'pac_d':           veh['pac_d'],
+                'lf':              veh['lf'],
+                'lr':              veh['lr'],
                 'max_steer':       float(pp.get('max_steer', 0.36)),
                 'wheelbase':       float(pp.get('wheelbase',  0.33)),
                 'stanley_gain':    float(sc.get('gain',           0.8)),
@@ -426,6 +453,9 @@ def generate_launch_description():
         # pure_pursuit 절과 공유한다 — 같은 차이므로 두 군데 두지 않는다.
         pp = cfg.get('pure_pursuit', {})
         mp = cfg.get('map', {})
+        fr = cfg.get('frenet', {})
+        frc = fr.get('per_controller', {}).get('map', {})
+        st = cfg.get('stanley', {})
         ctrl = Node(
             package='race_stack', executable='map_controller',
             name='map_controller', output='screen',
@@ -442,14 +472,22 @@ def generate_launch_description():
                 'mass':          float(mp.get('mass',        3.74)),
                 'lf':            float(mp.get('lf',          0.15875)),
                 'lr':            float(mp.get('lr',          0.17145)),
-                'mu':            float(mp.get('mu',          0.40)),
-                'pac_b':         float(mp.get('pac_b',       3.629)),
+                # ★ 폴백도 yaml [map] 과 같은 값이어야 한다. mu × pac_d = 0.40 (실효 그립).
+                'mu':            float(mp.get('mu',          0.348)),
+                'pac_b':         float(mp.get('pac_b',       3.8)),
                 'pac_c':         float(mp.get('pac_c',       1.3)),
-                'pac_d':         float(mp.get('pac_d',       1.2084)),
+                'pac_d':         float(mp.get('pac_d',       1.15)),
                 'pac_e':         float(mp.get('pac_e',      -0.5)),
-                'a_brake':       float(mp.get('a_brake',     6.0902)),
+                # ★ 속도 프로파일의 유일한 노브. 마찰 예산에 곱한다 (속도가 아니라).
+                'grip_util':     grip_util,
+                'hard_cap':      hard_cap,
+                # 0 이면 물리에서 자동: 가속=μ_eff·g·lf/L(후륜하중), 제동=μ_eff·g
+                'a_lon_acc':     a_lon_acc,
+                'a_lon_brk':     a_lon_brk,
+                # ↓ 폐기. 옛 설정이 죽지 않게만 남겨둔다 (컨트롤러가 경고하고 무시)
+                'a_brake':       float(mp.get('a_brake',     0.0)),
                 'speed_scale':   float(mp.get('speed_scale', 1.0)),
-                'mu_cap':        bool( mp.get('mu_cap',      False)),
+                'mu_cap':        bool( mp.get('mu_cap',      True)),
                 'steer_alpha':   float(mp.get('steer_alpha', 0.1981)),
                 'reverse_check': bool( mp.get('reverse_check', True)),
                 # AMCL 첫 pose 전까지의 위치 가정 (stanley 와 같은 값을 쓴다).
@@ -457,7 +495,54 @@ def generate_launch_description():
                 'init_x':        float(loc.get('init_x',   0.0)),
                 'init_y':        float(loc.get('init_y',   0.0)),
                 'init_yaw':      float(loc.get('init_yaw', 0.0)),
+                'frenet_enabled':    bool( fr.get('enabled', True)),
+                'frenet_timeout':    float(fr.get('timeout', 0.5)),
+                'frenet_shift_rate': float(fr.get('shift_rate', 0.9)),
             }])
+
+        # ── Frenet 회피 노드 (컨트롤러 공용) ────────────────────────────
+        # MAP 은 회피 로직을 직접 갖지 않는다. Stanley 가 쓰던 것과 **같은 코드**를
+        # (obstacle_avoid 믹스인) 독립 노드로 돌리고, 결과인 횡오프셋만 받는다.
+        #
+        # ★ 호라이즌은 컨트롤러마다 달라야 한다. MAP/L1 은 오프셋에 수렴하는 데
+        #   1.8·L1/√2 ≈ 1.15m (L1=0.9m) 를 달려야 하는데, Stanley 기준으로 맞춰둔
+        #   0.8m 를 그대로 쓰면 다 피하기 전에 장애물에 닿는다. 경험칙은
+        #   **호라이즌 ≥ 2 × L1**. per_controller 에서 덮어쓴다.
+        if bool(fr.get('enabled', True)) and mode in ('q2', 'race'):
+            l1m = float(mp.get('l1_min', 0.90))
+            nodes.append(Node(
+                package='race_stack', executable='frenet_planner',
+                name='frenet_planner', output='screen',
+                parameters=[{
+                    'mode':          mode,
+                    'waypoints_csv': wp_csv,
+                    'map_yaml':      map_yaml,
+                    'odom_topic':    odom_topic,
+                    # 컨트롤러별 오버라이드 → 없으면 2×L1 규칙으로 자동
+                    'obs_horizon_sec': float(frc.get('obs_horizon_sec',
+                                                     fr.get('obs_horizon_sec', 1.0))),
+                    'obs_horizon_min': float(frc.get('obs_horizon_min',
+                                                     max(2.0 * l1m, 0.8))),
+                    'obs_horizon_max': float(frc.get('obs_horizon_max',
+                                                     fr.get('obs_horizon_max', 3.0))),
+                    'frenet_dmax':      float(fr.get('dmax',      0.6)),
+                    'frenet_dstep':     float(fr.get('dstep',     0.10)),
+                    'frenet_clearance': float(fr.get('clearance', 0.35)),
+                    'frenet_clear_cap': float(fr.get('clear_cap', 0.8)),
+                    'frenet_w_offset':  float(fr.get('w_offset',  1.0)),
+                    'frenet_w_change':  float(fr.get('w_change',  0.5)),
+                    'frenet_w_clear':   float(fr.get('w_clear',   2.0)),
+                    'frenet_bounds':    bool( fr.get('bounds',    True)),
+                    'frenet_votes':     int(  fr.get('votes',     3)),
+                    'debug':            bool( fr.get('debug',     True)),
+                    # 레이캐스팅은 [stanley] 값을 재사용한다 — 같은 트랙·같은 차다
+                    'raycast_obs':      bool( st.get('raycast_obs',      True)),
+                    'raycast_fov_deg':  float(st.get('raycast_fov_deg',  100.0)),
+                    'raycast_beam_deg': float(st.get('raycast_beam_deg', 1.0)),
+                    'raycast_deficit':  float(st.get('raycast_deficit',  0.30)),
+                    'raycast_pose_unc': float(st.get('raycast_pose_unc', 0.25)),
+                    'track_margin':     float(st.get('track_margin',     0.15)),
+                }]))
 
     else:
         gf = cfg['gap_follower']
@@ -465,6 +550,10 @@ def generate_launch_description():
             package='race_stack', executable='gap_follower',
             name='gap_follower', output='screen',
             parameters=[{'max_speed': max_speed, 'min_speed': min_speed,
+                         # ★ 조향각 → 곡률 → 마찰 예산으로 속도를 제한한다
+                         'grip_util': grip_util, 'hard_cap': hard_cap,
+                         'mu': veh['mu'], 'pac_d': veh['pac_d'],
+                         'wheelbase': float(cfg['pure_pursuit']['wheelbase']),
                          'car_width': float(gf['car_width']),
                          'disparity_threshold': float(gf['disparity_threshold']),
                          'max_range': float(gf['max_range']),
