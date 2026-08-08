@@ -2,7 +2,7 @@
 """MAP 컨트롤러 파라미터 최적화 — Pacejka 자전거 모델 기반.
 
 Optuna TPE + vehicle_sim.py 직접 적분 (ROS / gym 불필요).
-race_script.yaml 의 map: 섹션을 읽어 고정 파라미터로 사용하고,
+race_script.yaml 의 map: / limits: 섹션을 읽어 고정 파라미터로 사용하고,
 최적화 결과를 같은 파일에 반영한다.
 
 실행:
@@ -12,14 +12,17 @@ race_script.yaml 의 map: 섹션을 읽어 고정 파라미터로 사용하고,
   l1_min      최소 L1 lookahead [m]    — 직선 진동의 주 원인
   l1_k        속도 비례 lookahead 게인  — L1 = max(l1_min, l1_k × v)
   steer_alpha 조향 저역통과 필터 계수   — 낮을수록 빠르지만 진동
-  speed_scale 웨이포인트 속도 배율
-  a_brake     코너 전 제동 가속도 [m/s²]
+  grip_util   마찰 예산 사용률 (η)     — 속도의 유일한 노브 (v ∝ √η)
+
+속도 프로파일: speed_profile.solve_profile() 공용 모듈 사용
+  (컨트롤러와 동일한 물리 — 마찰원 결합 forward-backward)
 
 목표 함수 (낮을수록 좋음):
   score = mean_CTE × 10
         + steer_rate_std × 20    (직선 진동 패널티)
         + lap_time × 0.5         (완주 시)
         + PENALTY                (미완주 시 — 진행 거리로 부분 점수)
+        + cte_wall_excess × 300  (벽 충돌 위험 패널티)
 """
 from __future__ import annotations
 
@@ -43,24 +46,22 @@ _RACE_SCRIPT = os.path.join(_REPO_ROOT, 'race_script.yaml')
 
 sys.path.insert(0, _HERE)
 from vehicle_sim import VehicleParams, bicycle_ode
+from speed_profile import solve_profile
 
 # ── 시뮬 상수 ──────────────────────────────────────────────────────────────
 G        = 9.81
 DT       = 0.005          # 적분 스텝 [s]
 CTRL_HZ  = 50             # 제어 주파수 [Hz]
-CTRL_DT  = 1.0 / CTRL_HZ # 제어 주기
-STEPS_PER_CTRL = max(1, round(CTRL_DT / DT))  # 적분 스텝 수 / 제어 주기
+CTRL_DT  = 1.0 / CTRL_HZ
+STEPS_PER_CTRL = max(1, round(CTRL_DT / DT))
 
-TIMEOUT   = 40.0   # 최대 시뮬 시간 [s]
-PENALTY   = 5000.0
-# 트랙 경계까지 여유 (안전여유 0.35m - 차 반폭 0.11m = 0.24m)
-# 이 이상의 순간 CTE는 벽 충돌 위험 → 강한 패널티 적용
-CTE_WALL_M = 0.24
+TIMEOUT    = 40.0
+PENALTY    = 5000.0
+CTE_WALL_M = 0.24   # 안전여유 0.35m - 차 반폭 0.11m
 
-DEPART_DIST = 3.0  # 출발 확인 거리 [m]
-ARRIVE_DIST = 1.5  # 도착 인식 거리 [m] (출발점으로 귀환)
-
-MAP_OUT_DIST = 5.0  # 맵 이탈 판정 [m] (웨이포인트에서 멀리)
+DEPART_DIST = 3.0
+ARRIVE_DIST = 1.5
+MAP_OUT_DIST = 5.0
 
 
 # ── 유틸 ──────────────────────────────────────────────────────────────────
@@ -82,16 +83,13 @@ def _load_waypoints(path: str) -> np.ndarray:
         for r in csv.DictReader(f):
             rows.append([float(r['x']), float(r['y']), float(r['speed'])])
     wp = np.array(rows)
-    # 연속 중복 포인트 제거 (arc length=0 → CubicSpline 오류 방지)
     keep = np.concatenate([[True], np.linalg.norm(np.diff(wp[:, :2], axis=0), axis=1) > 1e-6])
     return wp[keep]
 
 
 def _precompute_kappa(wp: np.ndarray) -> np.ndarray:
-    """각 웨이포인트의 곡률 [1/m]."""
     from scipy.interpolate import CubicSpline
     pts = wp[:, :2]
-    # 마지막 포인트가 첫 포인트와 동일한 폐루프면 제거
     if np.linalg.norm(pts[-1] - pts[0]) < 1e-6:
         pts = pts[:-1]
     n = len(pts)
@@ -109,18 +107,16 @@ def _precompute_kappa(wp: np.ndarray) -> np.ndarray:
     return np.abs(dx * ddy - dy * ddx) / denom
 
 
-def _build_speed_profile(wp: np.ndarray, a_brake: float,
-                         speed_scale: float) -> np.ndarray:
-    n = len(wp)
-    v = wp[:, 2] * speed_scale
-    ds = np.array([
-        np.linalg.norm(wp[(i + 1) % n, :2] - wp[i, :2])
-        for i in range(n)
-    ])
-    for _ in range(3):
-        for i in range(n - 1, -1, -1):
-            j = (i + 1) % n
-            v[i] = min(v[i], math.sqrt(v[j] ** 2 + 2.0 * a_brake * ds[i]))
+def _build_speed_profile(wp: np.ndarray, grip_util: float, p: VehicleParams,
+                         v_min: float) -> np.ndarray:
+    """컨트롤러와 동일한 speed_profile.solve_profile() 사용."""
+    mu_eff = p.mu * p.pac_D
+    csv_v = wp[:, 2] if wp.shape[1] > 2 else None
+    v, _ = solve_profile(
+        wp[:, 0], wp[:, 1], csv_v,
+        mu_eff=mu_eff, grip_util=grip_util,
+        lf=p.lf, lr=p.lr, v_min=v_min,
+    )
     return v
 
 
@@ -147,7 +143,7 @@ def _find_lookahead(wp: np.ndarray, pos: np.ndarray, L1: float,
     return None
 
 
-# ── Pacejka 역함수 LUT 빌드 ────────────────────────────────────────────────
+# ── Pacejka 역함수 LUT ────────────────────────────────────────────────────
 
 def _build_pac_lut(p: VehicleParams):
     alphas = np.linspace(-0.5, 0.5, 1000)
@@ -167,15 +163,15 @@ def _pac_inv(Fy_req: float, alpha_lut: np.ndarray, Fy_lut: np.ndarray) -> float:
 def run_episode(wp: np.ndarray, v_profile: np.ndarray, kappa: np.ndarray,
                 p: VehicleParams, params: dict,
                 max_steer: float = 0.36) -> float:
-    """MAP 컨트롤러 + 자전거 ODE 폐루프 시뮬.
-
-    Returns
-    -------
-    score : float — 낮을수록 좋음.
-    """
     l1_min      = params['l1_min']
     l1_k        = params['l1_k']
     steer_alpha = params['steer_alpha']
+    grip_util   = params['grip_util']
+
+    mu_eff = p.mu * p.pac_D
+    a_g    = grip_util * mu_eff * G
+    a_max  = 9.51          # 최대 가속 (모터 한계)
+    a_brk  = a_g           # 제동: 마찰원 전체 예산
 
     alpha_lut, Fy_lut = _build_pac_lut(p)
 
@@ -183,10 +179,9 @@ def run_episode(wp: np.ndarray, v_profile: np.ndarray, kappa: np.ndarray,
     wb  = p.lf + p.lr
     tau = 0.15   # 속도 응답 시정수
 
-    # 초기 상태
     yaw0  = math.atan2(wp[1, 1] - wp[0, 1], wp[1, 0] - wp[0, 0])
     state = np.array([0.0, 0.0, 0.0, float(wp[0, 0]), float(wp[0, 1]), yaw0])
-    start_xy  = wp[0, :2].copy()
+    start_xy = wp[0, :2].copy()
 
     steer_cmd = 0.0
     v_cmd     = 0.0
@@ -197,15 +192,13 @@ def run_episode(wp: np.ndarray, v_profile: np.ndarray, kappa: np.ndarray,
     cte_list        = []
     steer_rate_list = []
     prev_steer_cmd  = 0.0
-
-    ctrl_tick = 0
+    ctrl_tick       = 0
 
     while elapsed < TIMEOUT:
-        # ── 제어 계산 (CTRL_HZ) ───────────────────────────────────────────
         if ctrl_tick % STEPS_PER_CTRL == 0:
             vx, vy, r, x, y, psi = state
-            v    = max(float(np.hypot(vx, vy)), 0.3)
-            pos  = np.array([x, y])
+            v   = max(float(np.hypot(vx, vy)), 0.3)
+            pos = np.array([x, y])
 
             near_idx = _find_nearest(wp, pos, near_idx)
             L1       = max(l1_min, l1_k * v)
@@ -230,50 +223,38 @@ def run_episode(wp: np.ndarray, v_profile: np.ndarray, kappa: np.ndarray,
                 steer_cmd = steer_alpha * steer_cmd + (1.0 - steer_alpha) * raw
                 v_cmd     = float(v_profile[near_idx])
 
-            # CTE (nearest waypoint까지 거리)
             cte = float(np.linalg.norm(wp[near_idx, :2] - np.array([x, y])))
             cte_list.append(cte)
-
             steer_rate_list.append(abs(steer_cmd - prev_steer_cmd) / CTRL_DT)
             prev_steer_cmd = steer_cmd
 
-            # 맵 이탈 판정
             if cte > MAP_OUT_DIST:
-                n_done = ctrl_tick
                 progress = min(near_idx / n, 0.99)
                 return PENALTY * (1.0 - progress) + PENALTY
 
-        # ── 적분 ─────────────────────────────────────────────────────────
         vx = state[0]
         dv = (v_cmd - vx) / tau
-        a_max   = 9.51
-        a_brake = params.get('a_brake', 6.09)
-        Fx = p.m * max(-a_brake, min(a_max, dv))
+        Fx = p.m * max(-a_brk, min(a_max, dv))
         state = _rk4_step(state, steer_cmd, Fx, p)
         state[0] = max(0.0, state[0])
 
         elapsed   += DT
         ctrl_tick += 1
 
-        # ── 완주 판정 ─────────────────────────────────────────────────────
         pos = np.array([state[3], state[4]])
         dist_from_start = float(np.linalg.norm(pos - start_xy))
         if dist_from_start > DEPART_DIST:
             departed = True
         if departed and dist_from_start < ARRIVE_DIST:
-            # 완주
-            mean_cte       = float(np.mean(cte_list)) if cte_list else 99.0
-            max_cte        = float(np.max(cte_list))  if cte_list else 99.0
-            steer_rate_std = float(np.std(steer_rate_list)) if steer_rate_list else 99.0
-            # 트랙 경계 = 레이싱라인 ± CTE_WALL_M (안전여유 0.35m - 차 반폭 0.11m)
-            # 이 이상 벗어나는 순간이 있으면 실제 시뮬에서 벽 충돌 → 강한 패널티
+            mean_cte        = float(np.mean(cte_list))  if cte_list else 99.0
+            max_cte         = float(np.max(cte_list))   if cte_list else 99.0
+            steer_rate_std  = float(np.std(steer_rate_list)) if steer_rate_list else 99.0
             cte_wall_excess = max(0.0, max_cte - CTE_WALL_M)
             return (elapsed * 0.5
                     + mean_cte * 10.0
                     + steer_rate_std * 20.0
                     + cte_wall_excess * 300.0)
 
-    # 타임아웃
     progress = min(near_idx / n, 0.99)
     return PENALTY * (1.0 - progress) + PENALTY
 
@@ -282,18 +263,17 @@ def run_episode(wp: np.ndarray, v_profile: np.ndarray, kappa: np.ndarray,
 
 def optimize(wp: np.ndarray, kappa: np.ndarray, p: VehicleParams,
              baseline: dict, n_trials: int, timeout_s: float,
-             max_steer: float = 0.36):
+             v_min: float, max_steer: float = 0.36):
     best_scores = [999999.0]
 
     def objective(trial: optuna.Trial) -> float:
         params = {
-            'l1_min':      trial.suggest_float('l1_min',      0.40, 2.50),
-            'l1_k':        trial.suggest_float('l1_k',        0.15, 0.80),
-            'steer_alpha': trial.suggest_float('steer_alpha', 0.10, 0.90),
-            'speed_scale': trial.suggest_float('speed_scale', 0.5,  3.0),
-            'a_brake':     trial.suggest_float('a_brake',     3.0,  12.0),
+            'l1_min':      trial.suggest_float('l1_min',      0.40, 1.50),
+            'l1_k':        trial.suggest_float('l1_k',        0.20, 0.60),
+            'steer_alpha': trial.suggest_float('steer_alpha', 0.10, 0.95),
+            'grip_util':   trial.suggest_float('grip_util',   0.30, 1.00),
         }
-        v_profile = _build_speed_profile(wp, params['a_brake'], params['speed_scale'])
+        v_profile = _build_speed_profile(wp, params['grip_util'], p, v_min)
         score = run_episode(wp, v_profile, kappa, p, params, max_steer=max_steer)
 
         tag = '★' if score < best_scores[0] else ' '
@@ -304,13 +284,12 @@ def optimize(wp: np.ndarray, kappa: np.ndarray, p: VehicleParams,
         print(f'  [{trial.number:3d}]{tag} score={status:12s}  '
               f'l1={params["l1_min"]:.2f}/{params["l1_k"]:.2f}  '
               f'α={params["steer_alpha"]:.2f}  '
-              f'spd={params["speed_scale"]:.2f}  '
-              f'brk={params["a_brake"]:.1f}')
+              f'η={params["grip_util"]:.2f}')
         return score
 
     sampler = optuna.samplers.TPESampler(seed=42)
     study   = optuna.create_study(direction='minimize', sampler=sampler)
-    study.enqueue_trial(baseline)   # 기준값을 첫 번째 시도로 등록
+    study.enqueue_trial(baseline)
 
     study.optimize(objective, n_trials=n_trials, timeout=timeout_s)
     return study
@@ -322,17 +301,21 @@ def update_race_script(best: dict):
     with open(_RACE_SCRIPT) as f:
         text = f.read()
 
-    keys = {
-        'l1_min':      best['l1_min'],
-        'l1_k':        best['l1_k'],
-        'steer_alpha': best['steer_alpha'],
-        'speed_scale': best['speed_scale'],
-        'a_brake':     best['a_brake'],
-    }
-    for key, val in keys.items():
+    # map: 섹션 파라미터 (2-space indent)
+    for key in ('l1_min', 'l1_k', 'steer_alpha'):
+        if key not in best:
+            continue
         text = re.sub(
             rf'^(  {key}:)\s+\S+',
-            rf'\g<1> {round(val, 4)}',
+            rf'\g<1> {round(best[key], 4)}',
+            text, flags=re.MULTILINE,
+        )
+
+    # limits.grip_util.default (4-space indent, unique key in this context)
+    if 'grip_util' in best:
+        text = re.sub(
+            r'^(    default:)\s+\S+',
+            rf'\g<1> {round(best["grip_util"], 4)}',
             text, flags=re.MULTILINE,
         )
 
@@ -345,38 +328,44 @@ def update_race_script(best: dict):
 
 def main():
     ap = argparse.ArgumentParser(description='MAP 파라미터 최적화 (Pacejka 자전거 모델)')
-    ap.add_argument('--trials',  type=int,   default=200,  help='최대 시도 횟수')
-    ap.add_argument('--timeout', type=float, default=600,  help='최대 시간 [s]')
-    ap.add_argument('--no-write', action='store_true',     help='race_script.yaml 미기록')
-    ap.add_argument('--wp',      type=str,   default=None, help='웨이포인트 CSV 경로')
+    ap.add_argument('--trials',   type=int,   default=200,  help='최대 시도 횟수')
+    ap.add_argument('--timeout',  type=float, default=600,  help='최대 시간 [s]')
+    ap.add_argument('--no-write', action='store_true',      help='race_script.yaml 미기록')
+    ap.add_argument('--wp',       type=str,   default=None, help='웨이포인트 CSV 경로')
     args = ap.parse_args()
 
-    # ── race_script.yaml 로드 ─────────────────────────────────────────────
     with open(_RACE_SCRIPT) as f:
         cfg = yaml.safe_load(f)
 
-    mc = cfg.get('map', {})
-    p  = VehicleParams(
+    mc  = cfg.get('map', {})
+    lim = cfg.get('limits', {})
+
+    p = VehicleParams(
         m     = float(mc.get('mass',  3.354)),
         lf    = float(mc.get('lf',    0.1757)),
         lr    = float(mc.get('lr',    0.1441)),
         Iz    = 0.050,
-        mu    = float(mc.get('mu',    0.40)),
+        mu    = float(mc.get('mu',    0.348)),
         pac_B = float(mc.get('pac_b', 3.8)),
         pac_C = float(mc.get('pac_c', 1.3)),
         pac_D = float(mc.get('pac_d', 1.15)),
         pac_E = float(mc.get('pac_e', -0.5)),
     )
+    mu_eff = p.mu * p.pac_D
+
+    # grip_util 기준값: limits.grip_util.default 또는 단일값
+    gu_cfg = lim.get('grip_util', 0.6)
+    grip_util_base = float(gu_cfg['default'] if isinstance(gu_cfg, dict) else gu_cfg)
+
+    v_min      = float(cfg.get('speed', {}).get('min_speed', 0.3))
+    max_steer  = float(cfg.get('pure_pursuit', {}).get('max_steer', 0.36))
 
     baseline = {
         'l1_min':      float(mc.get('l1_min',      0.90)),
         'l1_k':        float(mc.get('l1_k',        0.35)),
-        'steer_alpha': float(mc.get('steer_alpha',  0.1981)),
-        'speed_scale': float(mc.get('speed_scale',  2.0)),
-        'a_brake':     float(mc.get('a_brake',      6.0902)),
+        'steer_alpha': float(mc.get('steer_alpha',  0.20)),
+        'grip_util':   grip_util_base,
     }
-    # pure_pursuit.max_steer = map_controller 와 vehicle_sim_node 양쪽의 조향 한계
-    max_steer = float(cfg.get('pure_pursuit', {}).get('max_steer', 0.36))
 
     # ── 웨이포인트 로드 ───────────────────────────────────────────────────
     if args.wp:
@@ -392,7 +381,7 @@ def main():
         print(f'웨이포인트 없음: {wp_path}')
         sys.exit(1)
 
-    wp = _load_waypoints(wp_path)
+    wp    = _load_waypoints(wp_path)
     kappa = _precompute_kappa(wp)
 
     print('=' * 70)
@@ -400,27 +389,25 @@ def main():
     print('=' * 70)
     print(f'  웨이포인트 : {wp_path}  ({len(wp)}개)')
     print(f'  μ={p.mu}  B={p.pac_B} C={p.pac_C} D={p.pac_D} E={p.pac_E}')
+    print(f'  μ_eff={mu_eff:.4f}  (= μ × pac_D, 실효 그립)')
     print(f'  m={p.m}kg  lf={p.lf}  lr={p.lr}  max_steer={max_steer}rad')
-    print(f'  trials={args.trials}  timeout={args.timeout}s')
+    print(f'  v_min={v_min}  trials={args.trials}  timeout={args.timeout}s')
     print()
     print('  기준값:')
     for k, v in baseline.items():
         print(f'    {k:12s} = {v}')
     print()
 
-    # 기준값 평가
-    v_profile_base = _build_speed_profile(wp, baseline['a_brake'], baseline['speed_scale'])
+    v_profile_base = _build_speed_profile(wp, baseline['grip_util'], p, v_min)
     score_base = run_episode(wp, v_profile_base, kappa, p, baseline, max_steer=max_steer)
-    completed_base = score_base < PENALTY
     print(f'  기준값 score: {score_base:.2f}  '
-          f'({"완주" if completed_base else "미완주"})')
+          f'({"완주" if score_base < PENALTY else "미완주"})')
     print()
-    print(f'  {"#":>3}  {"score":>12}  {"l1_min/k":>10}  '
-          f'{"α":>5}  {"spd":>5}  {"brk":>5}')
+    print(f'  {"#":>3}  {"score":>12}  {"l1_min/k":>10}  {"α":>5}  {"η":>5}')
     print('-' * 70)
 
     study = optimize(wp, kappa, p, baseline, args.trials, args.timeout,
-                     max_steer=max_steer)
+                     v_min=v_min, max_steer=max_steer)
 
     best   = study.best_params
     best_t = study.best_value
