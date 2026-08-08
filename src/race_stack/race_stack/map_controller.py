@@ -110,9 +110,13 @@ class MapController(Node):
         self.declare_parameter('mass', 3.354)
         self.declare_parameter('lf',   0.1757)
         self.declare_parameter('lr',   0.1441)
-        # mu: 2026-08-09 실측 추정 0.40 (연습장 화강석+먼지).
-        #     대회 우레탄은 다르니 현장에서 다시 잴 것. race_script.yaml map.mu 가 원본.
-        self.declare_parameter('mu',   0.40)
+        # ★ mu 는 마찰계수가 아니다 — **실효 최대 그립 = mu × pac_D** 다.
+        #   MAP 논문 III-B: "peak value D̃ is in fact μ·Fz,i·Di".
+        #   실측 실효 그립 0.40g(화강석+먼지) → mu = 0.40 / 1.15 = 0.348.
+        #   ※ gen_raceline 의 --mu 는 a_lat_max = mu·g 라 규약이 달라 0.40 이다.
+        #      두 값이 달라 보이는 건 정상이다. 헷갈리면 pac_D 를 같이 볼 것.
+        #   대회 우레탄은 다르니 현장에서 다시 잴 것. race_script.yaml map.mu 가 원본.
+        self.declare_parameter('mu',   0.348)
 
         # ── Pacejka Magic Formula ───────────────────────────────────────
         # 우리 차 추정 (2026-08-09): F1TENTH 폼 타이어 기반, MAP 논문 대비
