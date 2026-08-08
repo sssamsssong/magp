@@ -146,7 +146,7 @@ class SlipFriction(Node):
         d('servo_topic',  '/commands/servo/position')
 
         # 차량 기하
-        d('wheelbase',    0.33)
+        d('wheelbase',    0.32)
         d('servo_gain',   -0.761)
         d('servo_offset', 0.425)
         # 기구 스토퍼. vesc.yaml 의 servo_min/max 와 같은 값이어야 한다.
