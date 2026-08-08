@@ -610,6 +610,32 @@ frenet:
   bounds: true              # 트랙 경계 이탈 후보 배제
   debug: true               # /frenet_candidates 마커
 
+  # ── 컨트롤러별 오버라이드 ────────────────────────────────────
+  #   ★ 회피 호라이즌은 컨트롤러마다 달라야 한다. 오프셋 d 에 수렴하는 속도가
+  #     다르기 때문이다:
+  #
+  #       Stanley  δ = ψ_e + atan(k·e/v)   전방주시 지연 없음 → 즉시 반응
+  #       MAP/L1   a_lat = 2v²sin(η)/L1    2차계(ζ=0.707, ωn=√2·v/L1)
+  #                → 오버슈트는 4.3% 로 작지만 **상승거리 1.8·L1/√2 ≈ 1.15m**
+  #                  (L1=0.9m 기준. 속도가 올라도 L1 이 l1_min 에 걸려 있으면 그대로)
+  #
+  #     즉 MAP 은 오프셋을 다 옮기는 데 1.15m 를 달려야 하는데, Stanley 기준으로
+  #     맞춘 obs_horizon_min(0.8m)을 그대로 쓰면 **다 피하기 전에 장애물에 닿는다.**
+  #     경험칙: 호라이즌 ≥ 2 × L1.  적지 않으면 launch 가 2×l1_min 으로 자동 계산한다.
+  #
+  #     l1_min 을 줄여 수렴을 빠르게 하는 건 권하지 않는다 — 조향 이득이 폭증해
+  #     진동한다(위 [map] 절 주석 참고). 호라이즌을 늘리는 쪽이 안전하다.
+  per_controller:
+    map:
+      obs_horizon_sec: 1.0    # Stanley 는 0.6
+      obs_horizon_min: 1.8    # = 2 × l1_min(0.90)
+      # obs_horizon_max: 3.0
+
+  # ── 컨트롤러가 오프셋을 받는 쪽 (frenet_planner → 컨트롤러) ──
+  enabled:    true
+  timeout:    0.5           # s. 이만큼 /frenet/offset 이 끊기면 d=0 으로 복귀
+  shift_rate: 0.9           # m/s. 기준선을 옮기는 속도 (계단이면 조향 킥이 난다)
+
 wall_avoid:
   # 임계값이 트랙 폭(라인 위 최소 여유 36cm)과 겹치면 리밋 사이클이 된다.
   # 상세: 개발현황.md 08/04

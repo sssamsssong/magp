@@ -57,7 +57,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry, Path
-from std_msgs.msg import Bool, ColorRGBA
+from std_msgs.msg import Bool, ColorRGBA, Float64
 from visualization_msgs.msg import Marker
 
 from race_stack.stanley_controller import _REPO_ROOT, _normalize
@@ -117,6 +117,20 @@ class MapController(Node):
         #      두 값이 달라 보이는 건 정상이다. 헷갈리면 pac_D 를 같이 볼 것.
         #   대회 우레탄은 다르니 현장에서 다시 잴 것. race_script.yaml map.mu 가 원본.
         self.declare_parameter('mu',   0.348)
+
+        # ── Frenet 회피 (frenet_planner 노드가 /frenet/offset 로 준다) ──────
+        #   MAP 은 회피 로직을 직접 갖지 않는다 — Stanley 가 쓰던 것과 **같은 코드**를
+        #   독립 노드로 돌리고 여기서는 결과(횡오프셋 d)만 받는다.
+        #
+        #   ★ 타임아웃 폴백이 핵심이다. 노드가 죽거나 늦으면 d=0(레이싱라인)으로
+        #     돌아가야 한다. 조용히 옛 오프셋을 유지하면 장애물이 치워진 뒤에도
+        #     라인을 벗어난 채 달린다.
+        #
+        #   ★ 램프(shift_rate)도 필수다. 기준선을 계단으로 옮기면 목표점이 튀고
+        #     그게 곧 조향 킥이 된다 (Stanley 에서 "휘청휘청" 으로 관측된 것).
+        self.declare_parameter('frenet_enabled',    True)
+        self.declare_parameter('frenet_timeout',    0.5)   # s
+        self.declare_parameter('frenet_shift_rate', 0.9)   # m/s
 
         # ── Pacejka Magic Formula ───────────────────────────────────────
         # 우리 차 추정 (2026-08-09): F1TENTH 폼 타이어 기반, MAP 논문 대비
@@ -197,6 +211,15 @@ class MapController(Node):
                                  self.pose_cb, 10)
         self.create_subscription(
             Odometry, self.get_parameter('odom_topic').value, self.odom_cb, 10)
+
+        # Frenet 회피 오프셋
+        self._fr_d_cmd  = 0.0     # 노드가 보낸 목표 오프셋
+        self._fr_rx_t   = None    # 마지막 수신 시각 (타임아웃 판정)
+        self._fr_shift  = 0.0     # 실제로 적용 중인 값 (램프됨)
+        self._fr_warned = False
+        if bool(self.p('frenet_enabled')):
+            self.create_subscription(Float64, '/frenet/offset',
+                                     self._frenet_cb, 10)
 
         # 제어·발행을 50Hz 로 고정한다. AMCL 콜백에 걸어두면 주기가 들쭉날쭉하고
         # (2.5cm 이동마다) 정지 상태에서는 아예 돌지 않는다.
@@ -324,6 +347,46 @@ class MapController(Node):
         return float(np.interp(clamped, self._pac_Fy_lut, self._pac_alpha_lut))
 
     # ── MAP 조향각 ─────────────────────────────────────────────────────
+    def _frenet_cb(self, msg: Float64):
+        self._fr_d_cmd = float(msg.data)
+        self._fr_rx_t = self.get_clock().now().nanoseconds * 1e-9
+        if self._fr_warned:
+            self._fr_warned = False
+            self.get_logger().info('frenet 오프셋 수신 재개')
+
+    def _frenet_shift(self, goal, near):
+        """목표점을 경로 법선 방향으로 램프된 오프셋만큼 민다.
+
+        법선은 **경로** 법선을 쓴다 — 차량 헤딩 법선을 쓰면 회피 조향으로 차가
+        돌 때마다 시프트 방향까지 같이 돌아 되먹임이 생긴다 (Stanley 주석과 같은 이유).
+        """
+        if not bool(self.p('frenet_enabled')):
+            return goal
+        now = self.get_clock().now().nanoseconds * 1e-9
+        fresh = (self._fr_rx_t is not None
+                 and now - self._fr_rx_t <= float(self.p('frenet_timeout')))
+        target = self._fr_d_cmd if fresh else 0.0
+        if not fresh and not self._fr_warned and self._fr_rx_t is not None:
+            self._fr_warned = True
+            self.get_logger().warn(
+                '/frenet/offset 끊김 — 레이싱라인으로 복귀한다 (회피 없음)',
+                throttle_duration_sec=2.0)
+
+        step = float(self.p('frenet_shift_rate')) / 50.0     # _cmd_tick 50Hz
+        self._fr_shift += float(np.clip(target - self._fr_shift, -step, step))
+        if abs(self._fr_shift) < 1e-3:
+            return goal
+
+        n = len(self.wp)
+        fwd = self.wp[(near + 1) % n, :2]
+        bwd = self.wp[(near - 1) % n, :2]
+        tang = fwd - bwd
+        tn = float(np.hypot(tang[0], tang[1]))
+        if tn < 1e-9:
+            return goal
+        left = np.array([-tang[1], tang[0]]) / tn
+        return goal + self._fr_shift * left
+
     def _steer_map(self, pos, yaw, goal) -> float:
         v = max(self.speed, 0.3)
         L1 = max(float(self.p('l1_min')), float(self.p('l1_k')) * v)
@@ -484,6 +547,7 @@ class MapController(Node):
             self._publish_cmd(0.0, 0.0)
             return
 
+        goal = self._frenet_shift(goal, near)
         steer = self._steer_map(self.pos, yaw, goal)
         a = float(self.p('steer_alpha'))
         steer = a * self._steer_prev + (1.0 - a) * steer

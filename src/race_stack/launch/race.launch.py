@@ -426,6 +426,9 @@ def generate_launch_description():
         # pure_pursuit 절과 공유한다 — 같은 차이므로 두 군데 두지 않는다.
         pp = cfg.get('pure_pursuit', {})
         mp = cfg.get('map', {})
+        fr = cfg.get('frenet', {})
+        frc = fr.get('per_controller', {}).get('map', {})
+        st = cfg.get('stanley', {})
         ctrl = Node(
             package='race_stack', executable='map_controller',
             name='map_controller', output='screen',
@@ -458,7 +461,54 @@ def generate_launch_description():
                 'init_x':        float(loc.get('init_x',   0.0)),
                 'init_y':        float(loc.get('init_y',   0.0)),
                 'init_yaw':      float(loc.get('init_yaw', 0.0)),
+                'frenet_enabled':    bool( fr.get('enabled', True)),
+                'frenet_timeout':    float(fr.get('timeout', 0.5)),
+                'frenet_shift_rate': float(fr.get('shift_rate', 0.9)),
             }])
+
+        # ── Frenet 회피 노드 (컨트롤러 공용) ────────────────────────────
+        # MAP 은 회피 로직을 직접 갖지 않는다. Stanley 가 쓰던 것과 **같은 코드**를
+        # (obstacle_avoid 믹스인) 독립 노드로 돌리고, 결과인 횡오프셋만 받는다.
+        #
+        # ★ 호라이즌은 컨트롤러마다 달라야 한다. MAP/L1 은 오프셋에 수렴하는 데
+        #   1.8·L1/√2 ≈ 1.15m (L1=0.9m) 를 달려야 하는데, Stanley 기준으로 맞춰둔
+        #   0.8m 를 그대로 쓰면 다 피하기 전에 장애물에 닿는다. 경험칙은
+        #   **호라이즌 ≥ 2 × L1**. per_controller 에서 덮어쓴다.
+        if bool(fr.get('enabled', True)) and mode in ('q2', 'race'):
+            l1m = float(mp.get('l1_min', 0.90))
+            nodes.append(Node(
+                package='race_stack', executable='frenet_planner',
+                name='frenet_planner', output='screen',
+                parameters=[{
+                    'mode':          mode,
+                    'waypoints_csv': wp_csv,
+                    'map_yaml':      map_yaml,
+                    'odom_topic':    odom_topic,
+                    # 컨트롤러별 오버라이드 → 없으면 2×L1 규칙으로 자동
+                    'obs_horizon_sec': float(frc.get('obs_horizon_sec',
+                                                     fr.get('obs_horizon_sec', 1.0))),
+                    'obs_horizon_min': float(frc.get('obs_horizon_min',
+                                                     max(2.0 * l1m, 0.8))),
+                    'obs_horizon_max': float(frc.get('obs_horizon_max',
+                                                     fr.get('obs_horizon_max', 3.0))),
+                    'frenet_dmax':      float(fr.get('dmax',      0.6)),
+                    'frenet_dstep':     float(fr.get('dstep',     0.10)),
+                    'frenet_clearance': float(fr.get('clearance', 0.35)),
+                    'frenet_clear_cap': float(fr.get('clear_cap', 0.8)),
+                    'frenet_w_offset':  float(fr.get('w_offset',  1.0)),
+                    'frenet_w_change':  float(fr.get('w_change',  0.5)),
+                    'frenet_w_clear':   float(fr.get('w_clear',   2.0)),
+                    'frenet_bounds':    bool( fr.get('bounds',    True)),
+                    'frenet_votes':     int(  fr.get('votes',     3)),
+                    'debug':            bool( fr.get('debug',     True)),
+                    # 레이캐스팅은 [stanley] 값을 재사용한다 — 같은 트랙·같은 차다
+                    'raycast_obs':      bool( st.get('raycast_obs',      True)),
+                    'raycast_fov_deg':  float(st.get('raycast_fov_deg',  100.0)),
+                    'raycast_beam_deg': float(st.get('raycast_beam_deg', 1.0)),
+                    'raycast_deficit':  float(st.get('raycast_deficit',  0.30)),
+                    'raycast_pose_unc': float(st.get('raycast_pose_unc', 0.25)),
+                    'track_margin':     float(st.get('track_margin',     0.15)),
+                }]))
 
     else:
         gf = cfg['gap_follower']
