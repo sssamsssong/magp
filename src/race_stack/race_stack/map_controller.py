@@ -110,8 +110,9 @@ class MapController(Node):
         self.declare_parameter('mass', 3.354)
         self.declare_parameter('lf',   0.1757)
         self.declare_parameter('lr',   0.1441)
-        # mu: 대회(우레탄)=1.0~1.3, 연습(화강석)=0.8 권장
-        self.declare_parameter('mu',   1.0)
+        # mu: 2026-08-09 실측 추정 0.40 (연습장 화강석+먼지).
+        #     대회 우레탄은 다르니 현장에서 다시 잴 것. race_script.yaml map.mu 가 원본.
+        self.declare_parameter('mu',   0.40)
 
         # ── Pacejka Magic Formula ───────────────────────────────────────
         # 우리 차 추정 (2026-08-09): F1TENTH 폼 타이어 기반, MAP 논문 대비

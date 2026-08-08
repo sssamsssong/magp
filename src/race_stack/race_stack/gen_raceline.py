@@ -502,7 +502,9 @@ def main():
     p.add_argument('--map',    default=None,  help='맵 이름 (생략 시 대화형 선택)')
     p.add_argument('--vmax',   type=float, default=8.0,  help='최대 속도 (m/s)')
     p.add_argument('--vmin',   type=float, default=1.0,  help='최소 속도 (m/s)')
-    p.add_argument('--mu',     type=float, default=1.0489, help='마찰 계수')
+    # 2026-08-09 실측 추정 0.40 (구 1.0489). 과대평가하면 레이싱라인 속도가
+# 실제 그립을 넘어 코너에서 밀려난다 — 안전 방향으로 낮춘다.
+    p.add_argument('--mu',     type=float, default=0.40, help='마찰 계수')
     p.add_argument('--wveh',   type=float, default=0.31,  help='차량 폭 (m)')
     p.add_argument('--safety', type=float, default=0.15,  help='벽 안전 마진 (m)')
     p.add_argument('--acc',    type=float, default=5.0,  help='가속도 (m/s²)')

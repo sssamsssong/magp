@@ -42,7 +42,7 @@ except ImportError:
         @dataclass
         class VehicleParams:
             m: float = 3.354;   lf: float = 0.1757;  lr: float = 0.1441
-            Iz: float = 0.050;  mu: float = 1.0489
+            Iz: float = 0.050;  mu: float = 0.40   # 2026-08-09 실측 추정 (구 1.0489)
             pac_B: float = 3.629; pac_C: float = 1.3
             pac_D: float = 1.2084; pac_E: float = -0.5
             @property

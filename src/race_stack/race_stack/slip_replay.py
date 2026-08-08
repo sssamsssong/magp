@@ -46,7 +46,9 @@ def read_bag(path):
 G = 9.80665
 
 
-def voser_mu(bag, speed_scale, min_g_turn=0.15):
+def voser_mu(bag, speed_scale, min_g_turn=0.15, radius=None,
+             wheelbase=0.32, servo_gain=-0.761, servo_offset=0.425,
+             impact_g=1.5, impact_pad=0.5):
     """정속 원형 주행 bag 에서 노면 마찰계수 μ 를 두 가지로 뽑는다.
 
     왜 두 가지인가 (2026-08-09)
@@ -78,7 +80,7 @@ def voser_mu(bag, speed_scale, min_g_turn=0.15):
     rdr.open(rosbag2_py.StorageOptions(uri=bag, storage_id='sqlite3'),
              rosbag2_py.ConverterOptions('', ''))
     types = {t.name: t.type for t in rdr.get_all_topics_and_types()}
-    I, O = [], []
+    I, O, S = [], [], []
     while rdr.has_next():
         tp, data, ts = rdr.read_next()
         if tp == '/sensors/imu/raw':
@@ -88,8 +90,12 @@ def voser_mu(bag, speed_scale, min_g_turn=0.15):
         elif tp == '/odom':
             m = deserialize_message(data, get_message(types[tp]))
             O.append([ts * 1e-9, m.twist.twist.linear.x])
+        elif tp == '/commands/servo/position':
+            m = deserialize_message(data, get_message(types[tp]))
+            S.append([ts * 1e-9, m.data])
     if len(I) < 200 or len(O) < 50:
         print('★ IMU/odom 표본이 부족하다');  return
+    S = np.array(S) if S else None
     I = np.array(I);  O = np.array(O)
     ti = I[:, 0]
 
@@ -128,15 +134,70 @@ def voser_mu(bag, speed_scale, min_g_turn=0.15):
             r[win:][ok] = np.abs((x[win:] - x[:-win])[ok] / dtv[ok])
         return r
     qss = (rate(v_true) < 0.5) & (rate(wz) < math.radians(60))
-    turn = qss & (np.abs(v_true * wz) / G > min_g_turn) & (v_true > 0.5)
+
+    # ── 충격 구간 제외 ────────────────────────────────────────────────
+    # 벽·연석 충돌은 IMU 에 수 g~십수 g 스파이크를 남긴다. 그 하나가 μ 의
+    # 최대값·백분위를 통째로 오염시킨다 (2026-08-08 bag: 17.2g 관측).
+    # 충격 전후로 차가 튕기므로 앞뒤 여유까지 함께 버린다.
+    mag = np.linalg.norm(I[:, 1:4], axis=1) / scale
+    hit = mag > impact_g
+    if hit.any():
+        pad = max(int(impact_pad * hz), 1)
+        widened = np.convolve(hit.astype(float), np.ones(2 * pad + 1), 'same') > 0
+    else:
+        widened = np.zeros(len(I), bool)
+
+    # ── 오버스티어(스핀) 구간 제외 ────────────────────────────────────
+    # 실제 요레이트가 기구학값을 크게 웃돌면 뒤가 흐른 것이다. 과도현상이라
+    # 정상상태 가정이 깨지고, 스핀 중 요레이트가 커서 μ 를 부풀린다.
+    over = np.zeros(len(I), bool)
+    if S is not None and len(S) > 10:
+        sv = np.clip(np.interp(ti, S[:, 0], S[:, 1]),
+                     min(0.15, 0.85), max(0.15, 0.85))
+        delta = (sv - servo_offset) / servo_gain
+        w_kin = v_true * np.tan(delta) / wheelbase
+        over = np.abs(wz) > 1.5 * np.abs(w_kin) + math.radians(20)
+
+    clean = ~widened & ~over
+    turn = qss & clean & (np.abs(v_true * wz) / G > min_g_turn) & (v_true > 0.5)
+    print(f'  제외: 충격 {int(widened.sum())}행 (최대 {mag.max():.1f}g)  '
+          f'오버스티어 {int(over.sum())}행')
     if turn.sum() < 50:
         print(f'  ★ 준정상 선회 구간이 {turn.sum()}행뿐 — 정속 원형 주행이 맞는지,'
               f'\n    또는 속도를 더 올려야 하는지 확인할 것')
         return
 
+    # ── 휠 스핀 진단 ─────────────────────────────────────────────────
+    # 구동륜이 헛돌면 v_wheel 이 부풀고 μ_k = v·ω/g 가 같이 부푼다. 한계
+    # 근처에서 정확히 문제가 되므로 반드시 확인해야 한다. IMU 종가속과
+    # 휠속도 미분을 비교하면 잡힌다 — 스핀이 없으면 기울기가 1 이어야 한다.
+    ax_ms2 = ax * G
+    dv = np.full_like(v_true, np.nan)
+    dv[win:] = (v_true[win:] - v_true[:-win]) / (ti[win:] - ti[:-win])
+    ms = np.isfinite(dv) & (np.abs(dv) > 0.5) & (v_true > 0.5) & clean
+    if ms.sum() > 100:
+        sl_a = float(np.polyfit(dv[ms], ax_ms2[ms], 1)[0])
+        print(f'  휠 스핀 검사: a_x = {sl_a:.3f}·(dv_wheel/dt)  n={ms.sum()}')
+        if sl_a < 0.85:
+            print(f'    ⚠ 휠이 차보다 {1/max(sl_a,1e-3):.2f}배 빨리 돈다 = 스핀.')
+            print(f'      v_wheel 이 부풀어 있으므로 μ_k 도 그만큼 **과대평가**다.')
+            print(f'      스로틀을 더 부드럽게 주고 정속을 유지할 것.')
+
     mu_a = np.abs(ay)
     mu_k = np.abs(v_true * wz) / G
     rho  = np.hypot(ax, ay)              # 마찰원 (종+횡)
+
+    # ── 휠·롤 둘 다 무관한 μ (반경을 실측했을 때) ─────────────────────
+    # 정상 원운동이면 a_lat = R·ω² 다. 자이로만 쓰므로
+    #   · 휠 스핀 무관 (v_wheel 을 안 씀)
+    #   · 롤 무관 (가속도계를 안 씀)
+    # 우리 센서 조합에서 얻을 수 있는 가장 깨끗한 횡가속이다.
+    # 전제: 차가 그 반경의 원 위에 실제로 있어야 한다 — 언더스티어로 밀려
+    # 나가면 R 은 표시한 원이 아니라 **실제로 그린 원**이어야 한다.
+    mu_r = None
+    if radius:
+        mu_r = radius * wz ** 2 / G
+        v_r  = radius * np.abs(wz)      # 속도도 휠 없이 나온다
 
     print(f'\n  속도 구간별 (준정상 선회 {turn.sum()}행 / 전체 {len(I)})')
     print(f'  {"v_true[㎧]":>11} | {"n":>5} | {"μ_k 최대":>9} | {"μ_a 최대":>9} | {"ρ 최대":>8}')
@@ -151,8 +212,13 @@ def voser_mu(bag, speed_scale, min_g_turn=0.15):
 
     ka, kk = mu_a[turn], mu_k[turn]
     p99a, p99k = np.percentile(ka, 99), np.percentile(kk, 99)
-    print(f'\n  μ_k (롤 무관, 기준값)  최대 {kk.max():.3f}   99%p {p99k:.3f}')
-    print(f'  μ_a (롤 오염, 상한)    최대 {ka.max():.3f}   99%p {p99a:.3f}')
+    print(f'\n  μ_k (롤 무관, 휠 의존)  최대 {kk.max():.3f}   99%p {p99k:.3f}')
+    print(f'  μ_a (롤 오염, 상한)     최대 {ka.max():.3f}   99%p {p99a:.3f}')
+    if mu_r is not None:
+        kr = mu_r[turn]
+        print(f'  ★ μ_r = R·ω²/g (R={radius:.2f}m, 휠·롤 모두 무관)'
+              f'   최대 {kr.max():.3f}   99%p {np.percentile(kr,99):.3f}')
+        print(f'    실제로 그린 원의 반경을 넣었다면 이 값이 가장 믿을 만하다.')
     print(f'  마찰원 ρ 최대 {rho[turn].max():.3f}   99%p {np.percentile(rho[turn],99):.3f}')
     # ── a_y 대 v·ω 는 **회귀 기울기**로 본다 (최대값 비가 아니라) ─────
     # 둘 다 **g 단위**로 맞춘다 — ay 는 이미 g, v·ω 는 ㎧² 라 나눠야 한다.
@@ -236,8 +302,9 @@ def main(argv=None):
     ap.add_argument('--servo-offset', type=float, default=0.425)
     ap.add_argument('--servo-min',type=float, default=0.15)
     ap.add_argument('--servo-max',type=float, default=0.85)
-    # 줄자 실측(odom_scale, 6회): 표시 속도 = 실제 × 0.911
-    ap.add_argument('--speed-scale', type=float, default=0.911,
+    # 2026-08-09 vesc.yaml 수정(4614→4203) 이후 표시=실제 이므로 1.0.
+    # ★ 그 이전에 녹화한 bag 은 --speed-scale 0.911 을 줘야 한다.
+    ap.add_argument('--speed-scale', type=float, default=1.0,
                     help='표시속도/실제속도. odom_scale 로 잰 값')
     # ★ 디스큐 기본 OFF (2026-08-09 실측). 물리적으로는 옳지만 이 데이터에서
     #   측정 가능한 이득이 없었다: |β| 중앙 2.5°→2.4°, 저요레이트 95%p 는
@@ -251,6 +318,11 @@ def main(argv=None):
     ap.add_argument('--no-deskew', dest='deskew', action='store_false')
     ap.add_argument('--voser-mu', action='store_true',
                     help='정속 원형 주행 bag 에서 μ 를 뽑는다 (ICP 재생 없이 즉시)')
+    ap.add_argument('--radius', type=float, default=None,
+                    help='실제로 그린 원의 반경 [m]. 주면 μ = R·ω²/g 로도 계산한다 '
+                         '— 자이로만 쓰므로 휠 스핀·차체 롤 둘 다 무관하다.')
+    ap.add_argument('--impact-g', type=float, default=1.5,
+                    help='이 값을 넘는 |a| 는 충돌로 보고 전후 구간까지 버린다 [g]')
     ap.add_argument('--calib-lever', action='store_true',
                     help='저속 원 주행 bag 에서 lidar_x 를 역산한다')
     ap.add_argument('--calib-max-g', type=float, default=0.15,
@@ -260,7 +332,9 @@ def main(argv=None):
 
     # μ 측정은 IMU·odom 만 있으면 되므로 ICP 재생(느림) 없이 바로 끝낸다.
     if a.voser_mu:
-        voser_mu(a.bag, a.speed_scale)
+        voser_mu(a.bag, a.speed_scale, radius=a.radius,
+                 wheelbase=a.wheelbase, servo_gain=a.servo_gain,
+                 servo_offset=a.servo_offset, impact_g=a.impact_g)
         return 0
 
     b = read_bag(a.bag)

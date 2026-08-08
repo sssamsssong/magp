@@ -105,7 +105,7 @@ def generate_launch_description():
                 'min_speed':     float(sl.get('min_speed',  0.3)),
                 # 줄자 실측(odom_scale 6회). vesc.yaml 의 speed_to_erpm_gain 을
                 # 고치면 이 값을 1.0 으로 되돌릴 것 — 아니면 이중 보정된다.
-                'speed_scale':   float(sl.get('speed_scale', 0.911)),
+                'speed_scale':   float(sl.get('speed_scale', 1.0)),
                 # D-pad 로 고를 반경/속도. 값은 slip.max_steer / max_speed 를
                 # 넘으면 조용히 무시되므로 그 안에 두어야 한다.
                 'radii':         [float(x) for x in sl.get(

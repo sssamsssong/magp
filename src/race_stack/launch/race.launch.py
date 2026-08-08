@@ -442,7 +442,7 @@ def generate_launch_description():
                 'mass':          float(mp.get('mass',        3.74)),
                 'lf':            float(mp.get('lf',          0.15875)),
                 'lr':            float(mp.get('lr',          0.17145)),
-                'mu':            float(mp.get('mu',          1.0489)),
+                'mu':            float(mp.get('mu',          0.40)),
                 'pac_b':         float(mp.get('pac_b',       3.629)),
                 'pac_c':         float(mp.get('pac_c',       1.3)),
                 'pac_d':         float(mp.get('pac_d',       1.2084)),

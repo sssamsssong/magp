@@ -42,7 +42,7 @@ class VehicleParams:
     Iz: float = 0.050      # kg·m²  (estimated: m/12*(L²+tw²), tw≈0.27m)
 
     # Surface friction coefficient
-    mu: float = 1.0489
+    mu: float = 0.40      # 2026-08-09 실측 추정 (구 1.0489). race_script.yaml map.mu 참고
 
     # Pacejka magic formula — normalized by Fz
     # Consistent with map_controller: Fy = mu * Fz * D * pac_shape(alpha)
@@ -252,7 +252,7 @@ def main():
     ap = argparse.ArgumentParser(
         description='Generate MAP steady-state LUT (single-track bicycle model)')
     ap.add_argument('--mu',      type=float, default=None,
-                    help='friction override (default: VehicleParams.mu = 1.0489)')
+                    help='friction override (default: VehicleParams.mu = 0.40)')
     ap.add_argument('--v-min',   type=float, default=0.5)
     ap.add_argument('--v-max',   type=float, default=5.0)
     ap.add_argument('--v-steps', type=int,   default=20)

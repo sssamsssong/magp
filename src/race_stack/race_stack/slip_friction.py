@@ -257,10 +257,10 @@ class SlipFriction(Node):
         # 출력
         d('min_speed',    0.3)     # 이 이상에서만 추정
 
-        # ★ 줄자 실측(odom_scale, 6회): 표시 속도 = 실제 × 0.911.
-        #   μ_k 는 실제 속도로 계산해야 하므로 여기서 되돌린다.
-        #   vesc.yaml 의 speed_to_erpm_gain 을 고치면 이 값을 1.0 으로 되돌릴 것.
-        d('speed_scale',  0.911)
+        # ★ 2026-08-09: vesc.yaml speed_to_erpm_gain 을 4614→4203 으로 고쳐
+        #   표시 속도 = 실제 속도가 되었으므로 1.0 이다. 그 이전에 녹화한
+        #   bag 을 분석할 때만 0.911 을 쓴다 (이중 보정 주의).
+        d('speed_scale',  1.0)
 
         # ── Voser 원형 주행 리그 (D-pad 로 조향각·속도 상한 선택) ─────────
         # 조향은 joystick_teleop 의 디지털 모드로 **직진 또는 고정각** 둘뿐이고,

@@ -24,7 +24,8 @@ numpy 1.26.4 고정 환경을 건드리지 않는다.
 사용
 ────
   ros2 run race_stack ontrack_sysid -- logs/slip_tests/*_friction.csv \\
-      --mass 3.5 --lf 0.165 --lr 0.165 --izz 0.04 --speed-scale 0.911
+      --mass 3.354 --lf 0.1757 --lr 0.1441 --izz 0.050
+  ※ 2026-08-09 이전에 녹화한 bag/CSV 는 --speed-scale 0.911 을 줄 것
 
   ★ 제원(mass/lf/lr/izz)은 반드시 실측값으로 바꿀 것. 기본값은 자리표시자다.
     --sweep-izz 로 I_z 민감도를 먼저 볼 수 있다.
@@ -357,7 +358,8 @@ def main(argv=None):
     ap.add_argument('--lf',   type=float, default=0.165, help='★ 무게중심→전축 [m]')
     ap.add_argument('--lr',   type=float, default=0.165, help='★ 무게중심→후축 [m]')
     ap.add_argument('--izz',  type=float, default=0.04, help='★ 요 관성모멘트 [kg·m²]')
-    ap.add_argument('--speed-scale', type=float, default=0.911,
+    # 2026-08-09 vesc.yaml 수정 이후 1.0. 그 이전 bag 은 0.911 을 줄 것.
+    ap.add_argument('--speed-scale', type=float, default=1.0,
                     help='표시속도/실제속도. odom_scale 로 잰 값')
     ap.add_argument('--omega', default='wz_lidar', choices=['wz_lidar', 'wz_imu'])
     ap.add_argument('--ts',     type=float, default=TS_DEFAULT)

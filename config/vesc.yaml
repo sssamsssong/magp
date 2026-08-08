@@ -2,7 +2,14 @@
   # general parameters shared by all vesc-related nodes
   ros__parameters:
     # erpm (electrical rpm) = speed_to_erpm_gain * speed (meters / second) + speed_to_erpm_offset
-    speed_to_erpm_gain: 4614.0
+    # ★ 2026-08-09 줄자 실측(odom_scale, 6회): 표시 속도가 실제의 91.1% 였다.
+    #   4614 × 0.911 = 4203. 이 값을 쓰면 표시 = 실제가 된다.
+    #   같은 지령에 차는 약 9% **느려진다** (그동안 계획보다 빨리 달리고 있었다).
+    #   근거: a_y 대 v·ω 불일치를 파다가 발견했고, IMU·LiDAR 를 전혀 안 쓰는
+    #   줄자 측정으로 독립 검증했다. 6회 산포가 작았다.
+    #   ※ 이 값을 바꾸면 speed_scale(=0.911) 을 쓰던 곳은 전부 1.0 으로
+    #     되돌려야 한다 — 안 그러면 이중 보정된다.
+    speed_to_erpm_gain: 4203.0    # 구 4614.0 (2026-08-09 이전)
     speed_to_erpm_offset: 0.0
 
     # servo value (0 to 1) =  steering_angle_to_servo_gain * steering angle (radians) + steering_angle_to_servo_offset
@@ -11,7 +18,11 @@
     steering_angle_to_servo_gain: -0.761
     # 실측 중립은 0.419 지만 그 값으로 주행하니 직선에서 조향이 발산했다.
     # 백래시 가설 검증 전까지 0.425 유지 (자세한 내용은 업데이트노트 08-05).
-    steering_angle_to_servo_offset: 0.425
+    # 2026-08-07 steer_trim.py 자동측정: 0.4250 → 0.4249 (trim=+0.0001rad, iter=1)
+    # 2026-08-07 steer_trim.py 자동측정: 0.4249 → 0.4249 (trim=-0.0000rad, iter=1)
+    # 2026-08-07 steer_trim.py 자동측정: 0.4249 → 0.4041 (trim=+0.0273rad, iter=3)
+    # 2026-08-07 steer_trim.py 자동측정: 0.4041 → 0.3954 (trim=+0.0114rad, iter=1)
+    steering_angle_to_servo_offset: 0.3954
 
     port: /dev/sensors/vesc
     duty_cycle_min: 0.0
