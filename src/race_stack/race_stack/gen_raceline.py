@@ -230,7 +230,8 @@ def calc_splines(path: np.ndarray) -> tuple:
 def opt_min_curv(reftrack: np.ndarray,
                  normvec:  np.ndarray,
                  M_spl:   np.ndarray,
-                 w_veh:   float) -> np.ndarray:
+                 w_veh:   float,
+                 r_min:   float = 0.9) -> np.ndarray:
     """
     최소 곡률 경로 최적화 (OSQP QP 풀이).
 
@@ -321,14 +322,22 @@ def opt_min_curv(reftrack: np.ndarray,
     dev_left  = np.maximum(dev_left,  0.01)
 
     # OSQP: min ½ x'Px + q'x  s.t. l ≤ Ax ≤ u
-    # 제약을 등가로: -dev_left ≤ α ≤ dev_right → A=I, l=-dev_left, u=dev_right
+    # 제약 1: 트랙 폭  -dev_left ≤ α ≤ dev_right
+    # 제약 2: R_min   |κ_ref + E·α| ≤ 1/r_min
+    #          → -1/r_min - κ_ref ≤ E·α ≤ 1/r_min - κ_ref
+    kappa_max = 1.0 / max(r_min, 1e-3)
+    A_full = sp.vstack([sp.eye(N, format='csc'),
+                        sp.csc_matrix(E)], format='csc')
+    l_full = np.concatenate([-dev_left,  -kappa_max - kappa_ref])
+    u_full = np.concatenate([ dev_right,  kappa_max - kappa_ref])
+
     prob = osqp.OSQP()
     prob.setup(
         P=sp.csc_matrix(H),
         q=f,
-        A=sp.eye(N, format='csc'),
-        l=-dev_left,
-        u=dev_right,
+        A=A_full,
+        l=l_full,
+        u=u_full,
         verbose=False,
         eps_abs=1e-9,
         eps_rel=1e-9,
@@ -510,6 +519,7 @@ def main():
     p.add_argument('--acc',    type=float, default=5.0,  help='가속도 (m/s²)')
     p.add_argument('--brk',    type=float, default=8.0,  help='제동 (m/s²)')
     p.add_argument('--step',   type=float, default=0.1,  help='웨이포인트 간격 (m)')
+    p.add_argument('--rmin',   type=float, default=0.9,  help='최소 회전반경 (m) — QP 곡률 상한 제약')
     args = p.parse_args()
 
     # 맵 선택
@@ -546,7 +556,8 @@ def main():
     coeffs_x, coeffs_y, M_spl, normvec = calc_splines(path_cl)
 
     print('\n[4] 최소 곡률 QP (OSQP)...')
-    alpha = opt_min_curv(reftrack_u, normvec, M_spl, w_veh=args.wveh)
+    alpha = opt_min_curv(reftrack_u, normvec, M_spl, w_veh=args.wveh,
+                         r_min=args.rmin)
     print(f'  α: [{alpha.min():.3f}, {alpha.max():.3f}] m')
 
     print('\n[5] 레이싱라인 생성...')

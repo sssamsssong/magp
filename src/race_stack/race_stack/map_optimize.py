@@ -177,7 +177,7 @@ def run_episode(wp: np.ndarray, v_profile: np.ndarray, kappa: np.ndarray,
 
     n   = len(wp)
     wb  = p.lf + p.lr
-    tau = 0.15   # 속도 응답 시정수
+    tau = 0.25   # 속도 응답 시정수 — 실측 250ms (2026-08-09)
 
     yaw0  = math.atan2(wp[1, 1] - wp[0, 1], wp[1, 0] - wp[0, 0])
     state = np.array([0.0, 0.0, 0.0, float(wp[0, 0]), float(wp[0, 1]), yaw0])
