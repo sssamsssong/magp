@@ -23,7 +23,15 @@ from scipy.spatial import cKDTree
 import osqp
 import scipy.sparse as sp
 
-_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# ── 경로 (환경변수 RACE_WS 로 워크스페이스 지정, 기본은 이 파일 기준) ────────
+# gen_waypoints_kappa.py 와 같은 규약. abspath 만 쓰면 심링크를 안 풀어
+# build/race_stack/maps(빌드 시점 스냅샷)를 읽는다 — 새 맵이 안 보이고, 생성한
+# 웨이포인트가 repo 밖에 떨어져 커밋도 안 되고 다음 빌드에 사라진다.
+# (2026-07-17 에 gen_waypoints 계열은 고쳤는데 이 파일만 남아 있었다)
+_PKG_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+if os.environ.get('RACE_WS'):
+    _PKG_DIR = os.path.join(
+        os.path.expanduser(os.environ['RACE_WS']), 'src', 'race_stack')
 MAPS_DIR = os.path.join(_PKG_DIR, 'maps')
 WP_DIR   = os.path.join(_PKG_DIR, 'waypoints')
 
