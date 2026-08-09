@@ -585,7 +585,10 @@ class MapController(Node):
 
         self._publish_cmd(steer, speed)
         self._pub_wp_marker(goal)
-        self._update_car_trail(px, py, speed)
+        # ★ 실측(self.speed)과 지령(speed)을 **둘 다** 남긴다 (2026-08-09).
+        #   예전엔 지령만 'speed' 열로 저장해서, 사후 분석에서 그걸 실측으로
+        #   착각하면 '속도 추종 지연' 같은 없는 문제를 만들어낸다. 실제로 그랬다.
+        self._update_car_trail(px, py, self.speed, steer, speed, near)
 
     def _publish_cmd(self, steer: float, speed: float):
         """정지 중에도 계속 흘린다 — /drive 가 0.2s 끊기면 ackermann_mux 가
@@ -640,15 +643,24 @@ class MapController(Node):
         m.lifetime.nanosec = int(1e8)
         self.wp_pub.publish(m)
 
-    def _update_car_trail(self, x: float, y: float, speed: float):
-        """0.1m 이상 움직였을 때만 점 추가. 디스크 쓰기는 종료 시 한 번에."""
+    def _update_car_trail(self, x: float, y: float, speed_meas: float,
+                          steer: float = 0.0, cmd_v: float = 0.0,
+                          near: int = -1):
+        """0.1m 이상 움직였을 때만 점 추가. 디스크 쓰기는 종료 시 한 번에.
+
+        ★ 2026-08-09: 진단 채널을 늘렸다. 위치·실측속도만으로는
+          "직선→코너 전환부 좌우 흔들림" 과 "지령을 못 따라가는 속도" 를
+          가릴 수 없었다 — 조향 신호가 없으면 제어 루프 진동인지 그립
+          포화인지 구분이 안 되고, 지령속도가 없으면 추종 지연을 못 잰다.
+        """
         if self._last_trail is not None and \
                 math.hypot(x - self._last_trail[0], y - self._last_trail[1]) < 0.1:
             return
         self._last_trail = (x, y)
         now = self.get_clock().now()
         t = (now - self._run_t0).nanoseconds / 1e9
-        self._trail_log.append((t, x, y, float(speed)))
+        self._trail_log.append((t, x, y, float(speed_meas), float(steer),
+                                float(cmd_v), float(self.yaw), int(near)))
         if len(self._trail_log) > 3000:
             self._trail_log.pop(0)
 
@@ -675,9 +687,14 @@ class MapController(Node):
             os.makedirs(run_dir, exist_ok=True)
             with open(os.path.join(run_dir, 'driven_path.csv'), 'w', newline='') as f:
                 w = csv.writer(f)
-                w.writerow(['t', 'x', 'y', 'speed'])
-                for t, x, y, v in self._trail_log:
-                    w.writerow([f'{t:.3f}', f'{x:.4f}', f'{y:.4f}', f'{v:.3f}'])
+                # steer/cmd_v/yaw 는 2026-08-09 추가 — 진동(제어 루프)과
+                # 속도 추종 지연을 사후에 가리려면 지령 신호가 있어야 한다.
+                # speed = **실측**(odom), cmd_v = **지령**(프로파일). 헷갈리지 말 것.
+                w.writerow(['t', 'x', 'y', 'speed', 'steer', 'cmd_v', 'yaw', 'near'])
+                for r in self._trail_log:
+                    w.writerow([f'{r[0]:.3f}', f'{r[1]:.4f}', f'{r[2]:.4f}',
+                                f'{r[3]:.3f}', f'{r[4]:.4f}', f'{r[5]:.3f}',
+                                f'{r[6]:.4f}', r[7]])
 
             race_script = os.environ.get('RACE_SCRIPT',
                                          os.path.expanduser('~/race_script.yaml'))
