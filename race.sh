@@ -22,6 +22,8 @@
 #    ./race.sh waypoints [맵]  SLAM 맵에서 레이싱라인 생성 (GUI, 디스플레이 필요)
 #    ./race.sh waypoints-kappa [맵]  위와 동일 + 조향각 물리한계(곡률) 제약
 #                              → <맵>_wp_kappa.csv 로 따로 저장, 랩타임 비교용
+#    ./race.sh waypoints-tumftm [맵]  TUMFTM 최소곡률(IQP) QP 최적화 (비-GUI, 자동)
+#                              → <맵>_wp_tumftm.csv 로 따로 저장, 랩타임 비교용
 #    ./race.sh curvprobe       곡률-속도 캘리브레이션 리그 (slip과 별개 도구)
 #    ./race.sh steertrim       조향 중립값 자동 캘리브레이션 (IMU 기반, 전/후진 반복)
 #    ./race.sh savepose        ★ 지금 AMCL 위치를 초기 추정으로 저장
@@ -288,6 +290,15 @@ case "$CMD" in
       exec ros2 run race_stack gen_waypoints_kappa -- --map "$NAME"
     else
       exec ros2 run race_stack gen_waypoints_kappa
+    fi ;;
+  waypoints-tumftm)
+    # TUMFTM 최소곡률(IQP) QP 최적화 — GUI 클릭 없이 자동으로 라인을 뽑는다.
+    # 결과는 <맵이름>_wp_tumftm.csv 로 따로 저장되어 기존 결과와 랩타임 비교 가능.
+    NAME=${2:-}
+    if [ -n "$NAME" ]; then
+      exec ros2 run race_stack gen_raceline_tumftm -- --map "$NAME"
+    else
+      exec ros2 run race_stack gen_raceline_tumftm
     fi ;;
   savepose)
     # 지금 AMCL 이 믿고 있는 위치를 race_script.yaml 의 초기 추정으로 굳힌다.

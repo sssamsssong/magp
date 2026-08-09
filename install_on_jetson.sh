@@ -27,8 +27,9 @@ sudo apt-get install -y \
     python3-pil
 
 # scikit-image (gen_waypoints용), scikit-learn (opponent tracker DBSCAN용)
+# osqp (gen_raceline_tumftm 최소곡률 QP용)
 # numpy는 1.26.4 고정 — 2.x로 올라가면 cv2/matplotlib/colcon 이 깨진다
-pip3 install "numpy==1.26.4" scikit-image scikit-learn --quiet
+pip3 install "numpy==1.26.4" scikit-image scikit-learn osqp --quiet
 
 echo "[2/4] 패키지 심링크 → $WS/src/  (복사 아님: 이 git repo가 유일 소스)"
 # cp 가 아니라 심링크. 실행 WS 는 git repo 를 그대로 가리키므로

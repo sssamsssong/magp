@@ -230,7 +230,8 @@ def calc_splines(path: np.ndarray) -> tuple:
 def opt_min_curv(reftrack: np.ndarray,
                  normvec:  np.ndarray,
                  M_spl:   np.ndarray,
-                 w_veh:   float) -> np.ndarray:
+                 w_veh:   float,
+                 kappa_max: float = None) -> np.ndarray:
     """
     최소 곡률 경로 최적화 (OSQP QP 풀이).
 
@@ -239,12 +240,18 @@ def opt_min_curv(reftrack: np.ndarray,
       목적: min Σ κ_i²(α)
       → QP: min ½ α' H α + f' α
       제약: -w_left[i]+W/2 ≤ α[i] ≤ w_right[i]-W/2
+      (kappa_max 지정 시 추가) -κ_max ≤ κ_ref + E·α ≤ κ_max
 
     H = E'E,  f = 2 E' κ_ref
     E = diag(cx) T_ny − diag(cy) T_nx
     cx_i = x'_i / ||(x',y')||^(3/2),  cy_i = y'_i / ||(x',y')||^(3/2)
     T_nx = (A_ex_c @ A_inv) @ M_x_norm
     T_ny = (A_ex_c @ A_inv) @ M_y_norm
+
+    kappa_max: 차량의 물리적 최대 곡률(예: tan(max_steer)/wheelbase). 주면
+      평균 곡률을 희생해서라도 이 한계를 넘는 지점이 생기지 않도록 하드
+      제약을 추가한다 — "전체적으로 매끈함"보다 "못 도는 스파이크가 없음"이
+      우선일 때 씀.
     """
     N = reftrack.shape[0]
 
@@ -321,14 +328,24 @@ def opt_min_curv(reftrack: np.ndarray,
     dev_left  = np.maximum(dev_left,  0.01)
 
     # OSQP: min ½ x'Px + q'x  s.t. l ≤ Ax ≤ u
-    # 제약을 등가로: -dev_left ≤ α ≤ dev_right → A=I, l=-dev_left, u=dev_right
+    # 폭 제약(항상): -dev_left ≤ α ≤ dev_right → A=I, l=-dev_left, u=dev_right
+    A_rows = [sp.eye(N, format='csc')]
+    l_rows = [-dev_left]
+    u_rows = [dev_right]
+
+    if kappa_max is not None:
+        # 곡률 하드 제약: -κ_max ≤ κ_ref + E·α ≤ κ_max
+        A_rows.append(sp.csc_matrix(E))
+        l_rows.append(-kappa_max - kappa_ref)
+        u_rows.append(kappa_max - kappa_ref)
+
     prob = osqp.OSQP()
     prob.setup(
         P=sp.csc_matrix(H),
         q=f,
-        A=sp.eye(N, format='csc'),
-        l=-dev_left,
-        u=dev_right,
+        A=sp.vstack(A_rows, format='csc'),
+        l=np.concatenate(l_rows),
+        u=np.concatenate(u_rows),
         verbose=False,
         eps_abs=1e-9,
         eps_rel=1e-9,
@@ -338,7 +355,11 @@ def opt_min_curv(reftrack: np.ndarray,
     )
     result = prob.solve()
     if result.info.status not in ('solved', 'solved_inaccurate'):
-        print(f'  경고: OSQP 상태 = {result.info.status}')
+        # infeasible(예: 곡률 하드캡과 트랙폭이 동시에 못 맞음) 등에서
+        # result.x 는 유효한 해가 아니다 — 그걸 쓰면 오히려 경로가 망가지니
+        # "이번 라운드는 보정 없음"으로 안전하게 후퇴한다.
+        print(f'  경고: OSQP 상태 = {result.info.status} → 이번 라운드 보정 생략(α=0)')
+        return np.zeros(N)
 
     alpha = np.clip(result.x, -dev_left, dev_right)
 
@@ -355,10 +376,15 @@ def opt_min_curv(reftrack: np.ndarray,
 def build_raceline(reftrack: np.ndarray,
                    normvec:  np.ndarray,
                    alpha:    np.ndarray,
-                   stepsize: float = 0.1) -> tuple:
+                   stepsize: float = 0.1,
+                   smooth_factor: float = 0.002) -> tuple:
     """
     α 오프셋을 적용한 레이싱라인을 생성하고 CubicSpline으로 균일 리샘플.
     반환: (raceline [M,2], el_lengths [M], kappa [M])
+
+    smooth_factor: splprep 의 s = len(nodes)*smooth_factor. 0으로 주면 노드를
+      정확히 통과(보간)한다 — 곡률이 이미 QP로 제약된 노드(IQP 결과)라면
+      추가 스무딩이 오히려 국소 곡률을 더 키울 수 있어 0이 나을 때가 있다.
     """
     N = len(reftrack)
     nodes = reftrack[:, :2] + alpha[:, None] * normvec   # [N, 2]
@@ -370,7 +396,7 @@ def build_raceline(reftrack: np.ndarray,
     # splprep (periodic, 가벼운 스무딩) → 진동 방지
     from scipy.interpolate import splprep, splev
     tck, _ = splprep([nodes[:, 0], nodes[:, 1]],
-                     s=len(nodes) * 0.002, per=True, k=3)
+                     s=len(nodes) * smooth_factor, per=True, k=3)
 
     M   = max(3, int(total / stepsize))
     u_u = np.linspace(0, 1, M, endpoint=False)
@@ -393,25 +419,16 @@ def build_raceline(reftrack: np.ndarray,
 # ══════════════════════════════════════════════════════════════════════════════
 # 6. 속도 프로파일 (전방/역방향 스윕)
 # ══════════════════════════════════════════════════════════════════════════════
-def calc_vel_profile(kappa:    np.ndarray,
-                     el:       np.ndarray,
-                     mu:       float,
-                     v_max:    float,
-                     v_min:    float,
-                     a_lon_acc: float,
-                     a_lon_brk: float) -> np.ndarray:
+def apply_accel_brake_sweep(v:        np.ndarray,
+                            el:       np.ndarray,
+                            a_lon_acc: float,
+                            a_lon_brk: float) -> np.ndarray:
     """
-    횡방향 마찰 한계 + 전/후방 종방향 가속도로 속도 프로파일 계산.
+    횡가속도 한계로 정해진 v_lat(v 초기값)에 종방향 가속·제동 한계를 적용.
+    (닫힌 트랙 기준 전/후방 스윕 — LUT 기반 속도 프로파일과 공유)
     """
-    n = len(kappa)
-    g = 9.81
-    a_lat_max = mu * g
-
-    # 횡가속도 한계: v = sqrt(a_lat_max / |κ|)
-    v_lat = np.where(kappa > 1e-4,
-                     np.sqrt(a_lat_max / kappa),
-                     v_max)
-    v = np.minimum(np.full(n, v_max), v_lat)
+    v = v.copy()
+    n = len(v)
 
     # 역방향 스윕 (제동 한계)
     for _ in range(3):
@@ -429,6 +446,30 @@ def calc_vel_profile(kappa:    np.ndarray,
             if v[j] > v_lim:
                 v[j] = v_lim
 
+    return v
+
+
+def calc_vel_profile(kappa:    np.ndarray,
+                     el:       np.ndarray,
+                     mu:       float,
+                     v_max:    float,
+                     v_min:    float,
+                     a_lon_acc: float,
+                     a_lon_brk: float) -> np.ndarray:
+    """
+    횡방향 마찰 한계(상수 mu 원) + 전/후방 종방향 가속도로 속도 프로파일 계산.
+    """
+    n = len(kappa)
+    g = 9.81
+    a_lat_max = mu * g
+
+    # 횡가속도 한계: v = sqrt(a_lat_max / |κ|)
+    v_lat = np.where(kappa > 1e-4,
+                     np.sqrt(a_lat_max / kappa),
+                     v_max)
+    v = np.minimum(np.full(n, v_max), v_lat)
+
+    v = apply_accel_brake_sweep(v, el, a_lon_acc, a_lon_brk)
     v = np.clip(v, v_min, v_max)
     lap_t = float(np.sum(el / np.maximum(v, 0.01)))
     print(f'  속도: {v.min():.2f}~{v.max():.2f} m/s  예상 랩타임={lap_t:.1f}s')
