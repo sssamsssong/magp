@@ -867,7 +867,7 @@ joystick:
   axis_speed:        5           # 속도 축 (RT 트리거, F710 X 모드)
   btn_reverse:       5           # 후진 전환 버튼 (RB — 누른 채 RT → 후진)
   btn_toggle:        4           # 수동↔자율 토글 버튼 (LB)
-  steer_invert:      true        # 조향 좌우 반전
+  steer_invert:      false       # 조향 좌우 반전
   speed_invert:      false       # 전진/후진 반전 (RT 방향)
 
   # ★ 트리거 부호 규약 — 읽는 경로에 따라 반대다!
