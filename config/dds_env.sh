@@ -19,7 +19,10 @@ _DDS_YAML="${RACE_SCRIPT:-$_DDS_DIR/../race_script.yaml}"
 _DDS_TPL="$_DDS_DIR/cyclonedds.xml.in"
 
 _dds_yaml_get () {   # $1=키경로(점 구분)  $2=기본값
-    python3 - "$_DDS_YAML" "$1" "$2" <<'PY' 2>/dev/null || echo "$3"
+    # conda base 의 python3 엔 PyYAML 이 없는 경우가 많다 → 시스템 python 우선.
+    local _py=python3
+    [ -x /usr/bin/python3 ] && _py=/usr/bin/python3
+    "$_py" - "$_DDS_YAML" "$1" "$2" <<'PY' 2>/dev/null || echo "$2"
 import sys, yaml
 path, key, default = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
@@ -44,9 +47,20 @@ setup_dds () {
         *) return 0 ;;   # 기본 FastDDS — 아무것도 안 건드림
     esac
 
-    if [ ! -e /opt/ros/humble/lib/librmw_cyclonedds_cpp.so ]; then
-        echo "[dds] ⚠ CycloneDDS 미설치 — FastDDS 로 진행합니다."
-        echo "      sudo apt install ros-humble-rmw-cyclonedds-cpp   (젯슨·노트북 양쪽 다)"
+    # Humble(젯슨) / Jazzy(노트북) 모두 지원. ROS_DISTRO 우선, 없으면 둘 다 탐색.
+    local _cyclo_lib=""
+    for _d in "${ROS_DISTRO:-}" humble jazzy; do
+        [ -n "$_d" ] || continue
+        if [ -e "/opt/ros/${_d}/lib/librmw_cyclonedds_cpp.so" ]; then
+            _cyclo_lib="/opt/ros/${_d}/lib/librmw_cyclonedds_cpp.so"
+            break
+        fi
+    done
+    if [ -z "$_cyclo_lib" ]; then
+        local _pkg="ros-${ROS_DISTRO:-jazzy}-rmw-cyclonedds-cpp"
+        echo "[dds] ⚠ CycloneDDS 미설치 — FastDDS 로 진행합니다 (젯슨과 RMW 불일치 → 통신 0)."
+        echo "      sudo apt install ${_pkg}"
+        echo "      (젯슨은 ros-humble-rmw-cyclonedds-cpp)"
         return 0
     fi
 

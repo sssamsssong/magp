@@ -7,8 +7,10 @@
 #  맵 + 레이싱라인 + 차 위치/궤적 + LiDAR + 목표점이 뜬다.
 #
 #  전제:
-#    - 노트북에 ROS 2 Humble + rviz2 설치
-#      (sudo apt install ros-humble-desktop  또는  ros-humble-rviz2)
+#    - 노트북에 ROS 2 + rviz2 설치 (Humble 또는 Jazzy)
+#      Humble: sudo apt install ros-humble-desktop  또는  ros-humble-rviz2
+#      Jazzy:  sudo apt install ros-jazzy-desktop   또는  ros-jazzy-rviz2
+#      ※ Jazzy는 RViz/원격 모니터링 용. 실차·빌드 기준은 Humble.
 #    - 노트북과 젯슨이 같은 네트워크(192.168.50.x)
 #    - 양쪽 ROS_DOMAIN_ID 동일 (기본 미설정=0). 노트북 ~/.bashrc 에서
 #      ROS_DOMAIN_ID 를 바꿔놨다면 젯슨과 같은 값으로 맞출 것.
@@ -27,7 +29,32 @@ set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG="$DIR/config/race.rviz"
 
-source /opt/ros/humble/setup.bash
+# 설치된 ROS 2 배포판 자동 선택 (노트북 Jazzy / 팀원·젯슨 Humble)
+if [ -n "${ROS_DISTRO:-}" ] && [ -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]; then
+    source "/opt/ros/${ROS_DISTRO}/setup.bash"
+elif [ -f /opt/ros/humble/setup.bash ]; then
+    source /opt/ros/humble/setup.bash
+elif [ -f /opt/ros/jazzy/setup.bash ]; then
+    source /opt/ros/jazzy/setup.bash
+else
+    echo "[ERROR] ROS 2 Humble 또는 Jazzy를 찾을 수 없습니다."
+    exit 1
+fi
+
+echo "[INFO] ROS_DISTRO=${ROS_DISTRO}"
+case "${ROS_DISTRO}" in
+    humble)
+        echo "[INFO] Humble 환경: RViz 및 원격 모니터링"
+        ;;
+    jazzy)
+        echo "[WARNING] Jazzy 환경: RViz 및 원격 모니터링 용도로만 사용"
+        echo "          실차 실행·빌드 기준은 Humble입니다."
+        ;;
+    *)
+        echo "[ERROR] 지원하지 않는 ROS 배포판: ${ROS_DISTRO}"
+        exit 1
+        ;;
+esac
 
 # DDS 설정 — 젯슨의 race.sh 와 같은 파일을 읽어 양쪽 미들웨어를 일치시킨다.
 # (RMW 가 한쪽만 다르면 토픽이 하나도 안 보인다)
@@ -60,7 +87,7 @@ if [ -n "${SSH_CONNECTION:-}" ]; then
 fi
 
 if ! command -v rviz2 >/dev/null 2>&1; then
-    echo "✗ rviz2 가 없습니다.  sudo apt install ros-humble-rviz2"
+    echo "✗ rviz2 가 없습니다.  sudo apt install ros-${ROS_DISTRO}-rviz2"
     exit 1
 fi
 [ -f "$CFG" ] || { echo "✗ RViz 설정 없음: $CFG (repo 최신화 필요: git pull)"; exit 1; }
