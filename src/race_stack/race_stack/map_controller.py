@@ -370,6 +370,18 @@ class MapController(Node):
             f"| 예상 랩 {info['lap_time']:.1f}s"
             + (f" | ⚠ hard_cap 에 걸린 구간 {100*info['capped']:.0f}%"
                if info['capped'] > 0.01 else ''))
+
+        # ★ 조향 쪽 유효값도 같이 찍는다 (2026-08-09).
+        #   yaml → launch → declare_parameter 3단 폴백이라, 코드에 적힌 기본값을
+        #   보고 "지금 이 값이겠거니" 하고 오해하기 쉽다. 실제로 map_controller 의
+        #   declare_parameter(slip_gain, 1.0) 을 보고 1.0 이 걸린 줄 안 적이 있다.
+        #   **적용된 값은 여기서 확인할 것.** 오늘만 이 종류 함정이 다섯 번 나왔다.
+        a = float(self.p('steer_alpha'))
+        tau = -0.02 / math.log(a) if 0.0 < a < 1.0 else 0.0
+        self.get_logger().info(
+            f"  조향 l1={self.p('l1_min'):.3f}+{self.p('l1_k'):.3f}·v  "
+            f"alpha={a:.3f}(τ{tau*1000:.0f}ms)  slip_gain={self.p('slip_gain'):.2f}  "
+            f"speed_lag={self.p('speed_lag'):.2f}s  max_steer={self.p('max_steer'):.3f}")
         return v
 
     def _profile_speed(self, near, v):
