@@ -117,6 +117,14 @@ class AutoLocalize(Node):
         self.create_subscription(Odometry, str(gp('odom_topic')), self._odom_cb, 10)
         self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose',
                                  self._amcl_cb, 10)
+        # ★ 사람이 RViz 에서 "2D Pose Estimate" 를 찍었으면 **양보한다**.
+        #   2026-08-09 실차: 자동 정렬이 자꾸 어긋나 사람이 손으로 찍어뒀는데,
+        #   이 노드가 startup_delay 뒤에 자기 결과를 덮어써서 **반드시 점프**가
+        #   났다. 정지 상태인지만 봤지 "이미 사람이 정해줬는지" 는 안 봤다.
+        #   우리가 쏜 것과 구분하려고 발행 직후 0.5s 는 무시한다.
+        self._self_pub_t = -1e9
+        self.create_subscription(PoseWithCovarianceStamped, '/initialpose',
+                                 self._manual_cb, 10)
         self.create_timer(float(gp('startup_delay')), self._try)
 
         self.get_logger().info(
@@ -208,6 +216,18 @@ class AutoLocalize(Node):
                 f'⚠ AMCL 이 **벽 안쪽**을 가리킵니다 ({x:+.2f},{y:+.2f}) — '
                 '물리적으로 불가능한 추정입니다. 위치추정이 깨진 상태입니다',
                 throttle_duration_sec=1.0)
+
+    def _manual_cb(self, msg: PoseWithCovarianceStamped):
+        import time as _t
+        if _t.time() - self._self_pub_t < 0.5:
+            return                      # 우리가 쏜 것
+        if self.done:
+            return
+        self.done = True
+        self.get_logger().warn(
+            f'수동 /initialpose 수신 ({msg.pose.pose.position.x:+.2f}, '
+            f'{msg.pose.pose.position.y:+.2f}) — 자동 정렬을 **건너뜁니다**. '
+            f'다시 자동으로 맞추려면 /race/relocalize 에 true 를 쏘세요.')
 
     def _redo_cb(self, msg: Bool):
         if msg.data:
@@ -433,6 +453,34 @@ class AutoLocalize(Node):
                 '차가 출발선 근처에 있는지, 맵이 맞는지 확인하세요. '
                 '(그래도 init_pose 보다는 나으므로 발행은 합니다)')
 
+        # ── 이 해가 얼마나 뾰족한가 (2026-08-09) ────────────────────────
+        # 직선 복도에서는 **복도를 따라가는 방향으로 비용이 평평하다**
+        # (aperture problem). 그러면 격자가 그 방향으로는 사실상 아무 데나
+        # 고르고, 실행할 때마다 다른 답이 나온다 — "될 때도 있고 안 될 때도
+        # 있다" 의 정체다. 평균오차만 보면 그 상태가 안 보이므로 따로 알린다.
+        cb, sb = math.cos(bth), math.sin(bth)
+        wx = cb * px - sb * py + bx
+        wy = sb * px + cb * py + by
+        def cost(ddx, ddy):
+            ix = ((wx + ddx - self.ox) / self.res).astype(np.int32)
+            iy = (self.H - (wy + ddy - self.oy) / self.res).astype(np.int32)
+            v = (ix >= 0) & (ix < self.W) & (iy >= 0) & (iy < self.H)
+            d = self.dist[np.clip(iy, 0, self.H-1), np.clip(ix, 0, self.W-1)]
+            return float(np.where(v, d, 3.0).mean())
+        probe = 0.20                       # ±20cm 흔들어 본다
+        along = (cost(cb*probe, sb*probe) + cost(-cb*probe, -sb*probe)) / 2 - fit
+        cross = (cost(-sb*probe, cb*probe) + cost(sb*probe, -cb*probe)) / 2 - fit
+        self.get_logger().info(
+            f'해의 뾰족함 (±{probe*100:.0f}cm 흔들 때 오차 증가): '
+            f'진행방향 {along*100:+.2f}cm / 옆방향 {cross*100:+.2f}cm')
+        if along < 0.02:
+            self.get_logger().warn(
+                f'⚠ **진행방향으로 비용이 평평하다** (증가 {along*100:.2f}cm). '
+                f'직선 복도라 그 방향 위치가 관측되지 않는다 — 이 정렬은 앞뒤로 '
+                f'수십 cm 틀릴 수 있고 실행할 때마다 답이 달라진다. '
+                f'출발 위치를 코너가 보이는 쪽으로 옮기거나, RViz 2D Pose '
+                f'Estimate 로 직접 찍을 것(찍으면 이 노드는 양보한다).')
+
         msg = PoseWithCovarianceStamped()
         msg.header.frame_id = 'map'
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -446,6 +494,8 @@ class AutoLocalize(Node):
         cov[0] = cov[7] = (2.0 * float(gp('step_xy'))) ** 2
         cov[35] = (2.0 * math.radians(float(gp('step_yaw_deg')))) ** 2
         msg.pose.covariance = cov
+        import time as _t
+        self._self_pub_t = _t.time()
         self.pub.publish(msg)
         self.fit_pub.publish(Float32(data=float(fit)))
         self.get_logger().info('/initialpose 발행 — AMCL 이 이 자리로 재시드합니다')
