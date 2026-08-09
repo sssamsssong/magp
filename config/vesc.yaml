@@ -9,7 +9,15 @@
     #   줄자 측정으로 독립 검증했다. 6회 산포가 작았다.
     #   ※ 이 값을 바꾸면 speed_scale(=0.911) 을 쓰던 곳은 전부 1.0 으로
     #     되돌려야 한다 — 안 그러면 이중 보정된다.
-    speed_to_erpm_gain: 4203.0    # 구 4614.0 (2026-08-09 이전)
+    # ★ 2026-08-09 (2호차): 부호를 반전했다 — 이 차는 모터 결선이 1호차와 반대라
+    #   양수 speed 지령이 **후진**이었다. 자율 노드(map_controller/steer_trim)가
+    #   전부 뒤로 갔고, vesc_to_odom 도 같은 게인을 쓰므로 물리적 전진을 "후진"으로
+    #   보고해 SLAM 맵이 통째로 깨졌다(방사형 부채꼴).
+    #   조이스틱만 joystick.speed_invert:true 로 덮여 있어 정상처럼 보였다 —
+    #   그 야매 보정은 이 수정과 함께 false 로 되돌렸다(이중 반전 방지).
+    #   ※ 1호차는 +4203 이 맞다. 차량별 값이므로 main 에 올리지 말 것.
+    speed_to_erpm_gain: -4203.0   # 크기는 1호차 실측 그대로, 부호만 2호차용
+
     speed_to_erpm_offset: 0.0
 
     # servo value (0 to 1) =  steering_angle_to_servo_gain * steering angle (radians) + steering_angle_to_servo_offset
