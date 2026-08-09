@@ -26,13 +26,21 @@ import osqp
 import scipy.sparse as sp
 
 _PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# ★ 차량 최소회전반경 [m] — 라인이 아무리 빨라도 못 도는 건 소용없다.
+#   R = wheelbase / tan((servo_min − offset) / (−gain))   ← config/vesc.yaml
+#   2026-08-09: 0.324 / tan((0.12 − 0.3954)/(−0.761)) = 0.856 m (좌회전 기준).
+#   조향이 좌우 비대칭이고 halfhot 은 전 구간 좌회전이라 좌측이 한계다.
+#   vesc.yaml 의 servo_min/offset/gain 을 바꾸면 **이 값도 같이 고쳐야 한다.**
+R_CAR_MIN = 0.856
 MAPS_DIR = os.path.join(_PKG_DIR, 'maps')
 WP_DIR   = os.path.join(_PKG_DIR, 'waypoints')
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. 맵 → 트랙 경계 추출
 # ══════════════════════════════════════════════════════════════════════════════
-def extract_reftrack(map_name: str, safety_m: float, n_cl: int = 300) -> np.ndarray:
+def extract_reftrack(map_name: str, safety_m: float, n_cl: int = 300,
+                     return_bounds: bool = False):
     """
     pgm 맵에서 centerline + 트랙 폭을 추출한다.
     반환: [N, 4] = [x, y, w_right, w_left] (미터)
@@ -123,13 +131,21 @@ def extract_reftrack(map_name: str, safety_m: float, n_cl: int = 300) -> np.ndar
     d_i, _ = tree_inner.query(cl)
 
     # 안전 마진 적용 후 최소 폭 보장
-    min_w = 0.20  # 물리 최솟값
+    # ★ 이 하한은 작아야 한다 (2026-08-09). 0.20 이면 실제로 0.12m 밖에 없는
+    #   병목에서 QP 가 0.20m 를 쓸 수 있다고 착각해 벽 쪽으로 8cm 더 나간다.
+    #   없는 폭을 만들어내면 안 된다 — 좁으면 좁은 대로 보여야 α 가 0 이 된다.
+    min_w = 0.02
     w_right = np.maximum(d_o - safety_m, min_w)
     w_left  = np.maximum(d_i - safety_m, min_w)
 
     reftrack = np.column_stack([cl, w_right, w_left])
     print(f'  트랙 추출: {n_cl}pts  길이≈{np.sum(np.linalg.norm(np.diff(cl, axis=0), axis=1)):.1f}m')
     print(f'  폭: right {d_o.min():.2f}~{d_o.max():.2f}m  left {d_i.min():.2f}~{d_i.max():.2f}m')
+    if return_bounds:
+        # 반복 최적화가 매 스텝 폭을 **경계에서 다시 재려면** 이게 필요하다.
+        # α 를 더해 빼는 근사(w_right−α)만 쓰면 반복하며 오차가 누적돼
+        # 라인이 조용히 트랙 밖으로 샌다.
+        return reftrack, outer_w, inner_w
     return reftrack
 
 
@@ -233,7 +249,9 @@ def opt_min_curv(reftrack: np.ndarray,
                  normvec:  np.ndarray,
                  M_spl:   np.ndarray,
                  w_veh:   float,
-                 r_min:   float = 0.9) -> np.ndarray:
+                 r_min:   float = 0.9,
+                 alpha_max: float = 0.0,
+                 quiet:   bool = False) -> np.ndarray:
     """
     최소 곡률 경로 최적화 (OSQP QP 풀이).
 
@@ -323,6 +341,14 @@ def opt_min_curv(reftrack: np.ndarray,
     dev_right = np.maximum(dev_right, 0.01)
     dev_left  = np.maximum(dev_left,  0.01)
 
+    # ★ 신뢰영역 — E 는 '노드를 α 만큼 밀어도 호길이는 그대로'라는 1차 전개다.
+    #   |α| 가 격자 간격에 근접하면 그 가정이 무너져 **모델이 실제 곡률과
+    #   완전히 어긋난다** (2026-08-09 실측: QP 는 R=0.90 이라는데 그 노드를
+    #   정확히 통과시키면 R=0.12 였다). 한 번에 조금만 움직이고 재선형화한다.
+    if alpha_max and alpha_max > 0:
+        dev_right = np.minimum(dev_right, alpha_max)
+        dev_left  = np.minimum(dev_left,  alpha_max)
+
     # OSQP: min ½ x'Px + q'x  s.t. l ≤ Ax ≤ u
     # 제약 1: 트랙 폭  -dev_left ≤ α ≤ dev_right
     # 제약 2: R_min   |κ_ref + E·α| ≤ 1/r_min
@@ -355,8 +381,9 @@ def opt_min_curv(reftrack: np.ndarray,
 
     # 곡률 개선 확인
     kappa_new = kappa_ref + E @ alpha
-    print(f'  참조선 |κ|_max={np.abs(kappa_ref).max():.4f}  '
-          f'레이싱라인 |κ|_max={np.abs(kappa_new).max():.4f} 1/m')
+    if not quiet:
+        print(f'  참조선 |κ|_max={np.abs(kappa_ref).max():.4f}  '
+              f'레이싱라인 |κ|_max={np.abs(kappa_new).max():.4f} 1/m')
     return alpha
 
 
@@ -367,9 +394,12 @@ def build_raceline(reftrack: np.ndarray,
                    normvec:  np.ndarray,
                    alpha:    np.ndarray,
                    stepsize: float = 0.1) -> tuple:
-    """
-    α 오프셋을 적용한 레이싱라인을 생성하고 splprep B-스플라인으로 균일 리샘플.
-    반환: (raceline [M,2], el_lengths [M], kappa [M])
+    """⚠ 폐기됨 (2026-08-09). eval_spline_dense 를 쓸 것.
+
+    splprep 로 노드를 **근사**하는 별개의 곡선을 만들기 때문에, QP 가 최적화한
+    곡선과 다르다. r_min 을 0.9/1.0/1.1 로 바꿔도 출력 R 이 0.803/0.813/0.813 로
+    거의 변하지 않았다 — 최종 라인을 QP 가 아니라 스무더가 정하고 있었다.
+    호출부는 남아 있지 않지만, 같은 실수를 다시 하지 않도록 이유와 함께 남긴다.
     """
     N = len(reftrack)
     nodes = reftrack[:, :2] + alpha[:, None] * normvec   # [N, 2]
@@ -397,6 +427,130 @@ def build_raceline(reftrack: np.ndarray,
 
     print(f'  레이싱라인: {M}pts  길이={total:.1f}m  |κ|_max={kappa.max():.4f} 1/m')
     return rl, el, kappa
+
+
+
+def eval_spline_dense(nodes: np.ndarray, stepsize: float, n_sub: int = 40):
+    """노드를 **정확히 통과하는** 닫힌 3차 스플라인을 조밀 평가해 균일 리샘플.
+
+    ★ 왜 splprep 스무딩을 안 쓰나 (2026-08-09) ────────────────────────────
+    예전 build_raceline 은 `splprep(..., s=N*0.002)` 로 노드를 **근사**하는 별개의
+    곡선을 새로 만들었다. QP 가 최적화한 곡선(calc_splines 의 보간 스플라인)과
+    다른 곡선이라, r_min 을 아무리 조여도 출력 곡률이 따라오지 않았다:
+
+        r_min 0.9 → 출력 R 0.803 / r_min 1.0 → 0.813 / r_min 1.1 → 0.813
+
+    즉 최종 라인은 QP 가 아니라 **스무더가** 정하고 있었다. 최적화한 것과
+    주행하는 것이 달랐다. 여기서는 calc_splines 를 그대로 써서 둘을 일치시킨다.
+    """
+    closed = np.vstack([nodes, nodes[0]])
+    cx, cy, _, _ = calc_splines(closed)
+    N = len(nodes)
+
+    t = np.linspace(0.0, 1.0, n_sub, endpoint=False)
+    P  = np.array([np.ones_like(t), t, t**2, t**3])          # [4, n_sub]
+    D1 = np.array([np.zeros_like(t), np.ones_like(t), 2*t, 3*t**2])
+    D2 = np.array([np.zeros_like(t), np.zeros_like(t), 2*np.ones_like(t), 6*t])
+
+    x   = (cx @ P ).ravel();  y   = (cy @ P ).ravel()
+    dx  = (cx @ D1).ravel();  dy  = (cy @ D1).ravel()
+    ddx = (cx @ D2).ravel();  ddy = (cy @ D2).ravel()
+
+    # 곡률은 매개변수화에 무관한 식이라 t 로 미분해도 그대로 쓸 수 있다
+    kap = np.abs(dx * ddy - dy * ddx) / np.maximum((dx**2 + dy**2) ** 1.5, 1e-9)
+
+    pts = np.column_stack([x, y])
+    seg = np.linalg.norm(np.diff(np.vstack([pts, pts[0]]), axis=0), axis=1)
+    s_c = np.concatenate([[0.0], np.cumsum(seg)])            # [n+1]
+    total = float(s_c[-1])
+
+    M = max(3, int(total / stepsize))
+    s_new = np.linspace(0.0, total, M, endpoint=False)
+    xi = np.interp(s_new, s_c, np.append(x, x[0]))
+    yi = np.interp(s_new, s_c, np.append(y, y[0]))
+    ki = np.interp(s_new, s_c, np.append(kap, kap[0]))
+
+    rl = np.column_stack([xi, yi])
+    el = np.linalg.norm(np.diff(np.vstack([rl, rl[0]]), axis=0), axis=1)
+    return rl, el, ki, total
+
+
+def track_widths(line: np.ndarray, outer: np.ndarray, inner: np.ndarray,
+                 safety_m: float, min_w: float = 0.05):
+    """임의의 라인에서 좌우 트랙 폭을 **경계에서 다시 잰다**.
+
+    반복 최적화가 매 스텝 라인을 옮기므로, 폭을 α 로 더하고 빼는 근사만 쓰면
+    오차가 누적돼 라인이 조용히 트랙 밖으로 샌다. 매번 실측하면 그 경로가 없다.
+    right = outer(바깥 경계), left = inner — 중심선이 CCW 라 바깥이 오른쪽이다.
+    """
+    d_o, _ = cKDTree(outer).query(line)
+    d_i, _ = cKDTree(inner).query(line)
+    return (np.maximum(d_o - safety_m, min_w),
+            np.maximum(d_i - safety_m, min_w))
+
+
+def optimize_raceline(reftrack, outer, inner, *, w_veh, r_min, stepsize,
+                      out_step, safety_m, iters=12, step_limit=0.15,
+                      wall_clear=0.06, tol=0.995):
+    """재선형화 반복 최소곡률 최적화 (TUMFTM iqp 에 해당).
+
+    ★ 한 번만 푸는 게 왜 안 되나 ─────────────────────────────────────────
+    E 는 "노드를 α 만큼 밀어도 **호길이는 그대로**"라는 1차 전개다. 한 방에 풀면
+    |α| 가 격자 간격(0.5m)을 넘어(실측 0.815m) 그 가정이 완전히 깨진다.
+    그때 QP 는 자기 모델에서 R=0.900 을 만족한다고 보고하지만, 그 노드를 정확히
+    통과시킨 실제 곡선은 R=0.117 이었다 — 8배 차이. 모델과 기하가 따로 논다.
+
+    그래서 한 번에 step_limit 만큼만 움직이고, 옮긴 라인을 **새 기준선으로 삼아**
+    스플라인·법선·폭을 다시 계산한 뒤 또 푼다. 매 스텝 α 가 작으니 선형화가 유효하다.
+    """
+    ref = reftrack.copy()
+    best = None
+    for it in range(iters):
+        ru = interp_track(ref, stepsize)
+        path_cl = np.vstack([ru[:, :2], ru[0, :2]])
+        _, _, M_spl, nv = calc_splines(path_cl)
+
+        alpha = opt_min_curv(ru, nv, M_spl, w_veh=w_veh, r_min=r_min,
+                             alpha_max=step_limit, quiet=True)
+        if not np.all(np.isfinite(alpha)):
+            print(f'  iter {it:2d}: QP 해가 유효하지 않다 — 중단')
+            break
+
+        nodes = ru[:, :2] + alpha[:, None] * nv
+        rl, el, kap, total = eval_spline_dense(nodes, out_step)
+        r_act = 1.0 / float(np.abs(kap).max())
+
+        # 트랙 이탈 검사 — 경계까지의 **생거리**로 잰다.
+        # ★ safety_m 을 빼면 안 된다: QP 의 dev 는 이미 (폭 − safety − w_veh/2) 라
+        #   여기서 또 빼면 이중 차감이 된다. 실제로 그렇게 했더니 중심선조차
+        #   탈락해 "해를 못 찾았다"가 나왔다 (이 트랙은 최협 반폭이 0.27m 다).
+        #   합격 조건은 물리 조건 하나 — 차가 들어가는가.
+        d_o, d_i = track_widths(rl, outer, inner, safety_m=0.0, min_w=0.0)
+        clear = float(min(d_o.min(), d_i.min())) - w_veh / 2.0
+
+        print(f'  iter {it:2d}: |α|max={np.abs(alpha).max():.3f}  '
+              f'R_act={r_act:.3f} m  길이={total:.2f}m  차폭여유={clear:+.3f}m')
+
+        # ★ 곡률만 보고 고르면 안 된다. 반복이 진행될수록 라인은 코너를 더
+        #   파고들어 R 은 좋아지지만 **벽에 붙는다.** 이 트랙은 중심선조차 차폭
+        #   여유가 0.112m 뿐이라 여유가 곧 사라진다. 실제로 완주한 라인
+        #   (halfhot_forza_opt_wp)의 여유가 0.060m 였으므로 그 이상을 요구한다.
+        if clear >= wall_clear and (best is None or r_act > best[0]):
+            best = (r_act, nodes.copy(), rl, el, kap, total, clear)
+
+        # 다음 반복의 기준선 = 방금 옮긴 라인 (폭은 경계에서 다시 잰다)
+        w_r2, w_l2 = track_widths(nodes, outer, inner, safety_m)
+        ref = np.column_stack([nodes, w_r2, w_l2])
+
+        if np.abs(alpha).max() < 1e-3:
+            print(f'  iter {it:2d}: α 수렴 — 종료')
+            break
+
+    if best is None:
+        raise RuntimeError(
+            f'optimize_raceline: 벽 여유 {wall_clear:.3f}m 를 만족하는 해가 없다. '
+            f'--wallclear 를 낮추거나 --safety 를 줄일 것')
+    return best
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -688,7 +842,16 @@ def main():
     p.add_argument('--acc',    type=float, default=5.0,  help='가속도 (m/s²)')
     p.add_argument('--brk',    type=float, default=8.0,  help='제동 (m/s²)')
     p.add_argument('--step',   type=float, default=0.1,  help='웨이포인트 간격 (m)')
-    p.add_argument('--rmin',   type=float, default=0.9,  help='최소 회전반경 (m) — QP 곡률 상한 제약')
+    p.add_argument('--rmin',   type=float, default=1.0,
+                   help='최소 회전반경 (m). 차량 한계 0.856m 보다 크게 —'
+                        ' 여유가 없으면 AMCL 오차·조향 지연을 흡수 못 한다')
+    p.add_argument('--gridstep', type=float, default=0.5,
+                   help='QP 격자 간격 (m). |α| 가 이 값에 근접하면 선형화가 깨진다')
+    p.add_argument('--steplimit', type=float, default=0.15,
+                   help='반복 1회당 최대 횡이동 (m) — 신뢰영역')
+    p.add_argument('--iters',  type=int, default=12, help='재선형화 반복 횟수')
+    p.add_argument('--wallclear', type=float, default=0.06,
+                   help='벽까지 최소 여유 (m, 차폭 제외). 실주행 검증된 라인이 0.060')
     p.add_argument('--gui',   action='store_true',       help='클릭 GUI 드로잉 모드')
     p.add_argument('--out',   default=None,              help='출력 웨이포인트 이름 (기본: {map}_map_wp 또는 {map}_draw_wp)')
     args = p.parse_args()
@@ -723,7 +886,17 @@ def main():
             return
         raceline, el, kappa, v = result
 
-        print(f'\n속도: {v.min():.2f}~{v.max():.2f} m/s')
+        # ★ 손으로 그린 경로도 차량 기하를 만족해야 한다. TUMFTM 경로와 같은 검사다 —
+        #   여기 빠뜨리면 "그렸으니 되겠지" 하고 못 도는 라인이 그대로 나간다.
+        r_act = 1.0 / float(np.abs(kappa).max())
+        print(f'\nR_min = {r_act:.3f} m  (차량 한계 {R_CAR_MIN:.3f} m)', end='')
+        n_bad = int(np.sum(kappa > 1.0 / R_CAR_MIN))
+        if n_bad:
+            print(f'\n  ★★ 차량이 못 도는 점 {n_bad}/{len(kappa)}개 — 헤어핀을 더 크게 그릴 것')
+        else:
+            print(f'  여유 {r_act - R_CAR_MIN:+.3f} m ✓')
+
+        print(f'속도: {v.min():.2f}~{v.max():.2f} m/s')
 
         # 저장
         with open(wp_path, 'w', newline='') as f:
@@ -745,40 +918,39 @@ def main():
     print(f'\n맵: {map_name}  vmax={args.vmax}  wveh={args.wveh}  safety={args.safety}')
 
     print('\n[1] 트랙 경계 추출...')
-    reftrack = extract_reftrack(map_name, safety_m=args.safety)
+    reftrack, outer_w, inner_w = extract_reftrack(
+        map_name, safety_m=args.safety, return_bounds=True)
 
-    print(f'\n[2] 균일 리샘플 (0.5m 간격 — QP 격자)...')
-    reftrack_u = interp_track(reftrack, stepsize=0.5)
-    N = len(reftrack_u)
-    print(f'  {N}pts')
+    print(f'\n[2~4] 재선형화 반복 최소곡률 최적화 '
+          f'(격자 {args.gridstep}m, 스텝한계 {args.steplimit}m, 최대 {args.iters}회)...')
+    r_act, nodes, raceline, el, kappa, total, wclear = optimize_raceline(
+        reftrack, outer_w, inner_w,
+        w_veh=args.wveh, r_min=args.rmin,
+        stepsize=args.gridstep, out_step=args.step,
+        safety_m=args.safety, iters=args.iters, step_limit=args.steplimit,
+        wall_clear=args.wallclear)
 
-    print('\n[3] 3차 스플라인 피팅...')
-    path_cl = np.vstack([reftrack_u[:, :2], reftrack_u[0, :2]])
-    coeffs_x, coeffs_y, M_spl, normvec = calc_splines(path_cl)
-
-    print('\n[4] 최소 곡률 QP (OSQP) + R_min 수렴 반복...')
-    # QP 격자(0.5m)와 출력 격자(0.1m)의 해상도 차이, 선형화 오차, splprep 스무딩으로
-    # QP 제약을 만족해도 최종 경로 곡률이 목표를 초과할 수 있다.
-    # → build_raceline 까지 돌린 실제 κ_max 를 보고 r_eff 를 조여 재풀이한다.
-    r_eff = args.rmin
-    for _iter in range(6):
-        alpha = opt_min_curv(reftrack_u, normvec, M_spl, w_veh=args.wveh,
-                             r_min=r_eff)
-        raceline, el, kappa = build_raceline(reftrack_u, normvec, alpha,
-                                             stepsize=args.step)
-        r_act = 1.0 / float(np.abs(kappa).max())
-        print(f'  iter {_iter}: r_eff={r_eff:.3f}  R_act={r_act:.3f} m  '
-              f'|κ|_max={1/r_act:.4f}')
-        if r_act >= args.rmin * 0.995:
-            break
-        r_eff *= r_act / args.rmin
-    r_act = 1.0 / float(np.abs(kappa).max())
+    print(f'\n[5] 결과: {len(raceline)}pts  길이={total:.2f}m  '
+          f'|κ|_max={1/r_act:.4f} 1/m')
     print(f'  최종 R_min = {r_act:.3f} m  (목표 {args.rmin} m)', end='')
     if r_act < args.rmin * 0.995:
-        print(f'  ⚠ 목표 미달 — 트랙 여유 부족 또는 반복 한계 초과')
+        print('  ⚠ 목표 미달 — 트랙 여유 부족 또는 반복 한계')
     else:
         print('  ✓')
-    print(f'  α: [{alpha.min():.3f}, {alpha.max():.3f}] m')
+    print(f'  벽 여유 (차폭 제외) {wclear:+.3f} m  '
+          f'(요구 {args.wallclear:.3f} / 실주행 검증된 라인 0.060)')
+
+    # ★ 차량 기하와 직접 대조한다. 라인이 아무리 빨라도 못 도는 건 소용없다.
+    #   R_min(차량) = wheelbase / tan((servo_min − offset)/(−gain))  ← config/vesc.yaml
+    #   2026-08-09 기준 좌회전 0.856m (servo_min 0.12, offset 0.3954, gain −0.761).
+    #   실제로 08/09 주행에서 R 0.91m 라인의 헤어핀에서 라인 밖으로 0.39m 밀렸다.
+    R_CAR = R_CAR_MIN
+    n_bad = int(np.sum(kappa > 1.0 / R_CAR))
+    if n_bad:
+        print(f'  ★★ 차량 최소회전반경({R_CAR:.3f}m)을 넘는 점이 {n_bad}/{len(kappa)}개 '
+              f'— 이 라인은 못 돈다. --rmin 을 올려 다시 생성할 것')
+    else:
+        print(f'  차량 최소회전반경 {R_CAR:.3f}m 대비 여유 {r_act - R_CAR:+.3f}m ✓')
 
     print('\n[6] 속도 프로파일...')
     v = calc_vel_profile(kappa, el,
