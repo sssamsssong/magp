@@ -13,6 +13,9 @@
 #    ./race.sh box [모드]      ★ 박스 위 벤치 테스트 — 바퀴를 돌리지 않는다.
 #                              실주행과 동일한 스택(맵/AMCL/LiDAR/컨트롤러)을 띄우되
 #                              속도만 0. 토픽 통신·RViz 표시·조향 서보 확인용.
+#    ./race.sh <모드> --bag    ★ 주행 중 원시 토픽을 bag 으로 녹화 (분당 약 9MB)
+#                              /scan · odom · IMU · pose · drive. 사후 분석용.
+#                              logs/bags/<시각>_<모드>_<컨트롤러>/ 에 쌓인다
 #    ./race.sh check           토픽이 실제로 발행 중인지 표로 확인 (주행 중 별도 터미널)
 #    ./race.sh stop            돌고 있는 스택 전부 정리
 #    ./race.sh savemap <이름>  맵핑 끝난 뒤 맵 저장
@@ -102,6 +105,22 @@ fi
 
 # ---------- 2. 모드 결정 ----------
 export RACE_SCRIPT   # launch 파일이 이 env로 yaml 경로를 읽음
+# ---------- --bag: 주행 중 원시 토픽 녹화 ----------
+# 위치 인자($2=컨트롤러)와 섞이지 않게 **먼저** 걸러낸다.
+#   ./race.sh q1 map --bag   ./race.sh q1 --bag   둘 다 된다.
+# 왜 필요한가: driven_path.csv 에는 컨트롤러가 이미 해석한 값만 남는다.
+# /scan 원시 데이터가 없으면 deskew·AMCL·ICP 같은 앞단 문제를 사후에 못 판정한다
+# (2026-08-09: 고속 deskew 를 켤지 정하려는데 고속 주행 bag 이 하나도 없었다).
+RECORD_BAG=0
+_args=()
+for _a in "$@"; do
+    case "$_a" in
+        --bag) RECORD_BAG=1 ;;
+        *) _args+=("$_a") ;;
+    esac
+done
+set -- "${_args[@]}"
+
 CMD=${1:-}
 get_yaml () { python3 -c "
 import yaml,sys
@@ -469,6 +488,28 @@ elif [ "$MODE" = "mapping-joy" ]; then
         -p steer_deadzone:="$STEER_DZ" \
         -p arm_on_neutral:="$ARM" \
         -p debug:="$JOY_DBG"
+elif [ "$RECORD_BAG" = "1" ]; then
+    # ★ exec 를 쓰면 안 된다 — 셸이 교체돼 trap 이 안 걸리고 bag 이 안 닫힌다
+    #   (rosbag2 는 SIGINT 를 받아야 메타데이터를 쓴다. 그냥 죽이면 db3 만 남아
+    #    읽을 수 없다).
+    BAG_DIR="$SCRIPT_DIR/logs/bags/$(date +%Y%m%d_%H%M%S)_${MODE}_${CTRL:-auto}"
+    mkdir -p "$(dirname "$BAG_DIR")"
+    echo "[race.sh] ★ bag 녹화: $BAG_DIR"
+    echo "[race.sh]   /scan 이 1081빔 33.5Hz 라 분당 약 9MB 쌓입니다."
+    ros2 bag record -o "$BAG_DIR" \
+        /scan /odom /odom_imu /amcl_pose /drive /sensors/imu/raw \
+        /commands/servo/position /race/enabled >/dev/null 2>&1 &
+    BAG_PID=$!
+    # SIGINT 로 곱게 닫고, 안 죽으면 3초 뒤 강제 종료
+    trap 'kill -INT $BAG_PID 2>/dev/null; ( sleep 3; kill -9 $BAG_PID 2>/dev/null ) & wait $BAG_PID 2>/dev/null' EXIT INT TERM
+
+    ros2 launch race_stack race.launch.py mode:=$MODE \
+        ${CTRL:+controller:=$CTRL} ${BENCH:+bench:=true} || true
+
+    kill -INT $BAG_PID 2>/dev/null || true
+    wait $BAG_PID 2>/dev/null || true
+    echo "[race.sh] bag 저장 완료: $BAG_DIR  ($(du -sh "$BAG_DIR" 2>/dev/null | cut -f1))"
+    echo "[race.sh]   ※ logs/ 는 .gitignore 다 — 공유하려면 따로 옮길 것"
 else
     exec ros2 launch race_stack race.launch.py mode:=$MODE \
         ${CTRL:+controller:=$CTRL} ${BENCH:+bench:=true}
