@@ -37,21 +37,6 @@ def generate_launch_description():
     # sys.argv를 직접 파싱한다 (LaunchConfiguration은 파이썬 로직에서 못 씀)
     import sys
     mode = cfg['mode']
-    # ── 속도 프로파일 공통 설정 (2026-08-09) ───────────────────────────
-    #  grip_util 은 컨트롤러 셋(map/stanley/gap_follower)이 **공유**한다.
-    #  모드별로 위험도를 다르게 두고 싶으면 limits.grip_util.<mode> 로 준다 —
-    #  q*_max 같은 평평한 상한 대신 **마찰 예산 사용률**로 표현하는 것이 물리적이다.
-    _lim = cfg.get('limits', {})
-    _mp0 = cfg.get('map', {})
-    _gu  = _lim.get('grip_util', 0.6)
-    grip_util = float(_gu.get(mode, _gu.get('default', 0.6))
-                      if isinstance(_gu, dict) else _gu)
-    a_lon_acc = float(_lim.get('a_lon_acc', 0.0))
-    a_lon_brk = float(_lim.get('a_lon_brk', 0.0))
-    hard_cap  = float(cfg.get('speed', {}).get('hard_cap', 0.0))
-    veh = dict(mu=float(_mp0.get('mu', 0.348)), pac_d=float(_mp0.get('pac_d', 1.15)),
-               lf=float(_mp0.get('lf', 0.1757)), lr=float(_mp0.get('lr', 0.1441)))
-
     controller = cfg.get('controller', 'auto')
     bench = False
     for a in sys.argv:
@@ -63,6 +48,27 @@ def generate_launch_description():
             bench = a.split(':=')[1].lower() in ('true', '1', 'yes')
     if mode not in DEFAULT_CONTROLLER:
         raise RuntimeError(f'race.launch.py: 잘못된 mode "{mode}"')
+
+    # ── 속도 프로파일 공통 설정 (2026-08-09) ───────────────────────────
+    #  grip_util 은 컨트롤러 셋(map/stanley/gap_follower)이 **공유**한다.
+    #  모드별로 위험도를 다르게 두고 싶으면 limits.grip_util.<mode> 로 준다 —
+    #  q*_max 같은 평평한 상한 대신 **마찰 예산 사용률**로 표현하는 것이 물리적이다.
+    #
+    #  ★ 반드시 mode:= 오버라이드를 **적용한 뒤에** 풀어야 한다 (2026-08-09).
+    #    예전엔 이 블록이 위에 있어서 `./race.sh q2` 가 yaml 의 mode(q1) 로
+    #    grip_util 을 골랐다. 컨트롤러는 q2(회피)로 뜨는데 속도는 q1(η=0.8) 이라
+    #    실차에서 4.9㎧ 로 장애물에 돌진했고, 회피가 "전혀 안 되는" 것처럼 보였다.
+    #    로그상 q2 주행의 cmd_v 중앙이 q1 과 동일한 3.02㎧ 로 찍혀 드러났다.
+    _lim = cfg.get('limits', {})
+    _mp0 = cfg.get('map', {})
+    _gu  = _lim.get('grip_util', 0.6)
+    grip_util = float(_gu.get(mode, _gu.get('default', 0.6))
+                      if isinstance(_gu, dict) else _gu)
+    a_lon_acc = float(_lim.get('a_lon_acc', 0.0))
+    a_lon_brk = float(_lim.get('a_lon_brk', 0.0))
+    hard_cap  = float(cfg.get('speed', {}).get('hard_cap', 0.0))
+    veh = dict(mu=float(_mp0.get('mu', 0.348)), pac_d=float(_mp0.get('pac_d', 1.15)),
+               lf=float(_mp0.get('lf', 0.1757)), lr=float(_mp0.get('lr', 0.1441)))
 
     if controller == 'auto':
         controller = DEFAULT_CONTROLLER[mode]
@@ -484,6 +490,8 @@ def generate_launch_description():
                 # 0 이면 물리에서 자동: 가속=μ_eff·g·lf/L(후륜하중), 제동=μ_eff·g
                 'a_lon_acc':     a_lon_acc,
                 'a_lon_brk':     a_lon_brk,
+                # 구동계 지연 보상 (실측 0.25~0.29s) — 감속만 앞당긴다
+                'speed_lag':     float(_lim.get('speed_lag', 0.25)),
                 # ↓ 폐기. 옛 설정이 죽지 않게만 남겨둔다 (컨트롤러가 경고하고 무시)
                 'a_brake':       float(mp.get('a_brake',     0.0)),
                 'speed_scale':   float(mp.get('speed_scale', 1.0)),

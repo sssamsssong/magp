@@ -163,6 +163,11 @@ class MapController(Node):
         self.declare_parameter('a_lon_acc',   0.0)
         self.declare_parameter('a_lon_brk',   0.0)
 
+        # 구동계 지연 [s]. 지령→실측 속도의 상호상관으로 실측한 값(2026-08-09:
+        # 250~290ms). 이만큼 앞의 프로파일 **최솟값**을 미리 지령해 감속을
+        # 앞당긴다. 0 = 끔. 자세한 이유는 _profile_speed 참고.
+        self.declare_parameter('speed_lag',   0.25)
+
         # ↓ 폐기됨. 남겨둔 건 옛 설정이 죽지 않게 하려는 것뿐이고, 1.0 이 아니면
         #   경고하고 **무시한다**. 위 grip_util 을 쓸 것.
         self.declare_parameter('speed_scale', 1.0)
@@ -190,6 +195,7 @@ class MapController(Node):
 
         # ── 웨이포인트 로드 + 사전 계산 ─────────────────────────────────
         wp_file = self.get_parameter('waypoint_file').value
+        self._wp_ds = 0.1
         self.wp = self._load_waypoints(wp_file)
         if self.wp is None:
             self.get_logger().error(
@@ -197,6 +203,8 @@ class MapController(Node):
                 f'./race.sh log <이름> 으로 웨이포인트를 먼저 기록하세요.')
         else:
             self.get_logger().info(f'웨이포인트 {len(self.wp)}개 로드')
+            _d = np.hypot(np.diff(self.wp[:, 0]), np.diff(self.wp[:, 1]))
+            self._wp_ds = float(np.median(_d)) if len(_d) else 0.1
             self._curvature = self._compute_curvature()
             self._v_profile = self._compute_speed_profile()
         self._pac_alpha_lut, self._pac_Fy_lut = self._pacejka_lut()
@@ -344,6 +352,30 @@ class MapController(Node):
             + (f" | ⚠ hard_cap 에 걸린 구간 {100*info['capped']:.0f}%"
                if info['capped'] > 0.01 else ''))
         return v
+
+    def _profile_speed(self, near, v):
+        """프로파일에서 지령 속도를 뽑되 **구동계 지연만큼 미리 감속**한다.
+
+        2026-08-09 실측 (driven_path.csv 의 speed 와 cmd_v 상호상관):
+        지령→실측 지연이 **250~290ms**. 4.7㎧ 이면 1.2m 를 지나서야 반응한다.
+        헤어핀(s=14m, 프로파일 2.09㎧) 진입에서 실측이 3.30㎧ 로 1.2㎧ 초과했고,
+        그 다음 점(s=16m)에서 라인 바깥으로 0.39m 밀렸다 — 그립이 모자라서가
+        아니라 **감속을 늦게 시작해서**다.
+
+        보정은 감속 방향에만 건다:  앞으로 v·t_lag 만큼의 구간에서 프로파일의
+        **최솟값**을 취한다. 가속까지 앞당기면 코너를 다 빠져나오기 전에 밟게 되어
+        마찰원을 넘는다 — 브레이크는 미리, 액셀은 제때가 맞다.
+        """
+        i = int(near)
+        lag = float(self.p('speed_lag'))
+        if lag <= 0.0 or self._wp_ds <= 0.0:
+            return float(self._v_profile[i])
+        k = int(round(v * lag / self._wp_ds))
+        if k <= 0:
+            return float(self._v_profile[i])
+        n = len(self._v_profile)
+        idx = (np.arange(i, i + k + 1) % n)
+        return float(self._v_profile[idx].min())
 
     def _friction_cap(self):
         """마찰원 곡률 한계속도. (진단용 — 프로파일 계산은 _compute_speed_profile 안에서)"""
@@ -575,7 +607,7 @@ class MapController(Node):
 
         # 프로파일이 이미 물리(마찰원)와 min_speed·hard_cap 을 다 반영했다.
         # 여기서 다시 max_speed 로 자르면 상한이 부활해 등속 주행이 된다.
-        speed = float(self._v_profile[near])
+        speed = self._profile_speed(near, v)
 
         self.get_logger().info(
             f'[MAP] κ={self._curvature[near]:.3f}  '
