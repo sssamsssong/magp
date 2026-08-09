@@ -366,7 +366,7 @@ def build_raceline(reftrack: np.ndarray,
                    alpha:    np.ndarray,
                    stepsize: float = 0.1) -> tuple:
     """
-    α 오프셋을 적용한 레이싱라인을 생성하고 CubicSpline으로 균일 리샘플.
+    α 오프셋을 적용한 레이싱라인을 생성하고 splprep B-스플라인으로 균일 리샘플.
     반환: (raceline [M,2], el_lengths [M], kappa [M])
     """
     N = len(reftrack)
@@ -376,10 +376,10 @@ def build_raceline(reftrack: np.ndarray,
     ds_n  = np.linalg.norm(np.diff(np.vstack([nodes, nodes[0]]), axis=0), axis=1)
     total = ds_n.sum()
 
-    # splprep (periodic, 가벼운 스무딩) → 진동 방지
+    # splprep (periodic, 가벼운 스무딩) — 진동 방지
     from scipy.interpolate import splprep, splev
     tck, _ = splprep([nodes[:, 0], nodes[:, 1]],
-                     s=len(nodes) * 0.002, per=True, k=3)
+                     s=N * 0.002, per=True, k=3)
 
     M   = max(3, int(total / stepsize))
     u_u = np.linspace(0, 1, M, endpoint=False)
@@ -387,10 +387,8 @@ def build_raceline(reftrack: np.ndarray,
     xi, yi = splev(u_u, tck)
     rl = np.column_stack([xi, yi])
 
-    # 각 점 간 거리
     el = np.linalg.norm(np.diff(np.vstack([rl, rl[0]]), axis=0), axis=1)
 
-    # 1·2차 도함수로 곡률 계산
     dx, dy   = splev(u_u, tck, der=1)
     ddx, ddy = splev(u_u, tck, der=2)
     kappa = np.abs(dx * ddy - dy * ddx) / np.maximum((dx**2 + dy**2) ** 1.5, 1e-9)
@@ -546,7 +544,7 @@ def main():
     print('\n[1] 트랙 경계 추출...')
     reftrack = extract_reftrack(map_name, safety_m=args.safety)
 
-    print('\n[2] 균일 리샘플 (0.5m 간격)...')
+    print(f'\n[2] 균일 리샘플 (0.5m 간격 — QP 격자)...')
     reftrack_u = interp_track(reftrack, stepsize=0.5)
     N = len(reftrack_u)
     print(f'  {N}pts')
@@ -555,14 +553,29 @@ def main():
     path_cl = np.vstack([reftrack_u[:, :2], reftrack_u[0, :2]])
     coeffs_x, coeffs_y, M_spl, normvec = calc_splines(path_cl)
 
-    print('\n[4] 최소 곡률 QP (OSQP)...')
-    alpha = opt_min_curv(reftrack_u, normvec, M_spl, w_veh=args.wveh,
-                         r_min=args.rmin)
+    print('\n[4] 최소 곡률 QP (OSQP) + R_min 수렴 반복...')
+    # QP 격자(0.5m)와 출력 격자(0.1m)의 해상도 차이, 선형화 오차, splprep 스무딩으로
+    # QP 제약을 만족해도 최종 경로 곡률이 목표를 초과할 수 있다.
+    # → build_raceline 까지 돌린 실제 κ_max 를 보고 r_eff 를 조여 재풀이한다.
+    r_eff = args.rmin
+    for _iter in range(6):
+        alpha = opt_min_curv(reftrack_u, normvec, M_spl, w_veh=args.wveh,
+                             r_min=r_eff)
+        raceline, el, kappa = build_raceline(reftrack_u, normvec, alpha,
+                                             stepsize=args.step)
+        r_act = 1.0 / float(np.abs(kappa).max())
+        print(f'  iter {_iter}: r_eff={r_eff:.3f}  R_act={r_act:.3f} m  '
+              f'|κ|_max={1/r_act:.4f}')
+        if r_act >= args.rmin * 0.995:
+            break
+        r_eff *= r_act / args.rmin   # 부족분만큼 제약을 더 조인다
+    r_act = 1.0 / float(np.abs(kappa).max())
+    print(f'  최종 R_min = {r_act:.3f} m  (목표 {args.rmin} m)', end='')
+    if r_act < args.rmin * 0.995:
+        print(f'  ⚠ 목표 미달 — 트랙 여유 부족 또는 반복 한계 초과')
+    else:
+        print('  ✓')
     print(f'  α: [{alpha.min():.3f}, {alpha.max():.3f}] m')
-
-    print('\n[5] 레이싱라인 생성...')
-    raceline, el, kappa = build_raceline(reftrack_u, normvec, alpha,
-                                         stepsize=args.step)
 
     print('\n[6] 속도 프로파일...')
     v = calc_vel_profile(kappa, el,
