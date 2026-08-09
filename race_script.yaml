@@ -28,7 +28,7 @@ mode: q1
 # ------------------------------------------------------------
 map_name: halfhot_clean
 
-waypoints: halfhot_clean_wp
+waypoints: halfhot_clean_map_wp
 
 # ------------------------------------------------------------
 # 컨트롤러 선택

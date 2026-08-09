@@ -537,7 +537,7 @@ def main():
         val = input('맵 이름 또는 번호: ').strip()
         map_name = maps[int(val) - 1] if val.isdigit() else val
 
-    wp_path = os.path.join(WP_DIR, f'{map_name}_wp.csv')
+    wp_path = os.path.join(WP_DIR, f'{map_name}_map_wp.csv')
     os.makedirs(WP_DIR, exist_ok=True)
 
     print(f'\n맵: {map_name}  vmax={args.vmax}  wveh={args.wveh}  safety={args.safety}')
