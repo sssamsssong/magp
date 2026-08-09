@@ -29,7 +29,7 @@ def _find_repo_root():
     raise RuntimeError('repo root (sim_ws/ + f1tenth_ws/) 를 찾을 수 없습니다')
 
 
-WAYPOINTS_MAP = 'halfhot_clean'   # setup_sim.py 가 이 이름만 업데이트합니다
+WAYPOINTS_MAP = 'cool_clean'   # setup_sim.py 가 이 이름만 업데이트합니다
 _MAPS_DIR      = os.path.join(_find_repo_root(), 'sim_ws', 'src', 'f1tenth_gym_ros', 'maps')
 WAYPOINTS_PATH = os.path.join(_MAPS_DIR, f'{WAYPOINTS_MAP}_waypoints.csv')
 
