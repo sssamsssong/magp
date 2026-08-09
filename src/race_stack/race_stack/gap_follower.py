@@ -43,6 +43,9 @@ class GapFollower(Node):
         # 물리와 무관한 안전 천장. 0 = 끔(기본).
         self.declare_parameter('hard_cap',  0.0)
         self.declare_parameter('max_speed', 2.0)
+        # ★ 박스 위 벤치 모드. true 면 **발행 직전에 속도를 0 으로 못박는다**.
+        #   조향은 살아 있어야 검증이 되므로 건드리지 않는다.
+        self.declare_parameter('bench', False)
         self.declare_parameter('min_speed', 1.0)
         self.declare_parameter('car_width', 0.40)
         self.declare_parameter('disparity_threshold', 0.4)
@@ -131,6 +134,11 @@ class GapFollower(Node):
             speed = min(speed, cap)
         speed = max(speed, self.p('min_speed'))
 
+        # ★★ bench(박스 위) — 여기가 유일한 강제 지점이다. 옮기거나 지우지 말 것.
+        #   2026-08-09: 예전엔 bench 가 max_speed=0 을 주고 컨트롤러의 클램프에
+        #   기대고 있었는데, 속도 개편에서 그게 사라져 box 가 풀속도로 주행했다.
+        if bool(self.p('bench')):
+            speed = 0.0
         msg = AckermannDriveStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.drive.speed = float(speed)

@@ -59,6 +59,10 @@ class PurePursuit(Node):
         self.declare_parameter('odom_topic', '/odom_imu')
         self.declare_parameter('waypoint_file', '')
         self.declare_parameter('max_speed', 3.0)
+        # ★ 박스 위 벤치 모드. true 면 **발행 직전에 속도를 0 으로 못박는다**.
+        #   pure_pursuit 는 아직 clip(v, min, max) 를 쓰지만 그것에 기대지 않는다 —
+        #   map/stanley 는 그 클램프가 사라져 2026-08-09 에 box 가 풀속도로 주행했다.
+        self.declare_parameter('bench', False)
         self.declare_parameter('min_speed', 1.0)
         self.declare_parameter('lookahead', 1.8)
         self.declare_parameter('lookahead_speed_gain', 0.3)
@@ -223,6 +227,9 @@ class PurePursuit(Node):
         if self.enabled and self.got_pose:
             out.drive.steering_angle, out.drive.speed = \
                 float(self._cmd[0]), float(self._cmd[1])
+        # ★★ bench(박스 위) — 여기가 유일한 강제 지점이다. 옮기거나 지우지 말 것.
+        if bool(self.p('bench')):
+            out.drive.speed = 0.0
         self.drive_pub.publish(out)
 
     def load_waypoints(self, path):

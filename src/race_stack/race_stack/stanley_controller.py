@@ -115,6 +115,9 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self.declare_parameter('lf',     0.1757)
         self.declare_parameter('lr',     0.1441)
         self.declare_parameter('max_speed',        5.0)
+        # ★ 박스 위 벤치 모드. true 면 **발행 직전에 속도를 0 으로 못박는다**
+        #   (_publish_cmd). 조향은 살아 있어야 검증이 되므로 건드리지 않는다.
+        self.declare_parameter('bench',            False)
         self.declare_parameter('min_speed',        1.0)
         self.declare_parameter('max_steer',        0.36)
         self.declare_parameter('wheelbase',        0.33)
@@ -231,6 +234,11 @@ class StanleyController(ObstacleAvoidMixin, Node):
 
         self.mode       = p('mode')
         self.max_speed  = p('max_speed')   # 미사용 — 프로파일이 대신한다
+        self._bench = bool(p('bench'))
+        if self._bench:
+            self.get_logger().warn(
+                '★ BENCH 모드 — 속도를 0 으로 강제한다 (바퀴가 돌지 않는다). '
+                '조향은 정상 동작하므로 박스 위에서 확인할 수 있다.')
         self.min_speed  = p('min_speed')
         self.max_steer  = p('max_steer')
         self.gain       = p('stanley_gain')
@@ -870,6 +878,12 @@ class StanleyController(ObstacleAvoidMixin, Node):
         return self._wa_prev
 
     def _publish_cmd(self, steer: float, speed: float):
+        # ★★ bench(박스 위) — 여기가 유일한 강제 지점이다. 옮기거나 지우지 말 것.
+        #   2026-08-09: 예전엔 bench 가 max_speed=0 을 주고 컨트롤러의
+        #   clip(v, min_speed, max_speed) 에 기대고 있었는데, 속도 개편에서 그
+        #   클램프를 없애자 `./race.sh box` 가 **풀속도로 주행**했다.
+        if self._bench:
+            speed = 0.0
         msg = AckermannDriveStamped()
         msg.header.stamp         = self.get_clock().now().to_msg()
         msg.drive.steering_angle = steer
