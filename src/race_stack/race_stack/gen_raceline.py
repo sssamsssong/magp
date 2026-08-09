@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-gen_raceline.py — TUMFTM 방식 최소 곡률 레이싱라인 생성기
+gen_raceline.py — TUMFTM 최소 곡률 레이싱라인 생성기 + GUI 드로잉 모드
 
 알고리즘: Heilmeier et al. "Minimum Curvature Trajectory Planning and Control
 for an Autonomous Racecar" (2019), DOI: 10.1080/00423114.2019.1631455
@@ -9,9 +9,11 @@ for an Autonomous Racecar" (2019), DOI: 10.1080/00423114.2019.1631455
   pip install numpy scipy osqp opencv-python Pillow
 
 사용법:
-  python3 gen_raceline.py                          # 대화형 맵 선택
-  python3 gen_raceline.py --map sohot_clean        # 맵 지정
-  python3 gen_raceline.py --map sohot_clean --vmax 8.0 --vmin 1.0
+  python3 gen_raceline.py                            # 대화형 맵 선택 → TUMFTM
+  python3 gen_raceline.py --map halfhot_clean        # 맵 지정 → TUMFTM
+  python3 gen_raceline.py --map halfhot_clean --gui  # GUI 드로잉 모드
+  python3 gen_raceline.py --map halfhot_clean --gui --out halfhot_clean_late_wp
+  python3 gen_raceline.py --map halfhot_clean --vmax 8.0 --mu 0.4 --rmin 1.0
 """
 
 import os, sys, csv, argparse, math
@@ -502,7 +504,176 @@ def save_overlay(map_name, raceline, v, wp_path):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 8. main
+# 8. GUI 드로잉 모드
+# ══════════════════════════════════════════════════════════════════════════════
+def gui_draw_raceline(map_name: str, args) -> tuple | None:
+    """
+    맵 위에서 클릭으로 경로를 그리는 대화형 GUI.
+    좌클릭: 점 추가  |  우클릭/u: 언두  |  d: 초기화  |  Enter: 확정  |  q: 취소
+    반환: (raceline [M,2], el [M], kappa [M], v [M])  또는  None (취소)
+    """
+    import matplotlib
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from scipy.interpolate import splprep, splev
+    import yaml
+
+    # ── 맵 로드 ──
+    yaml_path = os.path.join(MAPS_DIR, map_name + '.yaml')
+    with open(yaml_path) as f:
+        cfg = yaml.safe_load(f)
+    res    = float(cfg['resolution'])
+    origin = np.array(cfg['origin'][:2])
+
+    img_path = None
+    for ext in ['.pgm', '.png']:
+        p = os.path.join(MAPS_DIR, map_name + ext)
+        if os.path.exists(p):
+            img_path = p; break
+    img = np.array(Image.open(img_path).convert('L'))
+    h_img, w_img = img.shape
+    xmin, xmax = origin[0], origin[0] + w_img * res
+    ymin, ymax = origin[1], origin[1] + h_img * res
+
+    # ── 트랙 경계 ──
+    reftrack = extract_reftrack(map_name, safety_m=args.safety)
+    cl = reftrack[:, :2]
+    path_cl = np.vstack([cl, cl[0]])
+    _, _, _, nv = calc_splines(path_cl)
+    bnd_r = np.vstack([cl + reftrack[:, 2:3] * nv, cl[0] + reftrack[0, 2] * nv[0]])
+    bnd_l = np.vstack([cl - reftrack[:, 3:4] * nv, cl[0] - reftrack[0, 3] * nv[0]])
+
+    # ── 기존 웨이포인트 후보 로드 ──
+    candidates = {}
+    if os.path.isdir(WP_DIR):
+        for fname in sorted(os.listdir(WP_DIR)):
+            if fname.startswith(map_name) and fname.endswith('.csv'):
+                try:
+                    pts = []
+                    with open(os.path.join(WP_DIR, fname)) as f:
+                        for row in csv.DictReader(f):
+                            pts.append([float(row['x']), float(row['y'])])
+                    candidates[fname[:-4]] = np.array(pts)
+                except Exception:
+                    pass
+
+    # ── 그림 ──
+    fig, ax = plt.subplots(figsize=(13, 10))
+    ax.imshow(img, origin='lower', extent=[xmin, xmax, ymin, ymax],
+              cmap='gray', alpha=0.75)
+    ax.set_aspect('equal')
+
+    ax.plot(bnd_r[:, 0], bnd_r[:, 1], color='orange', lw=1.2, alpha=0.7, label='우측 한계')
+    ax.plot(bnd_l[:, 0], bnd_l[:, 1], color='cyan',   lw=1.2, alpha=0.7, label='좌측 한계')
+    cl_cl = np.vstack([cl, cl[0]])
+    ax.plot(cl_cl[:, 0], cl_cl[:, 1], 'b--', lw=0.8, alpha=0.35, label='중심선')
+
+    pal = ['red', 'lime', 'magenta', 'yellow', 'deepskyblue']
+    for i, (cname, cpts) in enumerate(candidates.items()):
+        short = cname.replace(map_name + '_', '')
+        ax.plot(cpts[:, 0], cpts[:, 1], '-', color=pal[i % len(pal)],
+                lw=2.0, alpha=0.8, label=short)
+
+    ax.legend(loc='upper right', fontsize=7, framealpha=0.6)
+    ax.set_title(
+        f'{map_name}  ─  좌클릭: 점 추가  |  우클릭/u: 언두  |  '
+        f'd: 초기화  |  Enter: 확정  |  q: 취소',
+        fontsize=9)
+
+    # 현재 그린 경로 표시
+    state = dict(pts=[], artists=[])
+
+    def _redraw():
+        for a in state['artists']:
+            try: a.remove()
+            except Exception: pass
+        state['artists'].clear()
+        pts = state['pts']
+        if not pts:
+            fig.canvas.draw_idle(); return
+        arr = np.array(pts)
+        state['artists'].append(
+            ax.scatter(arr[:, 0], arr[:, 1], c='white', edgecolors='red',
+                       s=28, zorder=12, linewidths=1.2))
+        if len(pts) >= 2:
+            ln, = ax.plot(arr[:, 0], arr[:, 1], 'r--', lw=1, alpha=0.45, zorder=10)
+            state['artists'].append(ln)
+        if len(pts) >= 4:
+            try:
+                tck, _ = splprep([arr[:, 0], arr[:, 1]], s=0, per=False, k=3)
+                u_f = np.linspace(0, 1, max(300, len(pts) * 12))
+                sx, sy = splev(u_f, tck)
+                prev, = ax.plot(sx, sy, 'r-', lw=2.5, zorder=11)
+                state['artists'].append(prev)
+            except Exception:
+                pass
+        fig.canvas.draw_idle()
+
+    def on_click(ev):
+        if ev.inaxes != ax: return
+        if ev.button == 1:
+            state['pts'].append([ev.xdata, ev.ydata])
+        elif ev.button == 3 and state['pts']:
+            state['pts'].pop()
+        _redraw()
+
+    def on_key(ev):
+        if ev.key == 'u' and state['pts']:
+            state['pts'].pop()
+        elif ev.key == 'd':
+            state['pts'].clear()
+        elif ev.key in ('enter', 'return'):
+            plt.close(fig)
+        elif ev.key == 'q':
+            state['pts'].clear()
+            plt.close(fig)
+        _redraw()
+
+    fig.canvas.mpl_connect('button_press_event', on_click)
+    fig.canvas.mpl_connect('key_press_event', on_key)
+    plt.tight_layout()
+    plt.show()
+
+    pts = state['pts']
+    if len(pts) < 4:
+        print('  점이 부족합니다 (최소 4개 필요). 취소됨.')
+        return None
+
+    # ── 스플라인 피팅 ──
+    print(f'\n  {len(pts)}점 → 주기 스플라인 피팅...')
+    arr = np.array(pts)
+    tck, _ = splprep([arr[:, 0], arr[:, 1]], s=0, per=True, k=3)
+
+    # 총 길이 추정
+    u_est = np.linspace(0, 1, 600, endpoint=False)
+    xe, ye = splev(u_est, tck)
+    pts_est = np.column_stack([xe, ye])
+    total = float(np.linalg.norm(
+        np.diff(np.vstack([pts_est, pts_est[0]]), axis=0), axis=1).sum())
+
+    M   = max(3, int(total / args.step))
+    u_u = np.linspace(0, 1, M, endpoint=False)
+    xi, yi = splev(u_u, tck)
+    raceline = np.column_stack([xi, yi])
+
+    el = np.linalg.norm(np.diff(np.vstack([raceline, raceline[0]]), axis=0), axis=1)
+    dx, dy   = splev(u_u, tck, der=1)
+    ddx, ddy = splev(u_u, tck, der=2)
+    kappa = np.abs(dx * ddy - dy * ddx) / np.maximum((dx**2 + dy**2) ** 1.5, 1e-9)
+
+    r_act = 1.0 / float(kappa.max())
+    print(f'  레이싱라인: {M}pts  길이={total:.1f}m  |κ|_max={kappa.max():.4f}  R_min={r_act:.3f}m')
+    if r_act < args.rmin * 0.995:
+        print(f'  ⚠ R_min {r_act:.3f}m < 목표 {args.rmin}m — 헤어핀을 더 넓게 그려 보세요')
+
+    v = calc_vel_profile(kappa, el,
+                         mu=args.mu, v_max=args.vmax, v_min=args.vmin,
+                         a_lon_acc=args.acc, a_lon_brk=args.brk)
+    return raceline, el, kappa, v
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 9. main
 # ══════════════════════════════════════════════════════════════════════════════
 def main():
     p = argparse.ArgumentParser(description='TUMFTM 최소 곡률 레이싱라인 생성기')
@@ -518,9 +689,11 @@ def main():
     p.add_argument('--brk',    type=float, default=8.0,  help='제동 (m/s²)')
     p.add_argument('--step',   type=float, default=0.1,  help='웨이포인트 간격 (m)')
     p.add_argument('--rmin',   type=float, default=0.9,  help='최소 회전반경 (m) — QP 곡률 상한 제약')
+    p.add_argument('--gui',   action='store_true',       help='클릭 GUI 드로잉 모드')
+    p.add_argument('--out',   default=None,              help='출력 웨이포인트 이름 (기본: {map}_map_wp 또는 {map}_draw_wp)')
     args = p.parse_args()
 
-    # 맵 선택
+    # ── 맵 선택 ──
     if args.map:
         map_name = args.map
     else:
@@ -535,12 +708,42 @@ def main():
         val = input('맵 이름 또는 번호: ').strip()
         map_name = maps[int(val) - 1] if val.isdigit() else val
 
-    wp_path = os.path.join(WP_DIR, f'{map_name}_map_wp.csv')
     os.makedirs(WP_DIR, exist_ok=True)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # GUI 드로잉 모드
+    # ══════════════════════════════════════════════════════════════════════
+    if args.gui:
+        out_name = args.out or f'{map_name}_draw_wp'
+        wp_path  = os.path.join(WP_DIR, out_name + '.csv')
+
+        print(f'\n[GUI] 맵: {map_name}  출력: {out_name}')
+        result = gui_draw_raceline(map_name, args)
+        if result is None:
+            return
+        raceline, el, kappa, v = result
+
+        print(f'\n속도: {v.min():.2f}~{v.max():.2f} m/s')
+
+        # 저장
+        with open(wp_path, 'w', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(['x', 'y', 'speed'])
+            for (x, y), vi in zip(raceline, v):
+                w.writerow([f'{x:.4f}', f'{y:.4f}', f'{vi:.4f}'])
+        print(f'  저장: {len(raceline)}pts → {wp_path}')
+        save_overlay(map_name, raceline, v, wp_path)
+        print(f'\n완료!  race_script.yaml → waypoints: {out_name}')
+        return
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TUMFTM 최적화 모드
+    # ══════════════════════════════════════════════════════════════════════
+    out_name = args.out or f'{map_name}_map_wp'
+    wp_path  = os.path.join(WP_DIR, out_name + '.csv')
 
     print(f'\n맵: {map_name}  vmax={args.vmax}  wveh={args.wveh}  safety={args.safety}')
 
-    # ── 단계별 실행 ──
     print('\n[1] 트랙 경계 추출...')
     reftrack = extract_reftrack(map_name, safety_m=args.safety)
 
@@ -568,7 +771,7 @@ def main():
               f'|κ|_max={1/r_act:.4f}')
         if r_act >= args.rmin * 0.995:
             break
-        r_eff *= r_act / args.rmin   # 부족분만큼 제약을 더 조인다
+        r_eff *= r_act / args.rmin
     r_act = 1.0 / float(np.abs(kappa).max())
     print(f'  최종 R_min = {r_act:.3f} m  (목표 {args.rmin} m)', end='')
     if r_act < args.rmin * 0.995:
@@ -582,7 +785,6 @@ def main():
                          mu=args.mu, v_max=args.vmax, v_min=args.vmin,
                          a_lon_acc=args.acc, a_lon_brk=args.brk)
 
-    # ── 저장 ──
     print('\n[7] 저장...')
     with open(wp_path, 'w', newline='') as f:
         w = csv.writer(f)
@@ -594,7 +796,7 @@ def main():
     save_overlay(map_name, raceline, v, wp_path)
 
     print('\n완료! 다음 단계:')
-    print(f'  race_script.yaml: map_name: {map_name}')
+    print(f'  race_script.yaml → waypoints: {out_name}')
     print(f'  SPEED_SCALE 1.0 으로 시작 (웨이포인트가 이미 고속 최적화됨)')
 
 
