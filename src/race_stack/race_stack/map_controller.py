@@ -181,6 +181,29 @@ class MapController(Node):
         #     **조향 보정만** 따로 줄일 수 있는 손잡이를 둔다.
         self.declare_parameter('slip_gain',   1.0)
 
+        # ── AMCL 보정 슬루 제한 ──────────────────────────────────────
+        #   ★ 2026-08-09 실차: q2 로 장애물을 치고 다니며 **트랙 구조물이 실제로
+        #     움직였다.** 맵-스캔 잔차가 평균 4.1 → 8.2cm, 최대 15 → 39cm 로 두 배.
+        #     그 상태로 q1 을 6㎧ 로 돌리자 AMCL 이 s=17.6m 에서 2.90m,
+        #     s=18.6m 에서 **4.50m** 점프했다 (yaw 는 52.9°). 그 자리가 정확히
+        #     주행이 이탈한 지점이다.
+        #
+        #   예전 pose_cb 는 새 보정을 **그대로 즉시** 반영했다. 4.5m 점프가 다음
+        #   50Hz 틱에서 그대로 조향 오차가 된다. 게다가 오늘 steer_alpha 를
+        #   0.8892(170ms) → 0.555(34ms) 로 낮추면서, 그 점프를 **우연히 뭉개주던
+        #   필터마저 얇아졌다.** 요 진동은 잡혔지만 pose 점프에는 더 취약해졌다.
+        #
+        #   그래서 보정을 순간에 반영하지 않고 **속도 제한**을 건다. 위치추정이
+        #   틀린 채로 잠깐 가는 것보다, 조향이 튀어 벽으로 가는 게 훨씬 나쁘다.
+        #   거부(reject)가 아니라 제한이라 AMCL 이 옳으면 몇 초 안에 수렴한다.
+        #   0 = 끔(옛 동작).
+        #   한계값은 bag 에서 분포를 재서 정했다 — AMCL 은 평상시에도 파티클
+        #   잡음으로 보정을 흔든다(정상 주행 p99 3.63㎧). 너무 조이면 위치추정을
+        #   망가뜨리고, 너무 풀면 점프가 그대로 통과한다. 4.0㎧/120°/s 에서
+        #   정상 주행의 0.8% 만 걸리고 4.5m 점프는 1.1s 에 걸쳐 반영된다.
+        self.declare_parameter('pose_corr_rate',     4.0)   # m/s
+        self.declare_parameter('pose_corr_yaw_rate', 2.1)   # rad/s
+
         # ↓ 폐기됨. 남겨둔 건 옛 설정이 죽지 않게 하려는 것뿐이고, 1.0 이 아니면
         #   경고하고 **무시한다**. 위 grip_util 을 쓸 것.
         self.declare_parameter('speed_scale', 1.0)
@@ -243,6 +266,8 @@ class MapController(Node):
         self._odom_last = None       # (t, x, y, yaw)
         self._odom_buf = deque(maxlen=100)
         self._map_from_odom = None   # (th, tx, ty) — map←odom 보정 변환
+        self._corr_t = time.time()   # 마지막 보정 갱신 시각 (슬루 제한용)
+        self._corr_clamped = 0       # 제한이 걸린 횟수 — 주행 후 요약에 쓴다
         self._seed_pose = (float(self.p('init_x')), float(self.p('init_y')),
                            float(self.p('init_yaw')))
 
@@ -587,8 +612,60 @@ class MapController(Node):
         _, ox, oy, oyaw = od
         th = _normalize(yaw - oyaw)
         c, s = math.cos(th), math.sin(th)
-        self._map_from_odom = (th, px - (c * ox - s * oy),
-                               py - (s * ox + c * oy))
+        target = (th, px - (c * ox - s * oy), py - (s * ox + c * oy))
+
+        self._map_from_odom = self._slew_correction(target)
+
+    def _slew_correction(self, target):
+        """보정 변환을 목표로 **제한된 속도로** 옮긴다. 자세한 이유는
+        pose_corr_rate 파라미터 주석 참고.
+
+        변환 계수(th,tx,ty)를 직접 자르지 않는다 — th 가 조금만 변해도 원점에서
+        먼 곳의 위치는 크게 움직이기 때문이다. **지금 위치가 얼마나 뛰는지**를
+        기준으로 자른 뒤 그 위치를 만드는 변환을 되계산한다.
+        """
+        rate = float(self.p('pose_corr_rate'))
+        yrate = float(self.p('pose_corr_yaw_rate'))
+        now = time.time()
+        prev = self._map_from_odom
+        dt = min(max(now - self._corr_t, 1e-3), 0.5)
+        self._corr_t = now
+
+        # 출발 전에는 자유롭게 수렴시킨다 — 초기 정렬을 막으면 안 된다
+        if prev is None or rate <= 0.0 or not self.enabled or self._odom_last is None:
+            return target
+
+        def apply(T, o):
+            th, tx, ty = T
+            _, ox, oy, oyaw = o
+            c, s = math.cos(th), math.sin(th)
+            return (tx + c * ox - s * oy, ty + s * ox + c * oy, _normalize(th + oyaw))
+
+        o = self._odom_last
+        x0, y0, w0 = apply(prev,   o)
+        x1, y1, w1 = apply(target, o)
+        d = math.hypot(x1 - x0, y1 - y0)
+        dw = _normalize(w1 - w0)
+        lim, wlim = rate * dt, yrate * dt
+        if d <= lim and abs(dw) <= wlim:
+            return target
+
+        k = min(1.0, lim / d) if d > 1e-9 else 1.0
+        kw = min(1.0, wlim / abs(dw)) if abs(dw) > 1e-9 else 1.0
+        xt, yt = x0 + (x1 - x0) * k, y0 + (y1 - y0) * k
+        wt = _normalize(w0 + dw * kw)
+
+        self._corr_clamped += 1
+        self.get_logger().warn(
+            f'AMCL 보정 {d*100:.0f}cm / {math.degrees(abs(dw)):.0f}° 를 '
+            f'{lim*100:.0f}cm / {math.degrees(wlim):.0f}° 로 제한 '
+            f'(누적 {self._corr_clamped}회) — 맵과 실제가 어긋났을 수 있다',
+            throttle_duration_sec=2.0)
+
+        _, ox2, oy2, oyaw2 = o
+        th2 = _normalize(wt - oyaw2)
+        c2, s2 = math.cos(th2), math.sin(th2)
+        return (th2, xt - (c2 * ox2 - s2 * oy2), yt - (s2 * ox2 + c2 * oy2))
 
     def _current_pose(self):
         """AMCL 보정 ⊕ 최신 odom = 고주기 pose. 보정이 없으면 AMCL 원시값 폴백."""
