@@ -436,27 +436,48 @@ elif [ "$MODE" = "mapping-joy" ]; then
     echo ">>> ★ 저장이 끝난 뒤에 이 창에서 Ctrl+C  (먼저 끄면 /map이 사라져 저장 실패)"
     echo ""
 
-    JOY_DEV=$(get_yaml joystick.device 2>/dev/null || echo "/dev/input/js0")
-    JOY_ID=$(echo "$JOY_DEV" | grep -o '[0-9]*$'); JOY_ID=${JOY_ID:-0}
+    # ★ bringup 의 joy_node + joy_teleop 이 /teleop 을 같이 쏘면
+    #   (F710 기본 매핑: 축1×scale5) 손을 안 대도 차가 혼자 간다.
+    #   커널 RT 휴지≈0 + trigger_invert 도 반쯤 스로틀로 오인될 수 있다.
     MAX_SPD=$(get_yaml speed.mapping_max)
     AX_STEER=$(get_yaml joystick.axis_steer)
     AX_SPEED=$(get_yaml joystick.axis_speed)
     BTN_REV=$(get_yaml joystick.btn_reverse)
     BTN_TOG=$(get_yaml joystick.btn_toggle)
     STEER_INV=$(get_yaml joystick.steer_invert 2>/dev/null || echo "False")
+    SPEED_INV=$(get_yaml joystick.speed_invert 2>/dev/null || echo "False")
     TRIG_INV=$(get_yaml joystick.trigger_invert 2>/dev/null || echo "True")
     TRIG_DZ=$(get_yaml joystick.trigger_deadzone 2>/dev/null || echo "0.05")
     TRIG_EXPO=$(get_yaml joystick.trigger_expo 2>/dev/null || echo "1.0")
     STEER_DZ=$(get_yaml joystick.steer_deadzone 2>/dev/null || echo "0.08")
-    ARM=$(get_yaml joystick.arm_on_neutral 2>/dev/null || echo "True")
     JOY_DBG=$(get_yaml joystick.debug 2>/dev/null || echo "False")
+    # 맵핑에서는 항상 안전 잠금 ON (yaml 의 arm_on_neutral:false 도 무시)
+    ARM=True
 
-    # deadzone 0 → 트리거 선형성 보존 (데드존은 joystick_teleop이 처리)
-    # autorepeat 20Hz → RT를 고정해도 mux(timeout 0.2s)가 안 끊김
-    ros2 run joy joy_node --ros-args \
-        -p device_id:="$JOY_ID" -p deadzone:=0.0 -p autorepeat_rate:=20.0 &
-    JOY_PID=$!
-    trap "kill $LAUNCH_PID $JOY_PID 2>/dev/null" EXIT
+    sleep 1
+    pkill -9 -f '[j]oy_node' 2>/dev/null || true
+    pkill -9 -f '[j]oy_teleop' 2>/dev/null || true
+    pkill -9 -f '[j]s_joy_bridge' 2>/dev/null || true
+    sleep 0.4
+
+    # 리눅스 장치 경로: js1 이 있으면 우선 (F710 이 js1 로 잡히는 환경)
+    JS_DEV=/dev/input/js1
+    [ -e /dev/input/js1 ] || JS_DEV=/dev/input/js0
+    [ -e "$JS_DEV" ] || { echo "[race.sh] 조이 장치 없음 ($JS_DEV)"; wait $LAUNCH_PID; exit 1; }
+
+    JOY_PID=""
+    BRIDGE="$SCRIPT_DIR/js_joy_bridge.py"
+    if [ -f "$BRIDGE" ]; then
+        echo "[race.sh] js_joy_bridge → $JS_DEV  (SDL joy_node 대신, 혼자 주행 방지)"
+        python3 "$BRIDGE" "$JS_DEV" &
+        JOY_PID=$!
+    else
+        echo "[race.sh] js_joy_bridge 없음 — joy_node device_id=0"
+        ros2 run joy joy_node --ros-args \
+            -p device_id:=0 -p deadzone:=0.05 -p autorepeat_rate:=20.0 &
+        JOY_PID=$!
+    fi
+    trap "kill $LAUNCH_PID $JOY_PID 2>/dev/null; pkill -9 -f '[j]oy_teleop' 2>/dev/null" EXIT
 
     ros2 run race_stack joystick_teleop --ros-args \
         -p max_speed:="$MAX_SPD" \
@@ -465,11 +486,13 @@ elif [ "$MODE" = "mapping-joy" ]; then
         -p btn_reverse:="$BTN_REV" \
         -p btn_toggle:="$BTN_TOG" \
         -p steer_invert:="$STEER_INV" \
+        -p speed_invert:="$SPEED_INV" \
         -p trigger_invert:="$TRIG_INV" \
         -p trigger_deadzone:="$TRIG_DZ" \
         -p trigger_expo:="$TRIG_EXPO" \
         -p steer_deadzone:="$STEER_DZ" \
         -p arm_on_neutral:="$ARM" \
+        -p allow_toggle:=false \
         -p debug:="$JOY_DBG"
 else
     exec ros2 launch race_stack race.launch.py mode:=$MODE \

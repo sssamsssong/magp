@@ -109,6 +109,7 @@ def generate_launch_description():
             'allow_toggle':     False,
             'start_auto':       False,
             'steer_invert':     bool( joy_cfg.get('steer_invert',     False)),
+            'speed_invert':     bool( joy_cfg.get('speed_invert',     False)),
             'trigger_invert':   bool( joy_cfg.get('trigger_invert',   True)),
             'trigger_deadzone': float(joy_cfg.get('trigger_deadzone', 0.05)),
             'trigger_expo':     float(joy_cfg.get('trigger_expo',     1.0)),

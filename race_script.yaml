@@ -661,7 +661,7 @@ network:
                             #   (젯슨은 LiDAR 전용망 192.168.0.x 도 함께 올라와 있어서,
                             #    고정하지 않으면 그쪽을 잡아 노트북과 통신이 끊긴다)
   peers:                    # ★ IP 가 고정된 기기만 적으면 된다 — 보통 젯슨 하나.
-    - 192.168.50.57         #   젯슨 (2026-08-03 공유기 교체로 변경)
+    - 192.168.50.77         #   젯슨 2호차 (2026-08-09 확인)
 
 
 # ========================================================================
@@ -858,18 +858,22 @@ joystick:
   # LB: joy 모드에서는 비활성, 주행 스택에서는 수동↔자율 전환
   #     (AMCL·LiDAR 는 계속 동작 — 다시 누르면 그 자리에서 이어감)
   manual_override: true          # false = 주행 중 조이스틱 개입 비활성
-  device:       /dev/input/js0   # 조이스틱 디바이스 (js0, js1, ...)
+  # ★ ROS2 joy_node 는 /dev/input/jsN 경로가 아니라 SDL "몇 번째 패드" 번호(device_id)다.
+  #   race.sh 가 아래 경로의 끝 숫자만 떼어 -p device_id:=N 으로 넘긴다.
+  #   리눅스에 js1 로 보여도 패드가 1개면 번호는 거의 항상 0 이다. 1 로 두면
+  #   두 번째 패드를 찾다 실패해서 mapping-joy 가 먹통이 된다 (2026-08-09).
+  device:       /dev/input/js0   # → device_id=0 (첫 번째 패드). 두 개 꽂았을 때만 js1
   axis_steer:        0           # 조향 축 (L스틱 좌우, Mode OFF 아날로그)
-  axis_speed:        5           # 속도 축 (RT 트리거)
+  axis_speed:        5           # 속도 축 (RT 트리거, F710 X 모드)
   btn_reverse:       5           # 후진 전환 버튼 (RB — 누른 채 RT → 후진)
   btn_toggle:        4           # 수동↔자율 토글 버튼 (LB)
-  steer_invert:      false       # 조향 방향 반전
+  steer_invert:      true        # 조향 좌우 반전
+  speed_invert:      true        # 전진/후진 반전 (RT 방향)
 
   # ★ 트리거 부호 규약 — 읽는 경로에 따라 반대다!
   #     ROS /joy 토픽        : 안 누름 = +1, 끝까지 = -1   ← 이 노드의 기준
   #     커널 /dev/input/js0  : 안 누름 = -1, 끝까지 = +1   (check_joystick.py)
-  #   그래서 true 가 정상. false 로 두면 RT를 안 눌러도 최고 속도가 나간다.
-  #   (거꾸로 설정하면 arm_on_neutral 안전장치가 스로틀을 막고 경고를 띄운다)
+  # 실제 휴지는 joystick_teleop 이 기동 ~1초 자동 측정 (yaml 값은 초기 추정)
   trigger_invert:    true
 
   # 속도 응답 (RT를 당긴 만큼 선형 비례)
@@ -877,7 +881,7 @@ joystick:
   trigger_expo:      1.0         # 1.0 = 완전 선형 / 1.5~2.0 = 저속 구간 완만 (미세조작 쉬움)
   steer_deadzone:    0.08        # L스틱 중립 유격
   arm_on_neutral:    true        # 시작 시 RT 중립 확인 전까지 스로틀 잠금 (안전)
-  debug:             false       # true → RT raw→스로틀%→m/s 를 콘솔에 출력
+  debug:             true        # true → RT raw→스로틀%→m/s 를 콘솔에 출력
   # ★ ./race.sh joy 전용 최고속도 (m/s). 수동으로 시원하게 몰 때 쓴다.
   #   이 줄을 지우면 speed.mapping_max 로 폴백한다.
   #   ※ mapping / mapping-joy 는 영향 없음 — 맵핑은 천천히 돌아야 품질이 좋아서
