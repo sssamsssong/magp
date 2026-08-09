@@ -254,6 +254,7 @@ def generate_launch_description():
                 'btn_reverse':      int(  jc.get('btn_reverse',      5)),
                 'btn_toggle':       int(  jc.get('btn_toggle',       4)),
                 'steer_invert':     bool( jc.get('steer_invert',     False)),
+                'speed_invert':     bool( jc.get('speed_invert',     False)),
                 'trigger_invert':   bool( jc.get('trigger_invert',   True)),
                 'trigger_deadzone': float(jc.get('trigger_deadzone', 0.05)),
                 'trigger_expo':     float(jc.get('trigger_expo',     1.0)),

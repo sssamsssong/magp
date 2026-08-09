@@ -70,6 +70,7 @@ class JoystickTeleop(Node):
         self.declare_parameter('allow_toggle',     True)
         self.declare_parameter('start_auto',       False)
         self.declare_parameter('steer_invert',     False)
+        self.declare_parameter('speed_invert',     False)  # 전진/후진 부호 반전
         self.declare_parameter('trigger_invert',   True)   # /joy 기준 안 누름=+1
         self.declare_parameter('trigger_deadzone', 0.05)
         self.declare_parameter('trigger_expo',     1.0)    # 1.0 = 완전 선형
@@ -103,6 +104,7 @@ class JoystickTeleop(Node):
         self.btn_rev       = p('btn_reverse')
         self.btn_tog       = p('btn_toggle')
         self.inv_steer     = p('steer_invert')
+        self.inv_speed     = bool(p('speed_invert'))
         self.inv_trigger   = p('trigger_invert')
         self.trig_dz       = min(max(float(p('trigger_deadzone')), 0.0), 0.9)
         self.trig_expo     = max(float(p('trigger_expo')), 0.1)
@@ -119,8 +121,12 @@ class JoystickTeleop(Node):
         self._slim_logged = None
 
         # 트리거 양 끝점: 안 누름(중립) → 끝까지 당김
+        # yaml trigger_invert 는 "초기 추정" 이고, 아래 자동 캘리로 덮일 수 있다.
         self.trig_neutral = 1.0 if self.inv_trigger else -1.0
         self.trig_full    = -self.trig_neutral
+        # 기동 직후 0.4초 동안 RT 축 평균 → 실제 휴지. invert 불일치 경고를 없앤다.
+        self._rest_samples = []
+        self._rest_calibrated = False
 
         self.allow_tog  = bool(p('allow_toggle'))
         self.auto_mode  = bool(p('start_auto'))   # 주행 스택에 붙으면 자율로 시작
@@ -168,9 +174,11 @@ class JoystickTeleop(Node):
             f'  RT(축{self.ax_speed}) → 전진 속도 (선형, 놓으면 즉시 정지)\n'
             f'  L스틱(축{self.ax_steer}) → 조향\n'
             f'  RB(버튼{self.btn_rev}) 누른 채 RT → 후진\n'
-            f'  트리거 매핑: {self.trig_neutral:+.0f}(안 누름) → {self.trig_full:+.0f}(끝까지)'
-            f'  = 0 → {self.max_speed} m/s'
-            f'  [deadzone {self.trig_dz}, expo {self.trig_expo}]')
+            f'  트리거: 기동 시 자동 휴지 캘리 (초기 추정 '
+            f'{self.trig_neutral:+.0f}→{self.trig_full:+.0f}, '
+            f'yaml invert={self.inv_trigger})\n'
+            f'  ★ 캘리 동안 RT 손 떼고 가만히 — 평균값=휴지로 잡음\n'
+            f'  max_speed={self.max_speed} m/s  [deadzone {self.trig_dz}, expo {self.trig_expo}]')
 
     def _drive_cb(self, msg: AckermannDriveStamped):
         self._drive_seen = time.time()
@@ -192,13 +200,58 @@ class JoystickTeleop(Node):
             '  → 자율주행까지 하려면 ./race.sh q1|q2|q3|race 를 쓰세요.',
             throttle_duration_sec=5.0)
 
+    def _calibrate_rest(self, raw: float) -> bool:
+        """RT 휴지값을 측정. True 면 아직 캘리 중(속도 0 유지)."""
+        if self._rest_calibrated:
+            return False
+        self._rest_samples.append(float(raw))
+        need = 20   # ~ joy 20–50Hz 기준 0.4–1초
+        if len(self._rest_samples) < need:
+            return True
+        m = sum(self._rest_samples) / len(self._rest_samples)
+        # |mean|≥0.4 → 양끝 중 한 쪽이 휴지 (ROS/ SDL / 커널 공통)
+        # |mean|<0.4 → 커널 0-휴지: 당김 방향은 - 쪽이라고 가정 (jstest 실측)
+        if m >= 0.4:
+            self.trig_neutral = 1.0
+            self.trig_full = -1.0
+            self.inv_trigger = True
+            mode = 'rest=+1 press=-1'
+        elif m <= -0.4:
+            self.trig_neutral = -1.0
+            self.trig_full = 1.0
+            self.inv_trigger = False
+            mode = 'rest=-1 press=+1'
+        else:
+            # rest≈0, full≈-1 (F710 커널 흔한 경우)
+            self.trig_neutral = 0.0
+            self.trig_full = -1.0
+            self.inv_trigger = True   # _throttle 분기용 플래그로 zero-rest 는 별도 처리
+            mode = 'rest≈0 press=-1 (kernel)'
+        self._rest_calibrated = True
+        self.armed = True
+        self.get_logger().info(
+            f'트리거 자동 캘리 완료: 휴지 평균={m:+.3f} → {mode}  '
+            f'neutral={self.trig_neutral:+.2f} full={self.trig_full:+.2f}  '
+            f'— 이제 RT 사용 가능')
+        return False
+
     # ── 트리거 raw 값 → 0.0~1.0 선형 스로틀 ────────────────────
     def _throttle(self, raw: float) -> float:
+        # rest≈0 · full≈-1 (커널)
+        if abs(self.trig_neutral) < 0.2:
+            u = max(0.0, min(1.0, -float(raw)))   # raw 0→0, -1→1
+            if u <= self.trig_dz:
+                return 0.0
+            u = (u - self.trig_dz) / (1.0 - self.trig_dz)
+            return u ** self.trig_expo
+        # rest/full 이 ±1 양끝
+        if abs(self.trig_full - self.trig_neutral) < 1e-6:
+            return 0.0
         u = (raw - self.trig_neutral) / (self.trig_full - self.trig_neutral)
         u = min(max(u, 0.0), 1.0)
         if u <= self.trig_dz:
             return 0.0
-        u = (u - self.trig_dz) / (1.0 - self.trig_dz)   # 데드존 제거 후 재정규화
+        u = (u - self.trig_dz) / (1.0 - self.trig_dz)
         return u ** self.trig_expo
 
     # ── 스틱 raw 값 → -1.0~1.0 (중립 유격 제거) ────────────────
@@ -244,25 +297,29 @@ class JoystickTeleop(Node):
         raw_steer = msg.axes[self.ax_steer] if len(msg.axes) > self.ax_steer else 0.0
         reverse   = len(msg.buttons) > self.btn_rev and bool(msg.buttons[self.btn_rev])
 
-        # 안전장치: 트리거가 중립 근처에 있는 걸 한 번 봐야 스로틀을 푼다.
-        # trigger_invert가 거꾸로면 중립을 영영 못 보므로 차가 튀어나가지 않는다.
+        # 기동 직후 휴지 자동 캘리 (yaml invert 불일치 해결)
+        if self._calibrate_rest(raw_trig):
+            self._publish(0.0, 0.0)
+            return
+
+        # (레거시) arm_on_neutral: 캘리 후 이미 armed. 추가 대기 불필요.
         if not self.armed:
-            if abs(raw_trig - self.trig_neutral) <= 0.15:
+            if abs(raw_trig - self.trig_neutral) <= 0.20:
                 self.armed = True
                 self.get_logger().info('트리거 중립 확인 — 스로틀 활성화')
             else:
                 if not self._warned:
                     self._warned = True
                     self.get_logger().warn(
-                        f'트리거 중립({self.trig_neutral:+.0f}) 대기 중 — 현재 {raw_trig:+.2f}. '
-                        f'RT에서 손을 떼세요. 계속 이 경고가 뜨면 '
-                        f'trigger_invert 설정이 반대입니다 (현재 {self.inv_trigger}).')
+                        f'트리거 중립({self.trig_neutral:+.2f}) 대기 중 — 현재 {raw_trig:+.2f}.')
                 self._publish(0.0, 0.0)
                 return
 
         u     = self._throttle(raw_trig)          # 0.0 ~ 1.0 선형
         speed = u * self._limit(self._speed_lim, self.max_speed, 'speed')
         if reverse:
+            speed = -speed
+        if self.inv_speed:
             speed = -speed
 
         steer = self._stick(raw_steer)
