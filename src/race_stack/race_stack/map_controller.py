@@ -172,6 +172,15 @@ class MapController(Node):
         #   (_publish_cmd). 조향은 살아 있어야 검증이 되므로 건드리지 않는다.
         self.declare_parameter('bench',       False)
 
+        # 슬립보정(α_f) 이득 [0~1]. 1.0 = 모델값 그대로.
+        #   ★ 2026-08-09 실차: 코너에서 α_f 가 기구학항만큼 커져 **과조향**이 났다.
+        #     주행 궤적 곡률이 기준의 1.2~1.9배 (s=20~28m 구간, cool_clean).
+        #     타이어가 모델만큼 안 미끄러진다는 뜻 — mu 나 pac_b 가 실제보다
+        #     낮게 잡혀 있다. 둘 다 [미검증] 값이다.
+        #     mu 를 올리면 속도 프로파일까지 같이 빨라져 원인이 섞이므로,
+        #     **조향 보정만** 따로 줄일 수 있는 손잡이를 둔다.
+        self.declare_parameter('slip_gain',   1.0)
+
         # ↓ 폐기됨. 남겨둔 건 옛 설정이 죽지 않게 하려는 것뿐이고, 1.0 이 아니면
         #   경고하고 **무시한다**. 위 grip_util 을 쓸 것.
         self.declare_parameter('speed_scale', 1.0)
@@ -465,6 +474,7 @@ class MapController(Node):
         Fzf = mass * GRAVITY * lr / wb          # 앞축 수직하중
         F_yf = mass * a_lat * lr / wb           # 앞축 필요 횡력
         alpha_f = self._pacejka_inv(F_yf / (mu * Fzf))   # 슬립각 보정
+        alpha_f *= float(self.p('slip_gain'))            # ★ 과조향 억제 (위 주석)
 
         delta_kin = math.atan(wb * 2.0 * math.sin(eta) / max(L1, 1e-3))
         max_steer = float(self.p('max_steer'))

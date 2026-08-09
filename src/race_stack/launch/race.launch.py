@@ -527,6 +527,8 @@ def generate_launch_description():
                 'speed_scale':   float(mp.get('speed_scale', 1.0)),
                 'mu_cap':        bool( mp.get('mu_cap',      True)),
                 'steer_alpha':   float(mp.get('steer_alpha', 0.1981)),
+                # 슬립보정 이득 (1.0=모델값). 코너 과조향이면 낮춘다
+                'slip_gain':     float(mp.get('slip_gain',   1.0)),
                 'reverse_check': bool( mp.get('reverse_check', True)),
                 # AMCL 첫 pose 전까지의 위치 가정 (stanley 와 같은 값을 쓴다).
                 # 없으면 출발선에서 pose 를 기다리다 영영 못 움직인다.
