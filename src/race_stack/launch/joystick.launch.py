@@ -80,6 +80,24 @@ def generate_launch_description():
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
 
+    # ★ 차량별 덮어쓰기 — race.launch.py 와 **같은 규약**이어야 한다.
+    #   joystick 절은 차량 파일이 소유하는데(steer_invert/축·버튼/max_speed),
+    #   여기서 안 얹으면 ./race.sh joy 만 race_script.yaml 의 공용값으로 돈다.
+    #   두 차의 조이스틱 설정이 다르면 조용히 남의 차 값으로 주행하게 된다
+    #   (2026-08-10 발견: max_speed 를 차량 파일에서 낮췄는데 joy 에 안 먹었다).
+    _ovl_path = os.environ.get('RACE_VEHICLE_OVERLAY', '')
+    if _ovl_path and os.path.exists(_ovl_path):
+        def _deep(dst, src):
+            for k, v in src.items():
+                if isinstance(v, dict) and isinstance(dst.get(k), dict):
+                    _deep(dst[k], v)
+                else:
+                    dst[k] = v
+        with open(_ovl_path) as f:
+            _deep(cfg, yaml.safe_load(f) or {})
+        if not quiet:
+            print(f'[joystick.launch] 차량 덮어쓰기 적용: {_ovl_path}')
+
     joy_cfg = cfg.get('joystick', {})
     speed   = cfg.get('speed', {})
 

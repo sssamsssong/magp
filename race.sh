@@ -133,12 +133,24 @@ done
 set -- "${_args[@]}"
 
 CMD=${1:-}
+# ★ 차량 overlay 를 먼저 본다 — race.launch.py 와 같은 규약.
+#   mapping-joy 처럼 race.sh 가 직접 값을 읽어 -p 로 넘기는 경로가 있는데,
+#   여기서 overlay 를 안 보면 그 경로만 race_script.yaml 의 공용값으로 돈다
+#   (2026-08-10: joystick 절을 차량 파일로 옮겼는데 조이스틱 모드에 안 먹었다).
 get_yaml () { python3 -c "
-import yaml,sys
-d=yaml.safe_load(open('$RACE_SCRIPT'))
-k='$1'.split('.'); v=d
-for kk in k: v=v[kk]
-print(v)"; }
+import yaml, os
+key = '$1'.split('.')
+def dig(path):
+    d = yaml.safe_load(open(path))
+    for k in key: d = d[k]
+    return d
+val = None
+ovl = os.environ.get('RACE_VEHICLE_OVERLAY', '')
+if ovl and os.path.exists(ovl):
+    try: val = dig(ovl)
+    except Exception: val = None
+if val is None: val = dig('$RACE_SCRIPT')
+print(val)"; }
 
 # 돌고 있는 스택 프로세스 PID 목록.
 # ★ launch 부모만 찾으면 안 된다. 터미널을 pkill 하거나 SSH 가 끊기면 부모(launch)만
