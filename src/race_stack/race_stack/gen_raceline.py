@@ -884,11 +884,25 @@ def gui_draw_raceline(map_name: str, args) -> tuple | None:
 def main():
     p = argparse.ArgumentParser(description='TUMFTM 최소 곡률 레이싱라인 생성기')
     p.add_argument('--map',    default=None,  help='맵 이름 (생략 시 대화형 선택)')
-    p.add_argument('--vmax',   type=float, default=8.0,  help='최대 속도 (m/s)')
+    # ★ CSV 속도 열은 solve_profile 에서 **상한으로만** 쓰인다. 실제 속도는
+    #   limits.grip_util × μ_eff 가 정한다. 그래서 여기를 차량 물리 한계까지
+    #   열어두고 grip_util 로 낮춰가며 올리는 게 맞다 — 낮게 잡아두면 CSV 가
+    #   먼저 잘라서 grip_util 을 올려도 안 빨라진다.
+    #   12.0 은 VESC 소프트 상한(speed_max 50000 erpm ÷ 4203 = 11.9㎧)에 맞춘 값.
+    p.add_argument('--vmax',   type=float, default=12.0, help='최대 속도 (m/s)')
     p.add_argument('--vmin',   type=float, default=1.0,  help='최소 속도 (m/s)')
     # 2026-08-09 실측 추정 0.40 (구 1.0489). 과대평가하면 레이싱라인 속도가
 # 실제 그립을 넘어 코너에서 밀려난다 — 안전 방향으로 낮춘다.
-    p.add_argument('--mu',     type=float, default=0.40, help='마찰 계수')
+    # ★ 이 값은 **CSV 속도 열**만 정한다. 라인 모양(QP)과는 무관하다.
+    #   그 속도는 주행 중 solve_profile 에서 **상한으로만** 쓰이고, 실제 속도는
+    #   limits.grip_util × (map.mu × pac_d) 가 정한다.
+    #   → 그러므로 넉넉히 잡는 게 맞다. 낮게 잡으면 나중에 그립을 올려도
+    #     CSV 가 먼저 잘라 안 빨라진다 (fun_clean 실측: μ_eff 0.56 상당에서
+    #     --mu 0.4 로 만든 CSV 는 랩 12.2s, 0.6 이상은 11.1s — 1.1초 손해).
+    #   0.9 는 우레탄 노면까지 열어둔 값. 안전은 grip_util 로 잡는다.
+    p.add_argument('--mu',     type=float, default=0.90,
+                   help='CSV 속도 열 계산용 마찰계수. 라인 모양과 무관하고 주행 중엔 '
+                        '상한으로만 쓰인다 — 넉넉히 줄 것 (실제 속도는 grip_util 이 정함)')
     p.add_argument('--wveh',   type=float, default=0.31,  help='차량 폭 (m)')
     p.add_argument('--safety', type=float, default=0.35,
                    help='벽 안전 마진 (m). QP 가 쓸 수 있는 트랙 폭을 이만큼 좁힌다 '
