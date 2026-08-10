@@ -35,3 +35,11 @@ logs/
 
 # sim.sh 자동 생성 심링크
 f1TENTH-contest_full_stack/sim_ws/src/f1tenth_gym_ros/maps/*_waypoints.csv
+
+# ★ 차량별 캘리브레이션 — 절대 커밋하지 않는다
+#   config/vesc.yaml 은 config/vesc_base.yaml + config/vehicle_<차>.yaml 에서
+#   apply_vehicle.py 가 매 실행마다 생성한다. git 에 두면 2호차의 음수
+#   speed_to_erpm_gain 이 1호차로 넘어가 차가 후진한다 — 추적 대상에서 뺀다.
+config/vesc.yaml
+config/.vehicle_overlay.yaml
+.car

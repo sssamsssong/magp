@@ -28,11 +28,31 @@ import scipy.sparse as sp
 _PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ★ 차량 최소회전반경 [m] — 라인이 아무리 빨라도 못 도는 건 소용없다.
-#   R = wheelbase / tan((servo_min − offset) / (−gain))   ← config/vesc.yaml
-#   2026-08-09: 0.324 / tan((0.12 − 0.3954)/(−0.761)) = 0.856 m (좌회전 기준).
-#   조향이 좌우 비대칭이고 halfhot 은 전 구간 좌회전이라 좌측이 한계다.
-#   vesc.yaml 의 servo_min/offset/gain 을 바꾸면 **이 값도 같이 고쳐야 한다.**
-R_CAR_MIN = 0.856
+#   R = wheelbase / tan((servo_min − offset) / (−gain))
+#
+#   ★ 손으로 적지 않는다. config/vehicle_<차>.yaml 에서 읽어 계산한다 —
+#     예전엔 여기 0.856 이 박혀 있었는데 컨트롤러는 wheelbase 0.33 을 써서
+#     0.872 로 보고 있었다. 같은 값을 두 군데 적으면 반드시 갈라진다.
+#     차량 파일이 없으면(다른 기기에서 분석만 할 때) 아래 폴백을 쓴다.
+def _car_min_radius(fallback=0.872):
+    import math
+    for name in ('.vehicle_overlay.yaml',):
+        p = os.path.join(_PKG_DIR, '..', '..', 'config', name)
+        p = os.path.abspath(p)
+        if not os.path.exists(p):
+            continue
+        try:
+            import yaml as _y
+            o = _y.safe_load(open(p))
+            ms = float(o['pure_pursuit']['max_steer'])
+            wb = float(o['pure_pursuit']['wheelbase'])
+            return wb / math.tan(ms)
+        except Exception:
+            pass
+    return fallback
+
+
+R_CAR_MIN = _car_min_radius()
 MAPS_DIR = os.path.join(_PKG_DIR, 'maps')
 WP_DIR   = os.path.join(_PKG_DIR, 'waypoints')
 

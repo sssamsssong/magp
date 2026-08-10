@@ -53,6 +53,15 @@ RACE_SCRIPT="$SCRIPT_DIR/race_script.yaml"
 PKG_SHARE_MAPS="$WS/src/race_stack/maps"
 PKG_SHARE_WP="$WS/src/race_stack/waypoints"
 
+# ---------- 0-1. 차량별 캘리브레이션 펼치기 ----------
+# 차가 두 대인데 저장소는 하나다. config/vesc.yaml 을 그대로 공유하면 2호차의
+# 음수 speed_to_erpm_gain 이 1호차로 넘어가 **차가 후진한다**. 그래서 코드는
+# 합치고 값만 분리한다 — .car 가 가리키는 config/vehicle_<차>.yaml 에서
+# config/vesc.yaml 과 race_script 덮어쓰기(overlay)를 매 실행마다 새로 만든다.
+# vesc.yaml 은 .gitignore 라 잘못 커밋할 방법 자체가 없다.
+python3 "$SCRIPT_DIR/config/apply_vehicle.py" || exit 1
+export RACE_VEHICLE_OVERLAY="$SCRIPT_DIR/config/.vehicle_overlay.yaml"
+
 # ---------- 0. 환경 소싱 ----------
 source /opt/ros/humble/setup.bash
 source "$WS/install/setup.bash"

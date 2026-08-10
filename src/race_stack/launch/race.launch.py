@@ -33,6 +33,25 @@ def generate_launch_description():
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
 
+    # ── 차량별 값 덮어쓰기 ────────────────────────────────────────────
+    # race_script.yaml 은 두 차량 공용이고, 이 차만의 값(캘리브레이션·기하·
+    # 튜닝)은 config/vehicle_<차>.yaml 에서 온다. race.sh 가 apply_vehicle.py
+    # 로 펼쳐 놓은 것을 여기서 얹는다.
+    #   ★ "어느 키가 어디로 가는가" 는 apply_vehicle.py 에만 있다. 여기서는
+    #     통째로 deep-merge 만 한다 — 매핑을 두 군데 두면 반드시 어긋난다.
+    _ovl_path = os.environ.get('RACE_VEHICLE_OVERLAY', '')
+    if _ovl_path and os.path.exists(_ovl_path):
+        def _deep(dst, src):
+            for k, v in src.items():
+                if isinstance(v, dict) and isinstance(dst.get(k), dict):
+                    _deep(dst[k], v)
+                else:
+                    dst[k] = v
+        with open(_ovl_path) as f:
+            _ovl = yaml.safe_load(f) or {}
+        _deep(cfg, _ovl)
+        print(f'[race.launch] 차량 덮어쓰기 적용: {_ovl_path}')
+
     # mode:=/controller:=/bench:= 오버라이드는 race.sh가 launch arg로 준다.
     # sys.argv를 직접 파싱한다 (LaunchConfiguration은 파이썬 로직에서 못 씀)
     import sys
