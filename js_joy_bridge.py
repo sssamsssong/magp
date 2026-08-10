@@ -54,8 +54,17 @@ class JsJoyBridge(Node):
             is_init = bool(etype & JS_EVENT_INIT)
             etype &= ~JS_EVENT_INIT
             if etype == JS_EVENT_AXIS:
-                # 커널 raw 그대로. 휴지/당김 부호는 teleop 가 자동 맞춤.
-                self.axes[number] = max(-1.0, min(1.0, value / 32767.0))
+                # ★ 부호를 뒤집는다 — ROS `joy` 패키지와 같은 규약으로 맞추기 위해서다.
+                #   joy_node 는 커널 값을 negate 해서 발행한다 (2026-08-10 실측:
+                #   커널 axis2 = -32767 인데 /joy 에는 +1.0000 으로 나온다).
+                #   여기서 raw 를 그대로 내보내면 **모든 축이 반대**가 되어,
+                #   같은 race_script/vehicle 설정인데도 브리지를 쓰는 mapping-joy 만
+                #   조향이 좌우 반대로 동작한다 (실제로 그랬다).
+                #   트리거는 teleop 의 기동 시 자동 캘리가 부호를 흡수해서 티가 안 나고,
+                #   자동 캘리가 없는 조향에서만 증상이 드러나 원인을 찾기 어렵다.
+                #   → 브리지는 joy_node 의 **드롭인 대체**여야 한다. 설정은 그대로 두고
+                #     여기서 규약을 맞춘다.
+                self.axes[number] = max(-1.0, min(1.0, -value / 32767.0))
             elif etype == JS_EVENT_BUTTON:
                 self.buttons[number] = 1 if value else 0
             if is_init:
