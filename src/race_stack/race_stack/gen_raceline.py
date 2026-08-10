@@ -595,8 +595,13 @@ def optimize_raceline(reftrack, outer, inner, *, w_veh, r_min, stepsize,
 
     if best is None:
         raise RuntimeError(
-            f'optimize_raceline: 벽 여유 {wall_clear:.3f}m 를 만족하는 해가 없다. '
-            f'--wallclear 를 낮추거나 --safety 를 줄일 것')
+            f'optimize_raceline: 벽 여유 {wall_clear:.3f}m 를 만족하는 해가 없다.\n'
+            f'  → **--safety 를 올릴 것** (예: 0.35). safety 는 QP 가 쓸 수 있는\n'
+            f'     폭을 좁혀 라인을 중앙에 붙인다 = 벽 여유가 늘어난다.\n'
+            f'     직관과 반대라 2026-08-10 에 이 메시지가 "줄이라" 고 잘못\n'
+            f'     안내한 적이 있다. fun_clean 실측: safety 0.15 → 0.35 으로\n'
+            f'     여유 0.074→0.208m, R_min 1.150→1.180m, 랩 11.5→11.4s (전부 개선).\n'
+            f'  → 그래도 안 되면 트랙이 정말 좁은 것이다. --wallclear 를 낮출 것.')
     return best
 
 
@@ -885,7 +890,9 @@ def main():
 # 실제 그립을 넘어 코너에서 밀려난다 — 안전 방향으로 낮춘다.
     p.add_argument('--mu',     type=float, default=0.40, help='마찰 계수')
     p.add_argument('--wveh',   type=float, default=0.31,  help='차량 폭 (m)')
-    p.add_argument('--safety', type=float, default=0.15,  help='벽 안전 마진 (m)')
+    p.add_argument('--safety', type=float, default=0.35,
+                   help='벽 안전 마진 (m). QP 가 쓸 수 있는 트랙 폭을 이만큼 좁힌다 '
+                        '— 올리면 라인이 중앙에 붙어 벽 여유가 늘어난다')
     p.add_argument('--acc',    type=float, default=5.0,  help='가속도 (m/s²)')
     p.add_argument('--brk',    type=float, default=8.0,  help='제동 (m/s²)')
     p.add_argument('--step',   type=float, default=0.1,  help='웨이포인트 간격 (m)')
@@ -897,8 +904,10 @@ def main():
     p.add_argument('--steplimit', type=float, default=0.15,
                    help='반복 1회당 최대 횡이동 (m) — 신뢰영역')
     p.add_argument('--iters',  type=int, default=12, help='재선형화 반복 횟수')
-    p.add_argument('--wallclear', type=float, default=0.06,
-                   help='벽까지 최소 여유 (m, 차폭 제외). 실주행 검증된 라인이 0.060')
+    p.add_argument('--wallclear', type=float, default=0.18,
+                   help='벽까지 최소 여유 (m, 차폭 제외). ★ 실측 추종오차보다 커야 '
+                        '한다 — 2026-08-09 CTE p95 가 η0.5 에서 0.217m, η1.0 에서 '
+                        '0.320m 였다. 옛 기본값 0.06 은 코너 정점에서 확실히 걸린다')
     p.add_argument('--gui',   action='store_true',       help='클릭 GUI 드로잉 모드')
     p.add_argument('--out',   default=None,              help='출력 웨이포인트 이름 (기본: {map}_map_wp 또는 {map}_draw_wp)')
     args = p.parse_args()
