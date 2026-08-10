@@ -55,8 +55,8 @@ class MAPController(Node):
         self.SPEED_SCALE = rs.get('speed_scale', 2.0)
 
         # ── L1 가이던스 파라미터 ──────────────────────────────────────────
-        self.L1_MIN = rs.get('l1_min', 0.90)
-        self.L1_K   = rs.get('l1_k',   0.35)
+        self.L1_MIN = 1.3155
+        self.L1_K   = 0.2993
 
         # ── 차량 동역학 ───────────────────────────────────────────────────
         self.MASS = rs.get('mass', 3.354)
@@ -74,7 +74,7 @@ class MAPController(Node):
         self.A_BRAKE = 6.0902
 
         # ── 조향 저역통과 필터 ────────────────────────────────────────────
-        self.STEER_ALPHA = rs.get('steer_alpha', 0.1981)
+        self.STEER_ALPHA = 0.4961
         self._steer_prev = 0.0
         self._cur_speed  = 0.0
 
