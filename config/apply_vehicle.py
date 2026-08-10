@@ -201,6 +201,26 @@ def main():
         f.write(f'# 자동 생성 ({car}) — race_script.yaml 위에 덮어쓴다. 고치지 말 것.\n')
         yaml.safe_dump(ovl, f, allow_unicode=True, sort_keys=True)
 
+    # ── race_script.yaml 과 값이 갈라졌는지 본다 ──────────────────────
+    # 같은 키가 두 군데 있으면 반드시 갈라진다. race_script 쪽은 시뮬(노트북)이
+    # 읽는 기본값이라 지울 수 없으므로, **다르면 소리를 낸다.**
+    # 이걸 안 하면 "race_script 를 고쳤는데 실차에서 효과가 없다" 가 된다 —
+    # 2026-08-09 에만 이 형태의 함정이 다섯 번 나왔다.
+    rs_path = os.path.join(_REPO, 'race_script.yaml')
+    diverged = []
+    if os.path.exists(rs_path):
+        rs = yaml.safe_load(open(rs_path)) or {}
+
+        def cmp(o, r, pre=''):
+            for k, v in o.items():
+                key = f'{pre}.{k}' if pre else k
+                rv = r.get(k) if isinstance(r, dict) else None
+                if isinstance(v, dict):
+                    cmp(v, rv if isinstance(rv, dict) else {}, key)
+                elif rv is not None and rv != v:
+                    diverged.append((key, rv, v))
+        cmp(ovl, rs)
+
     if not args.quiet:
         n = sum(len(x) if isinstance(x, dict) else 1 for x in ovl.values())
         print(f'[vehicle] {car}  (config/vehicle_{car}.yaml)')
@@ -215,6 +235,11 @@ def main():
         todo = len(re.findall(r'미측정', raw))
         if todo:
             print(f'[vehicle]   ⚠ 미측정 표시 {todo}개 — 다른 차 값을 빌려 쓰는 중입니다')
+        if diverged:
+            print(f'[vehicle]   ⚠ race_script.yaml 과 다른 값 {len(diverged)}개 '
+                  f'— **차량 파일이 이깁니다.** race_script 쪽을 고쳐도 안 먹습니다:')
+            for k, rv, vv in diverged:
+                print(f'[vehicle]        {k}: race_script={rv} → 실제 적용 {vv}')
     return 0
 
 
