@@ -19,8 +19,18 @@ from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
     f1tenth_share = get_package_share_directory('f1tenth_stack')
-    slam_params = os.path.join(f1tenth_share, 'config',
-                               'f1tenth_online_async.yaml')
+
+    # SLAM 파라미터는 race_stack 소유 사본을 쓴다.
+    #   f1tenth_stack/config/f1tenth_online_async.yaml 은 업스트림 패키지 소유라
+    #   우리가 고치면 패키지 갱신 때 덮이고, 두 차가 공유해 실험도 못 한다.
+    #   race_stack/config/slam_mapping.yaml 로 복사해 거기서 튜닝한다.
+    #   ★ 되돌리려면 아래 fallback 경로를 그대로 쓰면 된다 (파일만 지우면 자동).
+    race_share = get_package_share_directory('race_stack')
+    slam_params = os.path.join(race_share, 'config', 'slam_mapping.yaml')
+    if not os.path.exists(slam_params):
+        slam_params = os.path.join(f1tenth_share, 'config',
+                                   'f1tenth_online_async.yaml')
+    print(f'[mapping.launch] SLAM 파라미터: {slam_params}')
 
     # race.launch.py 와 같은 경로 규약 (race.sh 가 RACE_SCRIPT 를 export 한다)
     cfg_path = os.environ.get(
