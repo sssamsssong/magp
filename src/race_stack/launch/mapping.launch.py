@@ -37,9 +37,28 @@ def generate_launch_description():
         'RACE_SCRIPT', os.path.expanduser('~/race_script.yaml'))
     try:
         with open(cfg_path) as f:
-            loc = (yaml.safe_load(f) or {}).get('localization', {}) or {}
+            cfg = yaml.safe_load(f) or {}
     except OSError:
-        loc = {}
+        cfg = {}
+
+    # ★ 차량별 덮어쓰기 — race.launch.py 와 **같은 규약**이어야 한다.
+    #   이게 없으면 vehicle_car*.yaml 의 localization 값(speed_sign 등)이
+    #   매핑에서만 통째로 무시된다. race_script.yaml 에 그 키가 아예 없으면
+    #   조용히 기본값이 들어가서, 값을 고쳐도 "안 먹는다" 로만 보인다
+    #   (2026-08-10: speed_sign -1 을 넣었는데 매핑에서 계속 +1 이었다).
+    _ovl_path = os.environ.get('RACE_VEHICLE_OVERLAY', '')
+    if _ovl_path and os.path.exists(_ovl_path):
+        def _deep(dst, src):
+            for k, v in src.items():
+                if isinstance(v, dict) and isinstance(dst.get(k), dict):
+                    _deep(dst[k], v)
+                else:
+                    dst[k] = v
+        with open(_ovl_path) as f:
+            _deep(cfg, yaml.safe_load(f) or {})
+        print(f'[mapping.launch] 차량 덮어쓰기 적용: {_ovl_path}')
+
+    loc = cfg.get('localization', {}) or {}
 
     bringup = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
