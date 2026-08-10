@@ -66,6 +66,39 @@ config/.vehicle_overlay.yaml    race_script.yaml 위에 덮을 값  .gitignore
 
 ---
 
+## ⚠️ 네트워크를 바꿨으면 스택을 반드시 재시작할 것
+
+이 젯슨은 두 와이파이를 오갑니다:
+
+| 상황 | 붙는 곳 | 상태 |
+|---|---|---|
+| **주행 중** | 팀 공유기 `192.168.50.x` | 노트북 RViz 연동 가능 |
+| **Claude 에게 질문할 때** | 인터넷 되는 공용 와이파이 | **주행은 멈춰 있음** |
+
+Claude 와 대화하는 동안은 차가 공유기에 붙어 있지 않고 주행도 안 하는 상태입니다.
+그러니 `[dds] ⚠ CycloneDDS 폴백` 경고나 `network.subnet 로 시작하는 내 IP 가 없습니다`
+는 **이때는 정상**입니다 — 설정 오류로 보고할 필요가 없습니다.
+
+### ★ 그런데 스택을 켠 뒤에 네트워크를 바꾸면 조용히 망가집니다
+
+`dds_env.sh` 는 **기동 시점의 IP 로 CycloneDDS 인터페이스를 고정**합니다
+(`/tmp/cyclonedds-<내IP>.xml` 의 `<NetworkInterface address=...>`).
+그 뒤 와이파이를 바꾸면 그 인터페이스가 사라지는데, **CycloneDDS 는 재바인딩하지
+못합니다.** 노드는 살아 있는데 서로 못 듣는 상태가 됩니다:
+
+```
+launch.log 가 이걸로 도배된다:
+  ddsi_udp_conn_write to udp/192.168.50.77:7480 failed with retcode -1
+```
+
+2026-08-10 실제로 겪었습니다 — 공유기에서 `./race.sh joy` 를 띄운 뒤 공용
+와이파이로 옮기자 **조향이 갑자기 먹통**이 됐습니다. `joystick_teleop` 의 명령이
+`ackermann_to_vesc` 에 도달하지 못한 것이고, 서보나 VESC 고장처럼 보여 디버깅이 샙니다.
+
+**규칙: 와이파이를 바꿨으면 `./race.sh stop` 후 다시 띄울 것.**
+
+---
+
 ## 저장소 정보
 
 - **원격:** `git@github.com:lloes098/26-jetson-f1tenth.git`
