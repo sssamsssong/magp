@@ -220,6 +220,11 @@ def main():
                 elif rv is not None and rv != v:
                     diverged.append((key, rv, v))
         cmp(ovl, rs)
+        # ★ max_steer 는 **설계상** 계산값이라 race_script 와 달라야 정상이다.
+        #   (servo_min−offset)/(−gain) 에서 유도한다 — 손으로 적은 값과 다른 게
+        #   이 구조의 목적이다. 경고로 띄우면 진짜 경고가 묻힌다.
+        DERIVED = {'pure_pursuit.max_steer'}
+        diverged = [d for d in diverged if d[0] not in DERIVED]
 
     if not args.quiet:
         n = sum(len(x) if isinstance(x, dict) else 1 for x in ovl.values())
@@ -231,10 +236,16 @@ def main():
               f'우 {math.degrees(right):+.2f}° → max_steer {lim:.4f}, R_min {rmin:.3f}m')
         print(f'[vehicle]   race_script 덮어쓴 키 {n}개')
         # 아직 안 잰 값 경고 — 주석에 '미측정' 이 있으면 센다
+        # 표시 두 가지를 구분한다:
+        #   미측정 — 이 차에서 아직 안 잰 값 (추정치일 수 있다)
+        #   차용   — 다른 차 값을 그대로 가져온 것 (반드시 재야 한다)
         raw = open(vpath).read()
-        todo = len(re.findall(r'미측정', raw))
+        todo  = len(re.findall(r'미측정', raw))
+        borrow = len(re.findall(r'\(1호차 값\)|1호차에서 빌려|차용', raw))
+        if borrow:
+            print(f'[vehicle]   ⚠ 다른 차에서 빌려온 값 {borrow}개 — 이 차에서 재야 합니다')
         if todo:
-            print(f'[vehicle]   ⚠ 미측정 표시 {todo}개 — 다른 차 값을 빌려 쓰는 중입니다')
+            print(f'[vehicle]   · 미측정(추정치) 표시 {todo}개')
         if diverged:
             print(f'[vehicle]   ⚠ race_script.yaml 과 다른 값 {len(diverged)}개 '
                   f'— **차량 파일이 이깁니다.** race_script 쪽을 고쳐도 안 먹습니다:')
