@@ -44,6 +44,8 @@ VEHICLE_KEYS = {
     'map.slip_gain':          'tuning.slip_gain',
     'limits.speed_lag':       'tuning.speed_lag',
     'limits.a_lon_acc':       'tuning.a_lon_acc',
+    'limits.launch_acc':      'tuning.launch_acc',
+    'limits.launch_time':     'tuning.launch_time',
     'limits.a_lon_brk':       'tuning.a_lon_brk',
     'limits.grip_util':       'tuning.grip_util',
     'network.peers':          'network.peers',

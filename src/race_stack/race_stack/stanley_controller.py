@@ -47,7 +47,7 @@ from sensor_msgs.msg import LaserScan
 # ★ Frenet 회피 로직은 obstacle_avoid 로 **이동**했다 (2026-08-09).
 #   컨트롤러마다 복붙하지 않으려는 것 — frenet_planner 노드와 MAP 이
 #   같은 코드를 쓴다. 로직은 한 글자도 안 바뀌었다.
-from race_stack.speed_profile import solve_profile
+from race_stack.speed_profile import solve_profile, LaunchLimiter
 from race_stack.obstacle_avoid import (ObstacleAvoidMixin, _load_map,
                                        _world_to_img)
 from std_msgs.msg import Bool, ColorRGBA
@@ -108,6 +108,11 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self.declare_parameter('grip_util',  0.6)
         self.declare_parameter('a_lon_acc',  0.0)   # 0=자동(후륜 하중분율)
         self.declare_parameter('a_lon_brk',  0.0)   # 0=자동(예산 전체)
+        # 출발 직후만 가속을 더 조인다 — 정지에서 뗄 때 휠 스핀이 커서 odom 이
+        # 거리를 과대보고하고, 그게 종방향 위치 오차로 남아 첫 코너를 일찍 돈다.
+        # 실측 근거와 로직은 speed_profile.LaunchLimiter 참고. 0 = 끔.
+        self.declare_parameter('launch_acc',  0.0)
+        self.declare_parameter('launch_time', 3.0)
         self.declare_parameter('hard_cap',   0.0)   # 0=끔. 물리 무관 안전천장
         # 차량 물리 — race_script.yaml [map] 이 원본이다 (같은 차이므로 공유)
         self.declare_parameter('mu',     0.348)
@@ -325,6 +330,8 @@ class StanleyController(ObstacleAvoidMixin, Node):
                 f'(spacing {self._wp_ds:.3f}m)')
 
         # ── state ─────────────────────────────────────────────────────
+        self._a_acc  = 0.0     # 프로파일이 실제로 쓴 가속 상한 (기동 시 채워진다)
+        self._launch = LaunchLimiter()   # 출발 직후 가속 제한 (휠 스핀 방지)
         self.enabled = False   # ★ mission_manager 의 /race/enabled(래치)를 받아야 켜진다.
         #   True 로 두면 그 값이 도착하기 전 한 틱이라도 먼저 나가버린다.
         #   mission_manager 가 없는 단독 실행이면 "정지 중: /race/enabled=false"
@@ -461,6 +468,7 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self.pos = np.array([pose[0], pose[1]])   # scan_cb 등 공용 상태 갱신
         self.yaw = pose[2]
         steer, speed = self._compute_cmd(*pose)
+        speed = self._launch_limit(speed)
         self._publish_cmd(steer, speed)
         self._update_car_trail(pose[0], pose[1])
 
@@ -481,6 +489,10 @@ class StanleyController(ObstacleAvoidMixin, Node):
         if self.enabled and not msg.data:
             self._steer_prev = 0.0   # 재활성화 시 이전 조향 재사용 방지
             self._publish_cmd(0.0, 0.0)
+        if msg.data and not self.enabled:
+            # 정지 → 출발. 여기서부터 launch_time 동안 가속을 조인다.
+            self._launch.start(self.get_clock().now().nanoseconds * 1e-9,
+                               abs(float(self.speed)))
         self.enabled = msg.data
 
     def _odom_cb(self, msg: Odometry):
@@ -677,6 +689,20 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self._pub_wp_marker(target)
         return steer, cmd_v
 
+    def _launch_limit(self, speed):
+        """출발 가속 제한. 로직은 speed_profile.LaunchLimiter (컨트롤러 공용)."""
+        if not self._launch.active:
+            return speed
+        p = lambda n: self.get_parameter(n).value
+        lim = self._launch.apply(
+            speed, self.get_clock().now().nanoseconds * 1e-9, 0.02,   # _cmd_tick 50Hz
+            float(p('launch_acc')), float(p('launch_time')), self._a_acc)
+        if lim < speed - 1e-3:
+            self.get_logger().info(
+                f'[출발제한] 상한 {self._launch.cap:.2f}㎧²  '
+                f'{speed:.2f}→{lim:.2f}㎧', throttle_duration_sec=0.5)
+        return lim
+
     def _build_speed_profile(self):
         """마찰원 결합 forward-backward. map_controller 와 **같은 코드**를 쓴다."""
         p = lambda n: self.get_parameter(n).value
@@ -696,6 +722,7 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self.get_logger().info(
             f"속도 프로파일 η={info['eta']:.2f}  예산 {info['a_g']:.2f}㎧² "
             f"(가속 {info['a_acc']:.2f} / 제동 {info['a_brk']:.2f})")
+        self._a_acc = float(info['a_acc'])   # 출발 제한이 여기로 복귀한다
         self.get_logger().info(
             f"  v {info['v_min']:.2f}~{info['v_max']:.2f}㎧ (중앙 {info['v_med']:.2f}) "
             f"| 예상 랩 {info['lap_time']:.1f}s"

@@ -73,6 +73,9 @@ OVERLAY_MAP = [
     ('tuning.speed_lag',   'limits.speed_lag'),
     ('tuning.a_lon_acc',   'limits.a_lon_acc'),
     ('tuning.a_lon_brk',   'limits.a_lon_brk'),
+    # 출발 가속 제한 — 타이어·구동계·하중이동에 걸린 값이라 차마다 다르다
+    ('tuning.launch_acc',  'limits.launch_acc'),
+    ('tuning.launch_time', 'limits.launch_time'),
     ('tuning.grip_util',   'limits.grip_util'),
     # ★ 젯슨 IP 는 차마다 다르다 (1호차 .57 / 2호차 .77). CycloneDDS 가 유니캐스트로
     #   인사할 고정 피어 목록이라, 남의 차 IP 가 들어가면 노트북 RViz 가 먹통이 된다.

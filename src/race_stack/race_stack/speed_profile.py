@@ -153,3 +153,90 @@ def steer_speed_limit(delta, wheelbase, mu_eff, grip_util):
     kap = abs(math.tan(float(delta))) / max(float(wheelbase), 1e-6)
     a_g = float(np.clip(grip_util, 0.05, 1.0)) * float(mu_eff) * GRAVITY
     return math.sqrt(a_g / max(kap, 1e-4))
+
+
+class LaunchLimiter:
+    """출발 직후 **가속만** 조인다. 제동은 절대 건드리지 않는다.
+
+    왜 프로파일의 a_lon_acc 로 충분하지 않은가 — **출발이 특별하기 때문**이다.
+
+    2026-08-10 실측 (실차 bag 16개). 프레임에 무관한 지표로 쟀다:
+    0.6초 창에서 odom 이 말하는 이동거리 ÷ AMCL 이 말하는 이동거리.
+    1보다 크면 바퀴가 헛돈 것이다.
+
+        가속도[㎧²]     출발 0~5s    5s 이후     차이
+        0.0~0.8          1.0332      1.0246     +0.86%
+        0.8~1.6          1.0344      1.0268     +0.76%
+        1.6 이상         1.0694      1.0360     +3.34%   ← 두 배로 미끄러진다
+
+    **같은 가속도인데도 출발 5초 안쪽이 더 미끄러진다.** 정지마찰을 깨는 순간,
+    구동계 백래시, 하중이 뒤로 쏠리며 앞이 뜨는 것이 겹치는 구간이다.
+
+    결과: 출발 5초에 **허위거리 87cm** (odom 17.35m vs AMCL 16.35m). 종방향은
+    복도에서 거의 관측되지 않으므로(앞뒤 0.2~1.0cm vs 좌우 6~7cm) AMCL 이 다
+    못 되돌리고 자세에 남는다 → 차가 "실제보다 더 갔다"고 믿어 **첫 코너를
+    일찍 돈다.** 출발선이 직선 한가운데라 매 주행 첫 코너가 그렇게 망가졌다.
+
+    상한은 acc → a_norm 으로 window 에 걸쳐 **선형 복귀**한다. 계단으로 풀면
+    그 순간 다시 스핀이 나서 하는 일이 없어진다.
+
+    ★ 컨트롤러마다 따로 구현하지 말 것. bench(box) 모드를 각 차가 따로 디버깅한
+      전례가 있다 (2026-08-09). 여기 한 곳만 고치면 전 컨트롤러에 흐른다.
+
+    쓰는 법
+        self._launch = LaunchLimiter()
+        # /race/enabled 가 false→true 로 바뀔 때
+        self._launch.start(now_sec, self.speed)
+        # 매 tick, 프로파일 속도를 뽑은 직후
+        speed = self._launch.apply(speed, now_sec, dt, acc, window, a_norm)
+    """
+
+    def __init__(self):
+        self.t0   = None    # 출발 시각 [s]. None = 제한 안 걸림
+        self.prev = 0.0     # 직전 지령 속도 — 적분 상태
+        self.cap  = 0.0     # 마지막으로 적용한 상한 [㎧²] (로그용)
+
+    def start(self, now, speed=0.0):
+        self.t0, self.prev = float(now), float(speed)
+
+    def stop(self):
+        self.t0 = None
+
+    @property
+    def active(self):
+        return self.t0 is not None
+
+    def apply(self, speed, now, dt, acc, window=3.0, a_norm=0.0):
+        """acc <= 0 이면 끈 것으로 보고 그대로 통과시킨다.
+
+        a_norm 은 복귀 목표 = 프로파일이 실제로 쓴 가속 상한.
+
+        ★ 창이 끝나도 **제한을 완전히 풀지 않고 a_norm 으로 계속 건다.**
+          그냥 풀면 그 순간 지령이 계단으로 튀는데(차가 프로파일보다 뒤처져
+          있으니까), 그 계단이 곧 풀스로틀이라 막 벗어난 스핀 조건으로 도로
+          들어간다. a_norm 은 프로파일이 이미 **공간상**으로 지키는 값이라
+          시간상으로 같은 값을 걸어도 정상 주행에서는 걸리지 않는다.
+          걸리는 건 차가 프로파일보다 느릴 때뿐이고, 그때는 걸리는 게 맞다.
+
+          a_norm 이 acc 이하이면(=아직 프로파일이 안 풀렸거나 설정이 이상하면)
+          창이 끝날 때 그냥 푼다. 안 그러면 주행 내내 0.8㎧² 로 기어간다.
+        """
+        acc = float(acc)
+        if acc <= 0.0 or self.t0 is None:
+            self.prev = float(speed)
+            return float(speed)
+        window = max(float(window), 1e-3)
+        a_norm = float(a_norm)
+        el = float(now) - self.t0
+        if el >= window:
+            if a_norm <= acc:
+                self.t0 = None             # 복귀 목표가 없다 — 풀어준다
+                self.prev = float(speed)
+                return float(speed)
+            self.cap = a_norm
+        else:
+            self.cap = acc + max(a_norm - acc, 0.0) * (el / window)
+        # 감속 지령은 그대로 통과. 올라가는 쪽만 자른다.
+        out = min(float(speed), self.prev + self.cap * max(float(dt), 1e-3))
+        self.prev = out
+        return out

@@ -59,7 +59,7 @@ from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import Bool, ColorRGBA, Float64
 
-from race_stack.speed_profile import solve_profile
+from race_stack.speed_profile import solve_profile, LaunchLimiter
 from visualization_msgs.msg import Marker
 
 from race_stack.stanley_controller import _REPO_ROOT, _normalize
@@ -163,6 +163,29 @@ class MapController(Node):
         self.declare_parameter('a_lon_acc',   0.0)
         self.declare_parameter('a_lon_brk',   0.0)
 
+        # ── 출발 가속 제한 ────────────────────────────────────────────
+        #   정지에서 출발하는 첫 몇 초만 가속을 따로 더 조인다. 프로파일의
+        #   a_lon_acc 와 별개로 두는 이유는 **출발이 특별하기 때문**이다.
+        #
+        #   2026-08-10 실측 (bag 16개, odom 이동거리 ÷ AMCL 이동거리):
+        #     같은 가속도인데도 출발 5초 안쪽이 더 미끄러진다
+        #        가속도      출발 0~5s   5s 이후    차이
+        #        0.0~0.8      1.0332     1.0246    +0.86%
+        #        0.8~1.6      1.0344     1.0268    +0.76%
+        #        1.6 이상     1.0694     1.0360    +3.34%   ← 두 배
+        #     정지마찰 깨기·구동계 백래시·하중 뒤쏠림이 겹치는 구간이다.
+        #     그 결과 출발 5초에 **허위거리 87cm** 가 쌓인다 (odom 17.35m,
+        #     AMCL 16.35m). 종방향은 복도에서 관측이 거의 안 되므로(앞뒤 0.2~1.0cm
+        #     vs 좌우 6~7cm) AMCL 이 다 못 되돌리고 자세에 남는다 →
+        #     "실제보다 더 갔다"고 믿어 **첫 코너를 일찍 돈다.**
+        #
+        #   launch_acc 에서 시작해 launch_time 에 걸쳐 a_lon_acc 로 선형 복귀한다
+        #   (계단이 생기지 않게). 감속에는 절대 걸지 않는다. 0 = 끔.
+        #   ※ 공짜가 아니다 — 1랩 +1.16s (0.8㎧²/3s, fun_clean η=0.6).
+        #     누적되지는 않는다(3랩 +1.20s). 자세한 스윕은 race_script.yaml.
+        self.declare_parameter('launch_acc',  0.0)
+        self.declare_parameter('launch_time', 3.0)
+
         # 구동계 지연 [s]. 지령→실측 속도의 상호상관으로 실측한 값(2026-08-09:
         # 250~290ms). 이만큼 앞의 프로파일 **최솟값**을 미리 지령해 감속을
         # 앞당긴다. 0 = 끔. 자세한 이유는 _profile_speed 참고.
@@ -253,6 +276,8 @@ class MapController(Node):
 
         # ── 주행 상태 ───────────────────────────────────────────────────
         self.enabled = False    # ★ mission_manager 의 /race/enabled 를 받아야 켜진다
+        self._a_acc  = 0.0      # 프로파일이 실제로 쓴 가속 상한 (기동 시 채워진다)
+        self._launch = LaunchLimiter()   # 출발 직후 가속 제한 (휠 스핀 방지)
         self.pos = None
         self.yaw = 0.0
         self.speed = 0.0        # odom 실측 속도 — L1 거리·조향 계산에 쓴다
@@ -387,6 +412,7 @@ class MapController(Node):
         if float(self.p('a_brake')) > 0.0:
             self.get_logger().warn("a_brake 는 폐기됐다 — a_lon_brk 를 쓸 것.")
 
+        self._a_acc = float(info['a_acc'])   # 출발 제한이 여기로 복귀한다
         self.get_logger().info(
             f"속도 프로파일 η={info['eta']:.2f}  예산 {info['a_g']:.2f}㎧² "
             f"(가속 {info['a_acc']:.2f} / 제동 {info['a_brk']:.2f})")
@@ -432,6 +458,22 @@ class MapController(Node):
         n = len(self._v_profile)
         idx = (np.arange(i, i + k + 1) % n)
         return float(self._v_profile[idx].min())
+
+    def _launch_limit(self, speed, dt):
+        """출발 가속 제한. 로직은 speed_profile.LaunchLimiter (컨트롤러 공용).
+        여기서는 파라미터를 넘기고 로그만 남긴다."""
+        if not self._launch.active:
+            return speed
+        now = self.get_clock().now().nanoseconds * 1e-9
+        lim = self._launch.apply(speed, now, dt,
+                                 float(self.p('launch_acc')),
+                                 float(self.p('launch_time')),
+                                 self._a_acc)
+        if lim < speed - 1e-3:
+            self.get_logger().info(
+                f'[출발제한] 상한 {self._launch.cap:.2f}㎧²  '
+                f'{speed:.2f}→{lim:.2f}㎧', throttle_duration_sec=0.5)
+        return lim
 
     def _friction_cap(self):
         """마찰원 곡률 한계속도. (진단용 — 프로파일 계산은 _compute_speed_profile 안에서)"""
@@ -565,6 +607,10 @@ class MapController(Node):
         if self.enabled and not msg.data:
             self._steer_prev = 0.0      # 재활성화 시 이전 조향 재사용 방지
             self.publish_stop()
+        if msg.data and not self.enabled:
+            # 정지 → 출발. 여기서부터 launch_time 동안 가속을 조인다.
+            self._launch.start(self.get_clock().now().nanoseconds * 1e-9,
+                               self.speed)
         self.enabled = msg.data
 
     def odom_cb(self, msg: Odometry):
@@ -756,6 +802,7 @@ class MapController(Node):
         # 프로파일이 이미 물리(마찰원)와 min_speed·hard_cap 을 다 반영했다.
         # 여기서 다시 max_speed 로 자르면 상한이 부활해 등속 주행이 된다.
         speed = self._profile_speed(near, v)
+        speed = self._launch_limit(speed, 0.02)   # 타이머 주기 50Hz
 
         self.get_logger().info(
             f'[MAP] κ={self._curvature[near]:.3f}  '

@@ -85,6 +85,8 @@ def generate_launch_description():
                       if isinstance(_gu, dict) else _gu)
     a_lon_acc = float(_lim.get('a_lon_acc', 0.0))
     a_lon_brk = float(_lim.get('a_lon_brk', 0.0))
+    launch_acc  = float(_lim.get('launch_acc',  0.0))
+    launch_time = float(_lim.get('launch_time', 3.0))
     hard_cap  = float(cfg.get('speed', {}).get('hard_cap', 0.0))
     veh = dict(mu=float(_mp0.get('mu', 0.348)), pac_d=float(_mp0.get('pac_d', 1.15)),
                lf=float(_mp0.get('lf', 0.1757)), lr=float(_mp0.get('lr', 0.1441)))
@@ -428,6 +430,9 @@ def generate_launch_description():
                 'grip_util':       grip_util,
                 'a_lon_acc':       a_lon_acc,
                 'a_lon_brk':       a_lon_brk,
+                # 출발 직후만 가속을 더 조인다 (map_controller 와 같은 코드)
+                'launch_acc':      launch_acc,
+                'launch_time':     launch_time,
                 'hard_cap':        hard_cap,
                 'mu':              veh['mu'],
                 'pac_d':           veh['pac_d'],
@@ -542,6 +547,9 @@ def generate_launch_description():
                 # 0 이면 물리에서 자동: 가속=μ_eff·g·lf/L(후륜하중), 제동=μ_eff·g
                 'a_lon_acc':     a_lon_acc,
                 'a_lon_brk':     a_lon_brk,
+                # 출발 직후만 가속을 더 조인다 (휠 스핀 → 종방향 허위거리 방지)
+                'launch_acc':    launch_acc,
+                'launch_time':   launch_time,
                 # 구동계 지연 보상 (실측 0.25~0.29s) — 감속만 앞당긴다
                 'speed_lag':     float(_lim.get('speed_lag', 0.25)),
                 # ↓ 폐기. 옛 설정이 죽지 않게만 남겨둔다 (컨트롤러가 경고하고 무시)
