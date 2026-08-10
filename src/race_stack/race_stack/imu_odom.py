@@ -88,6 +88,8 @@ class ImuOdom(Node):
         self.declare_parameter('accel_units', 'g')       # g | ms2
         self.declare_parameter('yaw_axis', 'z')
         self.declare_parameter('yaw_sign', 1.0)
+        # 병진 속도 부호 (차량별). 상세는 odom_cb 주석. 기본 1.0 = 기존 동작 그대로.
+        self.declare_parameter('speed_sign', 1.0)
         # 바이어스 추정
         self.declare_parameter('bias_warmup_sec', 3.0)
         self.declare_parameter('bias_alpha', 0.002)      # 정지 중 갱신 속도
@@ -97,6 +99,7 @@ class ImuOdom(Node):
         self.use_imu = self.p('imu_yaw')
         self.axis = AXIS_IDX.get(str(self.p('yaw_axis')).lower(), 2)
         self.sign = float(self.p('yaw_sign'))
+        self.speed_sign = float(self.p('speed_sign'))
         self.to_rad = (math.pi / 180.0
                        if str(self.p('gyro_units')).lower().startswith('deg') else 1.0)
 
@@ -130,6 +133,7 @@ class ImuOdom(Node):
         mode = 'IMU yaw 사용' if self.use_imu else 'pass-through (기존 odom 그대로)'
         self.get_logger().info(
             f'ImuOdom 시작 — {mode}, 축={self.p("yaw_axis")}({self.sign:+.0f}), '
+            f'속도부호={self.speed_sign:+.0f}, '
             f'단위={self.p("gyro_units")}')
         if not self.use_imu:
             self.get_logger().warn(
@@ -140,7 +144,21 @@ class ImuOdom(Node):
 
     # ── 휠 오도메트리: 병진 속도만 가져온다 ────────────────────
     def odom_cb(self, msg: Odometry):
-        self.speed = msg.twist.twist.linear.x
+        # ★ speed_sign — /odom 의 병진 속도 부호를 이 차 기준으로 맞춘다.
+        #   명령과 오도메트리의 부호 처리가 **비대칭**이라 필요하다:
+        #       ackermann_to_vesc :  erpm = gain × v          (음수 없음)
+        #       vesc_to_odom      :  v    = (−erpm) / gain    (음수 있음)
+        #   2호차는 모터 결선이 반대라 gain 이 음수인데, 그러면 명령은 맞고
+        #   오도메트리만 한 번 더 뒤집힌다. 조이스틱 전진은 정상인데 RViz 에서만
+        #   차가 뒤로 가는 것으로 보이고, 그 위치가 그대로 TF 로 나가 SLAM 이
+        #   "후진 중" 으로 믿는다 (2026-08-10 실차에서 관측).
+        #   vesc_to_odom 은 C++ 이고 f1tenth_stack 소유라 1호차와 공유한다 —
+        #   여기서 차량별로 맞추는 게 안전하다.
+        #   ※ 값은 config/vehicle_car*.yaml 의 localization.speed_sign 이 원본.
+        #     반드시 **실측으로** 정할 것: 차를 앞으로 밀며
+        #       ros2 topic echo /odom_imu --field twist.twist.linear.x
+        #     가 양수여야 한다.
+        self.speed = msg.twist.twist.linear.x * self.speed_sign
         self.last_odom = msg
         if not self.use_imu:
             # 중계 모드: 들어온 그대로 내보낸다 (기존 동작과 동일)

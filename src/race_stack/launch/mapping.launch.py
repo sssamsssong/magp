@@ -44,6 +44,8 @@ def generate_launch_description():
             'gyro_units':          str(  loc.get('imu_gyro_units',      'deg')),
             'yaw_axis':            str(  loc.get('imu_yaw_axis',        'z')),
             'yaw_sign':            float(loc.get('imu_yaw_sign',        1.0)),
+            # 병진 속도 부호 (차량별). vehicle_car*.yaml 의 localization.speed_sign.
+            'speed_sign':          float(loc.get('speed_sign',          1.0)),
             'bias_warmup_sec':     float(loc.get('imu_bias_warmup_sec', 3.0)),
             'bias_alpha':          float(loc.get('imu_bias_alpha',      0.002)),
             'stationary_speed':    float(loc.get('imu_stationary_speed', 0.05)),
