@@ -642,7 +642,7 @@ localization:
   # ── 스캔 모션 보정 (deskew) — 고속에서만 의미 있음 ────────────
   #    한 스캔(25ms) 동안 차가 움직이면 첫 빔과 마지막 빔이 다른 위치에서 찍힌
   #    것인데 메시지는 같은 순간처럼 담긴다. 상세: 개발현황.md 08/04
-  scan_deskew: false         # 속도를 올릴 때 켤 것
+  scan_deskew: false       # 속도를 올릴 때 켤 것
   deskew_stamp_at: start     # header.stamp 기준 (start|mid|end). 틀리면 역효과
   deskew_min_yaw_rate: 0.05  # 이보다 느리게 돌면 보정 안 함 (rad/s)
   deskew_min_speed: 0.10     # 이보다 느리면 병진 보정 생략 (m/s)

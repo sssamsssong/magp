@@ -602,19 +602,58 @@ class MapController(Node):
                 f'AMCL pose 첫 수신 ({px:.3f}, {py:.3f}) — 시드 가정 해제. '
                 f'시드와의 차이 {math.hypot(px - sx, py - sy):.2f}m')
 
-        # AMCL 측정 시각과 가장 가까운 odom 샘플로 보정을 계산한다
-        # (AMCL 값은 그 시각의 pose 이므로 그 시각의 odom 과 짝지어야 정확)
+        # AMCL 측정 시각의 odom 을 **보간**해서 보정을 계산한다.
+        #
+        # ★ 예전엔 가장 가까운 샘플을 그냥 썼는데, /odom_imu 가 50Hz 라 평균
+        #   4.1ms 가 어긋난다. 5㎧ 면 그 사이 차가 2.06cm 를 가고, 그게 그대로
+        #   보정 오차가 된다 — **속도에 정비례**한다.
+        #   2026-08-10 bag 분석: 보정 점프가 v 에 선형(R²=0.972)이었고,
+        #   5㎧ 에서 관측 2.83cm 중 2.06cm(73%)가 이 양자화로 설명됐다.
+        #   기울기도 실측 3.6mm/㎧ vs 예측 4.1mm/㎧ 로 맞았다.
+        #   보간하면 이 항이 사라진다 (남는 건 파티클 잡음 ~0.9cm).
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        od = (min(self._odom_buf, key=lambda e: abs(e[0] - t))
-              if self._odom_buf else self._odom_last)
+        od = self._odom_at(t)
         if od is None:
             return
-        _, ox, oy, oyaw = od
+        ox, oy, oyaw = od
         th = _normalize(yaw - oyaw)
         c, s = math.cos(th), math.sin(th)
         target = (th, px - (c * ox - s * oy), py - (s * ox + c * oy))
 
         self._map_from_odom = self._slew_correction(target)
+
+    def _odom_at(self, t):
+        """시각 t 의 odom 자세를 선형 보간해서 돌려준다. (x, y, yaw)
+
+        버퍼는 (t, x, y, yaw) 오름차순이다. t 가 버퍼 밖이면 가장 가까운 끝을
+        그대로 쓴다 — 외삽하지 않는다 (AMCL 이 한참 늦게 오면 외삽이 더 위험하다).
+        """
+        buf = self._odom_buf
+        if not buf:
+            if self._odom_last is None:
+                return None
+            _, ox, oy, oyaw = self._odom_last
+            return (ox, oy, oyaw)
+        if t <= buf[0][0]:
+            _, ox, oy, oyaw = buf[0]
+            return (ox, oy, oyaw)
+        if t >= buf[-1][0]:
+            _, ox, oy, oyaw = buf[-1]
+            return (ox, oy, oyaw)
+        lo, hi = 0, len(buf) - 1
+        while hi - lo > 1:                      # 이분 탐색
+            mid = (lo + hi) // 2
+            if buf[mid][0] <= t:
+                lo = mid
+            else:
+                hi = mid
+        t0, x0, y0, w0 = buf[lo]
+        t1, x1, y1, w1 = buf[hi]
+        r = (t - t0) / max(t1 - t0, 1e-9)
+        dw = _normalize(w1 - w0)                # yaw 는 wrap 처리 후 보간
+        return (x0 + (x1 - x0) * r,
+                y0 + (y1 - y0) * r,
+                _normalize(w0 + dw * r))
 
     def _slew_correction(self, target):
         """보정 변환을 목표로 **제한된 속도로** 옮긴다. 자세한 이유는
