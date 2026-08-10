@@ -114,9 +114,15 @@ setup_dds () {
     # 옛 데몬이 살아 있으면 `ros2 topic list` 가 예전 미들웨어 기준의 목록을
     # 돌려줘 "바꿨는데 그대로 보인다"는 착각을 만든다 (실제로 디버깅 중 속았음).
     # 데몬은 필요할 때 자동으로 다시 뜨므로 그냥 내려둔다.
-    if [ "${RMW_IMPLEMENTATION:-}" != "rmw_cyclonedds_cpp" ]; then
-        ros2 daemon stop >/dev/null 2>&1 || true
+    # ★ ROS_DOMAIN_ID 가 바뀐 경우에도 내려야 한다 — 데몬은 도메인도 물고 있다.
+    # ★ timeout 필수. `ros2 daemon stop` 은 데몬이 없거나 CLI 가 콜드일 때 수십 초
+    #   블록된다 (2026-08-10: rviz.sh 가 여기서 멈춰 Ctrl+C 를 눌러야 진행됐다).
+    #   내려가든 말든 다음 단계에 지장이 없으므로 짧게 끊는다.
+    if [ "${RMW_IMPLEMENTATION:-}" != "rmw_cyclonedds_cpp" ] \
+       || [ "${_DDS_PREV_DOMAIN:-}" != "${ROS_DOMAIN_ID:-}" ]; then
+        timeout 8 ros2 daemon stop >/dev/null 2>&1 || true
     fi
+    export _DDS_PREV_DOMAIN="${ROS_DOMAIN_ID:-}"
     export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
     local subnet; subnet=$(_dds_yaml_get 'network.subnet' '192.168.50.')

@@ -147,9 +147,15 @@ echo "  RViz 실시간 관찰  |  ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}"
 echo "  config: $CFG"
 echo "  ※ 젯슨에서 ./race.sh 주행이 돌고 있어야 토픽이 보입니다."
 echo "============================================"
-# 젯슨 토픽이 잡히는지 5초만 살짝 확인 (안 잡혀도 RViz 는 그냥 실행)
-if ! ros2 topic list 2>/dev/null | grep -q "/waypoints_path"; then
+# 젯슨 토픽이 잡히는지 살짝 확인 (안 잡혀도 RViz 는 그냥 실행)
+# ★ timeout 필수 — `ros2 topic list` 는 데몬이 콜드하거나 도메인을 막 바꿨을 때
+#   수십 초 블록된다. 이건 안내 문구를 고르려는 것뿐이라 못 기다린다
+#   (2026-08-10: 여기서 멈춰 Ctrl+C 를 눌러야 RViz 가 떴다).
+# ★ 매핑(mapping/mapping-joy) 중에는 /waypoints_path 가 원래 없다 — 주행 모드
+#   전용이다. 그때는 이 경고가 떠도 정상이니 문구에 같이 적는다.
+if ! timeout 5 ros2 topic list 2>/dev/null | grep -q "/waypoints_path"; then
     echo "  ⚠ 아직 /waypoints_path 가 안 보입니다."
+    echo "    (매핑 중이라면 정상입니다 — 이 토픽은 주행 모드에서만 나옵니다)"
     echo "    - 젯슨에서 주행(race.sh q1/q2/q3/race)이 실행 중인지"
     echo "    - 노트북·젯슨 네트워크/ROS_DOMAIN_ID 가 같은지 확인하세요."
     echo "    (그래도 RViz 는 띄웁니다 — 주행 시작하면 자동으로 나타남)"
