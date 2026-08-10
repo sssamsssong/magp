@@ -1,8 +1,26 @@
 #!/usr/bin/env python3
-"""Kernel /dev/input/js* → /joy 브리지 (값 가공 없음, 스케일만).
+"""Kernel /dev/input/js* → /joy 브리지 — ROS joy_node 의 드롭인 대체.
 
-ROS joy_node(SDL) 가 안 먹을 때 / 부호 추측 remapping 없이 커널 값을 그대로 보냄.
-joystick_teleop 이 기동 시 휴지값을 자동으로 맞춰 읽는다.
+■ 왜 있나 (2026-08-09)
+  bringup 의 joy_node(SDL) + joy_teleop 이 /teleop 을 같이 쏘면서 손을 안 대도
+  차가 나갔다. joy_teleop.yaml 이 drive-speed 를 axis1 × scale 5.0 으로 잡는데,
+  SDL 리매핑 때문에 그 "axis 1" 이 **놓은 상태 −1 인 트리거**에 걸려
+  −1 × 5.0 = −5㎧ 가 됐다. mux 우선순위가 teleop:100 vs drive:10 이라 그대로 나간다.
+  SDL 이 축을 어떻게 재배열할지는 패드·드라이버·모드에 따라 달라 예측이 안 된다.
+  → 커널 이벤트를 직접 읽어 **축 번호가 패드 물리 배치와 일치**하게 만든다.
+
+■ 부호 규약 (2026-08-10 — 처음엔 틀렸다)
+  처음엔 "커널 값을 그대로" 내보냈는데, ROS `joy` 패키지는 커널 값을 **negate**
+  해서 발행한다 (실측: 커널 axis2 −32767 → /joy +1.0000).
+  그래서 브리지를 쓰는 mapping-joy 만 **모든 축이 반대**가 됐고, 트리거는
+  joystick_teleop 의 자동 캘리가 부호를 흡수해 티가 안 나서 **조향에서만**
+  증상이 드러났다. 지금은 여기서 negate 해 joy_node 와 규약을 맞춘다.
+
+  ★ 이 파일은 joy_node 의 **드롭인 대체**여야 한다. 쓰는 쪽(race_script /
+    vehicle_car*.yaml)이 드라이버마다 다른 invert 를 관리하게 만들면 안 된다.
+
+  즉 얻는 것은 "SDL 축 재배열 회피" 하나뿐이고, 부호·스케일은 ROS 규약 그대로다.
+  휴지값 부호는 joystick_teleop 이 기동 시 자동 측정해 맞춘다.
 
   python3 js_joy_bridge.py [/dev/input/js1]
 """
