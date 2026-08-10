@@ -24,14 +24,25 @@ _DDS_TPL="$_DDS_DIR/cyclonedds.xml.in"
 #   없으면(생성 전이거나 --car 미설정) race_script.yaml 값을 그대로 쓴다.
 _DDS_OVL="$_DDS_DIR/.vehicle_overlay.yaml"
 
+# ★ 노트북에서 "어느 차에 붙을지" 고르는 경로.
+#   젯슨은 .car 로 정해지지만(→ overlay), 노트북엔 .car 도 overlay 도 없다.
+#   rviz.sh 가 인자(./rviz.sh 77)를 풀어 RACE_CAR=car2 로 넘겨준다.
+#   이게 있으면 overlay 보다 **먼저** 그 차의 vehicle 파일을 본다.
+if [ -n "${RACE_CAR:-}" ] && [ -f "$_DDS_DIR/vehicle_${RACE_CAR}.yaml" ]; then
+    _DDS_VEH="$_DDS_DIR/vehicle_${RACE_CAR}.yaml"
+else
+    _DDS_VEH=""
+fi
+
 _dds_yaml_get () {   # $1=키경로(점 구분)  $2=기본값
     # conda base 의 python3 엔 PyYAML 이 없는 경우가 많다 → 시스템 python 우선.
     local _py=python3
     [ -x /usr/bin/python3 ] && _py=/usr/bin/python3
-    "$_py" - "$_DDS_YAML" "$1" "$2" "$_DDS_OVL" <<'PY' 2>/dev/null || echo "$2"
+    "$_py" - "$_DDS_YAML" "$1" "$2" "$_DDS_OVL" "$_DDS_VEH" <<'PY' 2>/dev/null || echo "$2"
 import sys, yaml
 path, key, default = sys.argv[1], sys.argv[2], sys.argv[3]
-ovl = sys.argv[4] if len(sys.argv) > 4 else None
+ovl = sys.argv[4] if len(sys.argv) > 4 else ''
+veh = sys.argv[5] if len(sys.argv) > 5 else ''
 
 def dig(src, key):
     d = yaml.safe_load(open(src))
@@ -40,12 +51,16 @@ def dig(src, key):
     return d
 
 val = None
-if ovl:                      # ① 차량 overlay 우선
-    try:
-        val = dig(ovl, key)
-    except Exception:
-        val = None
-if val is None:              # ② 없으면 race_script.yaml
+# ① RACE_CAR 로 고른 차량 파일 (노트북에서 ./rviz.sh 77)
+# ② 젯슨이 apply_vehicle.py 로 펼친 overlay
+# ③ 둘 다 없으면 race_script.yaml 공용값
+for src in (veh, ovl):
+    if val is None and src:
+        try:
+            val = dig(src, key)
+        except Exception:
+            val = None
+if val is None:
     try:
         val = dig(path, key)
     except Exception:
@@ -60,6 +75,17 @@ PY
 
 setup_dds () {
     [ -f "$_DDS_YAML" ] || return 0
+
+    # ★ ROS_DOMAIN_ID — 두 차를 같은 공유기에서 동시에 돌릴 때의 격리 수단.
+    #   peers 가 안 겹쳐서 "우연히" 안 섞이는 것과 달리, 도메인이 다르면
+    #   멀티캐스트 그룹·포트 대역 자체가 달라 /scan·/map·/tf 가 절대 안 섞이고
+    #   노드 이름 충돌도 없다. dds: fastdds 로 되돌려도 이건 유효하다.
+    #   ※ 젯슨↔노트북이 **같은 값**이어야 한다. 한쪽만 다르면 통신이 0 이다.
+    local dom; dom=$(_dds_yaml_get 'network.domain_id' '')
+    if [ -n "$dom" ] && [ "$dom" != "None" ]; then
+        export ROS_DOMAIN_ID="$dom"
+        echo "[dds] ROS_DOMAIN_ID=$ROS_DOMAIN_ID${RACE_CAR:+  (${RACE_CAR})}"
+    fi
 
     local dds; dds=$(_dds_yaml_get 'network.dds' 'fastdds')
     case "$dds" in

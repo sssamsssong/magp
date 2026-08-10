@@ -42,7 +42,7 @@ config/.vehicle_overlay.yaml    race_script.yaml 위에 덮을 값  .gitignore
 | `tire` | `mu`, `pac_b/c/d/e` |
 | `tuning` | `l1_min`, `l1_k`, `steer_alpha`, `slip_gain`, `speed_lag`, `a_lon_*`, `grip_util` |
 | `joystick` | `steer_invert`, `speed_invert`, `device`, `axis_*`, `btn_*` |
-| `network` | `peers` (젯슨 IP — 1호차 `.57` / 2호차 `.77`) |
+| `network` | `domain_id` (1호차 `57` / 2호차 `77`), `peers` (젯슨 IP) |
 
 `race_script.yaml` 의 나머지(알고리즘·안전·회피·계측)는 **그대로 공용**입니다.
 이게 핵심입니다 — 한쪽에서 고친 알고리즘이 자동으로 양쪽에 흐릅니다.
@@ -96,6 +96,30 @@ launch.log 가 이걸로 도배된다:
 `ackermann_to_vesc` 에 도달하지 못한 것이고, 서보나 VESC 고장처럼 보여 디버깅이 샙니다.
 
 **규칙: 와이파이를 바꿨으면 `./race.sh stop` 후 다시 띄울 것.**
+
+---
+
+## 두 차를 같은 공유기에서 동시에 돌릴 때
+
+차마다 **`ROS_DOMAIN_ID` 가 다릅니다** (1호차 `57` / 2호차 `77` — 젯슨 IP 끝자리와 같게).
+도메인이 다르면 멀티캐스트 그룹과 포트 대역 자체가 달라 `/scan`·`/map`·`/tf` 가
+절대 안 섞이고 노드 이름 충돌도 없습니다. 원본은
+`config/vehicle_car*.yaml` 의 `network.domain_id` 이고, 젯슨에서는 `race.sh` 가
+`.car` 를 보고 자동으로 export 합니다.
+
+**노트북에서는 붙을 차를 골라야 합니다:**
+
+```bash
+./rviz.sh 77      # 2호차 (젯슨 IP 끝자리 — 권장)
+./rviz.sh 57      # 1호차
+./rviz.sh car2    # 차 이름도 됨
+```
+
+노트북 두 대가 각각 다른 차에 붙어도 됩니다.
+
+> ⚠️ **2026-08-10 이전에는 두 차 모두 기본값 `0` 이었습니다.** 젯슨과 노트북이
+> **양쪽 다** `git pull` 해야 서로 보입니다 — 한쪽만 갱신하면 통신이 0 이 됩니다.
+> `~/.bashrc` 에 `ROS_DOMAIN_ID` 를 박아뒀다면 지우세요. 이제 스크립트가 정합니다.
 
 ---
 

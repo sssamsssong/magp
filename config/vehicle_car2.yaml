@@ -108,5 +108,8 @@ joystick:
 # ── 네트워크 ────────────────────────────────────────────────────────
 #   CycloneDDS 가 유니캐스트로 인사할 고정 피어 목록. 상세는 vehicle_car1.yaml 참고.
 network:
+  # ★ ROS_DOMAIN_ID — 상세는 vehicle_car1.yaml 참고. 젯슨 IP 끝자리와 같게 둔다.
+  #   노트북에서 붙을 때:  ./rviz.sh 77
+  domain_id: 77
   peers:
     - 192.168.50.77         # 2호차 젯슨 (2026-08-09 확인)

@@ -12,10 +12,20 @@
 #      Jazzy:  sudo apt install ros-jazzy-desktop   또는  ros-jazzy-rviz2
 #      ※ Jazzy는 RViz/원격 모니터링 용. 실차·빌드 기준은 Humble.
 #    - 노트북과 젯슨이 같은 네트워크(192.168.50.x)
-#    - 양쪽 ROS_DOMAIN_ID 동일 (기본 미설정=0). 노트북 ~/.bashrc 에서
-#      ROS_DOMAIN_ID 를 바꿔놨다면 젯슨과 같은 값으로 맞출 것.
+#    - ROS_DOMAIN_ID 는 **이 스크립트가 차량 파일에서 정한다** (아래 인자 참고).
+#      ~/.bashrc 에 ROS_DOMAIN_ID 를 박아뒀다면 지우세요 — 여기서 덮어씁니다.
 #
-#  사용:  ./rviz.sh
+#  사용:
+#    ./rviz.sh 77       2호차에 붙는다 (젯슨 IP 끝자리 — 권장)
+#    ./rviz.sh 57       1호차
+#    ./rviz.sh car2     차 이름도 됨
+#    ./rviz.sh          .car 가 있으면 그 차(젯슨에서 실행할 때),
+#                       없으면 race_script.yaml 공용값
+#
+#  ★ 두 차가 같은 공유기에서 동시에 돌 수 있다. 차마다 ROS_DOMAIN_ID 가 달라
+#    (1호차 57 / 2호차 77) DDS 레벨에서 완전히 격리되므로, 노트북 두 대가
+#    각각 다른 차에 붙어도 /scan·/map·/tf 가 섞이지 않는다.
+#    도메인 값은 config/vehicle_car*.yaml 의 network.domain_id 가 원본이다.
 #
 #  ▶ 젯슨에서 직접 띄우기 (모니터 연결 시) — 초기 위치 정렬에 편하다
 #      SSH 로 들어와서 그냥 ./rviz.sh  (DISPLAY 는 자동으로 잡는다)
@@ -56,8 +66,48 @@ case "${ROS_DISTRO}" in
         ;;
 esac
 
+# ---------- 어느 차에 붙을지 ----------
+# 두 차가 같은 공유기에서 동시에 돌 수 있으므로, 붙을 대상을 골라야 한다.
+# 젯슨은 .car 로 자동이지만 노트북엔 .car 도 overlay 도 없다 → 인자로 받는다.
+#   ./rviz.sh 77     젯슨 IP 끝자리 (권장 — 외우기 쉽다)
+#   ./rviz.sh car2   차 이름도 됨
+#   ./rviz.sh        .car 가 있으면 그걸 쓰고, 없으면 race_script.yaml 공용값
+if [ -n "${1:-}" ]; then
+    case "$1" in
+        car[0-9]*) RACE_CAR="$1" ;;
+        *[!0-9]*)  echo "[rviz.sh] ✗ 알 수 없는 인자: $1  (예: ./rviz.sh 77 또는 ./rviz.sh car2)"; exit 1 ;;
+        *)
+            # 숫자 → 그 IP 끝자리를 peers 에 가진 vehicle 파일을 찾는다.
+            # 번호를 두 군데(여기 + yaml) 적어두면 반드시 어긋나므로 yaml 만 본다.
+            RACE_CAR=$(python3 - "$DIR/config" "$1" <<'PY'
+import os, sys, glob, yaml
+cfgdir, octet = sys.argv[1], sys.argv[2]
+for p in sorted(glob.glob(os.path.join(cfgdir, 'vehicle_*.yaml'))):
+    try:
+        net = (yaml.safe_load(open(p)) or {}).get('network', {}) or {}
+    except Exception:
+        continue
+    if any(str(ip).split('.')[-1] == octet for ip in (net.get('peers') or [])):
+        print(os.path.basename(p)[len('vehicle_'):-len('.yaml')]); break
+PY
+)
+            if [ -z "$RACE_CAR" ]; then
+                echo "[rviz.sh] ✗ 끝자리 $1 을 가진 차량 파일이 없습니다."
+                echo "          있는 차: $(ls "$DIR"/config/vehicle_*.yaml 2>/dev/null \
+                    | sed 's#.*/vehicle_##; s#\.yaml##' | tr '\n' ' ')"
+                exit 1
+            fi ;;
+    esac
+    export RACE_CAR
+    echo "[rviz.sh] 대상 차량: $RACE_CAR  (config/vehicle_${RACE_CAR}.yaml)"
+elif [ -f "$DIR/.car" ]; then
+    RACE_CAR=$(tr -d '[:space:]' < "$DIR/.car"); export RACE_CAR
+    echo "[rviz.sh] 대상 차량: $RACE_CAR  (.car)"
+fi
+
 # DDS 설정 — 젯슨의 race.sh 와 같은 파일을 읽어 양쪽 미들웨어를 일치시킨다.
 # (RMW 가 한쪽만 다르면 토픽이 하나도 안 보인다)
+# ★ ROS_DOMAIN_ID 도 여기서 정해진다 — RACE_CAR 가 가리키는 vehicle 파일 기준.
 export RACE_SCRIPT="$DIR/race_script.yaml"
 [ -f "$DIR/config/dds_env.sh" ] && source "$DIR/config/dds_env.sh"
 
