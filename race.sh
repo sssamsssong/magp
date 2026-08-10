@@ -576,7 +576,8 @@ elif [ "$RECORD_BAG" = "1" ]; then
     #   토픽이 없으면 rosbag2 는 그냥 건너뛰므로 꺼져 있어도 무해하다.
     ros2 bag record -o "$BAG_DIR" \
         /scan /scan_deskewed /odom /odom_imu /amcl_pose /drive /sensors/imu/raw \
-        /commands/servo/position /race/enabled /diagnostics >/dev/null 2>&1 &
+        /commands/servo/position /race/enabled /diagnostics \
+        /particle_cloud >/dev/null 2>&1 &
     BAG_PID=$!
     # SIGINT 로 곱게 닫고, 안 죽으면 3초 뒤 강제 종료
     trap 'kill -INT $BAG_PID 2>/dev/null; ( sleep 3; kill -9 $BAG_PID 2>/dev/null ) & wait $BAG_PID 2>/dev/null' EXIT INT TERM
