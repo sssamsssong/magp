@@ -13,6 +13,9 @@
 #    ./race.sh box [모드]      ★ 박스 위 벤치 테스트 — 바퀴를 돌리지 않는다.
 #                              실주행과 동일한 스택(맵/AMCL/LiDAR/컨트롤러)을 띄우되
 #                              속도만 0. 토픽 통신·RViz 표시·조향 서보 확인용.
+#    ./race.sh <모드> --bag    ★ 주행 중 원시 토픽을 bag 으로 녹화 (분당 약 9MB)
+#                              /scan · odom · IMU · pose · drive. 사후 분석용.
+#                              logs/bags/<시각>_<모드>_<컨트롤러>/ 에 쌓인다
 #    ./race.sh check           토픽이 실제로 발행 중인지 표로 확인 (주행 중 별도 터미널)
 #    ./race.sh stop            돌고 있는 스택 전부 정리
 #    ./race.sh savemap <이름>  맵핑 끝난 뒤 맵 저장
@@ -51,6 +54,15 @@ export RACE_REPO="$SCRIPT_DIR"
 RACE_SCRIPT="$SCRIPT_DIR/race_script.yaml"
 PKG_SHARE_MAPS="$WS/src/race_stack/maps"
 PKG_SHARE_WP="$WS/src/race_stack/waypoints"
+
+# ---------- 0-1. 차량별 캘리브레이션 펼치기 ----------
+# 차가 두 대인데 저장소는 하나다. config/vesc.yaml 을 그대로 공유하면 2호차의
+# 음수 speed_to_erpm_gain 이 1호차로 넘어가 **차가 후진한다**. 그래서 코드는
+# 합치고 값만 분리한다 — .car 가 가리키는 config/vehicle_<차>.yaml 에서
+# config/vesc.yaml 과 race_script 덮어쓰기(overlay)를 매 실행마다 새로 만든다.
+# vesc.yaml 은 .gitignore 라 잘못 커밋할 방법 자체가 없다.
+python3 "$SCRIPT_DIR/config/apply_vehicle.py" || exit 1
+export RACE_VEHICLE_OVERLAY="$SCRIPT_DIR/config/.vehicle_overlay.yaml"
 
 # ---------- 0. 환경 소싱 ----------
 source /opt/ros/humble/setup.bash
@@ -104,6 +116,22 @@ fi
 
 # ---------- 2. 모드 결정 ----------
 export RACE_SCRIPT   # launch 파일이 이 env로 yaml 경로를 읽음
+# ---------- --bag: 주행 중 원시 토픽 녹화 ----------
+# 위치 인자($2=컨트롤러)와 섞이지 않게 **먼저** 걸러낸다.
+#   ./race.sh q1 map --bag   ./race.sh q1 --bag   둘 다 된다.
+# 왜 필요한가: driven_path.csv 에는 컨트롤러가 이미 해석한 값만 남는다.
+# /scan 원시 데이터가 없으면 deskew·AMCL·ICP 같은 앞단 문제를 사후에 못 판정한다
+# (2026-08-09: 고속 deskew 를 켤지 정하려는데 고속 주행 bag 이 하나도 없었다).
+RECORD_BAG=0
+_args=()
+for _a in "$@"; do
+    case "$_a" in
+        --bag) RECORD_BAG=1 ;;
+        *) _args+=("$_a") ;;
+    esac
+done
+set -- "${_args[@]}"
+
 CMD=${1:-}
 get_yaml () { python3 -c "
 import yaml,sys
@@ -152,6 +180,23 @@ kill_stack () {
         return 1
     fi
     echo "[race.sh] 정리 완료"
+}
+
+# ★ box(bench) 전용 — bringup 의 joy_node/joy_teleop 을 죽인다.
+#   각 컨트롤러가 발행 직전에 속도를 0 으로 못박아도(d4b65f3), 조이스틱은
+#   /teleop 으로 따로 나가고 mux.yaml 우선순위가 teleop:100 vs drive:10 이라
+#   그 방어를 통째로 우회한다. F710 은 SDL 리매핑에서 joy_teleop 이 보는 axis 1 이
+#   "놓은 상태 -1" 인 트리거에 걸려 -1 × scale 5.0 = 전속 후진이 된다.
+#   (2026-08-09 2호차 실제 발생: ./race.sh box 로 아무것도 안 건드렸는데 차가 후진)
+#   ★ 한 번만 쏘면 안 된다 — launch 가 아직 joy_node 를 안 띄운 사이에 지나가면
+#     그 뒤로 무방비가 된다. 뜨자마자 잡도록 기동 구간(8초) 내내 반복한다.
+bench_kill_joy () {
+    for _ in $(seq 1 16); do
+        pkill -9 -f '[j]oy_node'   2>/dev/null || true
+        pkill -9 -f '[j]oy_teleop' 2>/dev/null || true
+        sleep 0.5
+    done
+    echo "[race.sh] BENCH — joy_node/joy_teleop 정리 완료 (조이스틱 입력 무시)"
 }
 
 case "$CMD" in
@@ -503,28 +548,39 @@ elif [ "$MODE" = "mapping-joy" ]; then
         -p arm_on_neutral:="$ARM" \
         -p allow_toggle:=false \
         -p debug:="$JOY_DBG"
+elif [ "$RECORD_BAG" = "1" ]; then
+    # ★ exec 를 쓰면 안 된다 — 셸이 교체돼 trap 이 안 걸리고 bag 이 안 닫힌다
+    #   (rosbag2 는 SIGINT 를 받아야 메타데이터를 쓴다. 그냥 죽이면 db3 만 남아
+    #    읽을 수 없다).
+    # box --bag 조합에서도 bench 안전장치가 빠지면 안 된다 (아래 bench 분기 참고).
+    [ -n "${BENCH:-}" ] && bench_kill_joy &
+    BAG_DIR="$SCRIPT_DIR/logs/bags/$(date +%Y%m%d_%H%M%S)_${MODE}_${CTRL:-auto}"
+    mkdir -p "$(dirname "$BAG_DIR")"
+    echo "[race.sh] ★ bag 녹화: $BAG_DIR"
+    echo "[race.sh]   /scan 이 1081빔 33.5Hz 라 분당 약 9MB 쌓입니다."
+    ros2 bag record -o "$BAG_DIR" \
+        /scan /odom /odom_imu /amcl_pose /drive /sensors/imu/raw \
+        /commands/servo/position /race/enabled >/dev/null 2>&1 &
+    BAG_PID=$!
+    # SIGINT 로 곱게 닫고, 안 죽으면 3초 뒤 강제 종료
+    trap 'kill -INT $BAG_PID 2>/dev/null; ( sleep 3; kill -9 $BAG_PID 2>/dev/null ) & wait $BAG_PID 2>/dev/null' EXIT INT TERM
+
+    ros2 launch race_stack race.launch.py mode:=$MODE \
+        ${CTRL:+controller:=$CTRL} ${BENCH:+bench:=true} || true
+
+    kill -INT $BAG_PID 2>/dev/null || true
+    wait $BAG_PID 2>/dev/null || true
+    echo "[race.sh] bag 저장 완료: $BAG_DIR  ($(du -sh "$BAG_DIR" 2>/dev/null | cut -f1))"
+    echo "[race.sh]   ※ logs/ 는 .gitignore 다 — 공유하려면 따로 옮길 것"
 elif [ -n "${BENCH:-}" ]; then
-    # ★ box 는 "바퀴를 절대 돌리지 않는다" 가 계약인데 bench:=true 만으로는 안 지켜진다.
-    #   bench 는 race_stack 컨트롤러의 속도를 0 으로 클립할 뿐이고, bringup 이 함께
-    #   띄우는 joy_node+joy_teleop 은 /teleop 으로 따로 나간다. mux.yaml 우선순위가
-    #   teleop:100 vs drive:10 이라 조이스틱이 bench 를 그대로 통과한다.
-    #   F710 은 SDL 리매핑에서 joy_teleop 이 보는 axis 1 이 "놓은 상태 -1" 인 트리거에
-    #   걸려 -1 × scale 5.0 = 전속 후진이 된다.
-    #   (2026-08-09 실제 발생: ./race.sh box 로 아무것도 안 건드렸는데 차가 후진)
-    #   mapping-joy 에만 있던 방어를 여기에도 넣는다 — box 는 조이스틱을 쓰지 않는다.
+    # bench 는 컨트롤러 속도를 0 으로 못박지만(각 컨트롤러의 발행 직전), bringup 이
+    # 함께 띄우는 joy_node+joy_teleop 은 /teleop 으로 따로 나가 그 경로를 우회한다.
+    # 그래서 조이스틱 노드 자체를 죽인다 — box 는 조이스틱을 쓸 이유가 없다.
     ros2 launch race_stack race.launch.py mode:=$MODE \
         ${CTRL:+controller:=$CTRL} bench:=true &
     LAUNCH_PID=$!
     trap "kill $LAUNCH_PID 2>/dev/null; pkill -9 -f '[j]oy_teleop' 2>/dev/null" EXIT
-
-    # 한 번만 쏘면 안 된다 — launch 가 아직 joy_node 를 안 띄운 사이에 지나가면
-    # 그 뒤로 무방비가 된다. 뜨자마자 잡도록 기동 구간 내내 반복한다.
-    for _ in $(seq 1 16); do
-        pkill -9 -f '[j]oy_node'   2>/dev/null || true
-        pkill -9 -f '[j]oy_teleop' 2>/dev/null || true
-        sleep 0.5
-    done
-    echo "[race.sh] BENCH — joy_node/joy_teleop 정리 완료 (조이스틱 입력 무시)"
+    bench_kill_joy
     wait $LAUNCH_PID
 else
     exec ros2 launch race_stack race.launch.py mode:=$MODE \

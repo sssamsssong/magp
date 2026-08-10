@@ -33,25 +33,29 @@ def generate_launch_description():
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
 
+    # ── 차량별 값 덮어쓰기 ────────────────────────────────────────────
+    # race_script.yaml 은 두 차량 공용이고, 이 차만의 값(캘리브레이션·기하·
+    # 튜닝)은 config/vehicle_<차>.yaml 에서 온다. race.sh 가 apply_vehicle.py
+    # 로 펼쳐 놓은 것을 여기서 얹는다.
+    #   ★ "어느 키가 어디로 가는가" 는 apply_vehicle.py 에만 있다. 여기서는
+    #     통째로 deep-merge 만 한다 — 매핑을 두 군데 두면 반드시 어긋난다.
+    _ovl_path = os.environ.get('RACE_VEHICLE_OVERLAY', '')
+    if _ovl_path and os.path.exists(_ovl_path):
+        def _deep(dst, src):
+            for k, v in src.items():
+                if isinstance(v, dict) and isinstance(dst.get(k), dict):
+                    _deep(dst[k], v)
+                else:
+                    dst[k] = v
+        with open(_ovl_path) as f:
+            _ovl = yaml.safe_load(f) or {}
+        _deep(cfg, _ovl)
+        print(f'[race.launch] 차량 덮어쓰기 적용: {_ovl_path}')
+
     # mode:=/controller:=/bench:= 오버라이드는 race.sh가 launch arg로 준다.
     # sys.argv를 직접 파싱한다 (LaunchConfiguration은 파이썬 로직에서 못 씀)
     import sys
     mode = cfg['mode']
-    # ── 속도 프로파일 공통 설정 (2026-08-09) ───────────────────────────
-    #  grip_util 은 컨트롤러 셋(map/stanley/gap_follower)이 **공유**한다.
-    #  모드별로 위험도를 다르게 두고 싶으면 limits.grip_util.<mode> 로 준다 —
-    #  q*_max 같은 평평한 상한 대신 **마찰 예산 사용률**로 표현하는 것이 물리적이다.
-    _lim = cfg.get('limits', {})
-    _mp0 = cfg.get('map', {})
-    _gu  = _lim.get('grip_util', 0.6)
-    grip_util = float(_gu.get(mode, _gu.get('default', 0.6))
-                      if isinstance(_gu, dict) else _gu)
-    a_lon_acc = float(_lim.get('a_lon_acc', 0.0))
-    a_lon_brk = float(_lim.get('a_lon_brk', 0.0))
-    hard_cap  = float(cfg.get('speed', {}).get('hard_cap', 0.0))
-    veh = dict(mu=float(_mp0.get('mu', 0.348)), pac_d=float(_mp0.get('pac_d', 1.15)),
-               lf=float(_mp0.get('lf', 0.1757)), lr=float(_mp0.get('lr', 0.1441)))
-
     controller = cfg.get('controller', 'auto')
     bench = False
     for a in sys.argv:
@@ -63,6 +67,27 @@ def generate_launch_description():
             bench = a.split(':=')[1].lower() in ('true', '1', 'yes')
     if mode not in DEFAULT_CONTROLLER:
         raise RuntimeError(f'race.launch.py: 잘못된 mode "{mode}"')
+
+    # ── 속도 프로파일 공통 설정 (2026-08-09) ───────────────────────────
+    #  grip_util 은 컨트롤러 셋(map/stanley/gap_follower)이 **공유**한다.
+    #  모드별로 위험도를 다르게 두고 싶으면 limits.grip_util.<mode> 로 준다 —
+    #  q*_max 같은 평평한 상한 대신 **마찰 예산 사용률**로 표현하는 것이 물리적이다.
+    #
+    #  ★ 반드시 mode:= 오버라이드를 **적용한 뒤에** 풀어야 한다 (2026-08-09).
+    #    예전엔 이 블록이 위에 있어서 `./race.sh q2` 가 yaml 의 mode(q1) 로
+    #    grip_util 을 골랐다. 컨트롤러는 q2(회피)로 뜨는데 속도는 q1(η=0.8) 이라
+    #    실차에서 4.9㎧ 로 장애물에 돌진했고, 회피가 "전혀 안 되는" 것처럼 보였다.
+    #    로그상 q2 주행의 cmd_v 중앙이 q1 과 동일한 3.02㎧ 로 찍혀 드러났다.
+    _lim = cfg.get('limits', {})
+    _mp0 = cfg.get('map', {})
+    _gu  = _lim.get('grip_util', 0.6)
+    grip_util = float(_gu.get(mode, _gu.get('default', 0.6))
+                      if isinstance(_gu, dict) else _gu)
+    a_lon_acc = float(_lim.get('a_lon_acc', 0.0))
+    a_lon_brk = float(_lim.get('a_lon_brk', 0.0))
+    hard_cap  = float(cfg.get('speed', {}).get('hard_cap', 0.0))
+    veh = dict(mu=float(_mp0.get('mu', 0.348)), pac_d=float(_mp0.get('pac_d', 1.15)),
+               lf=float(_mp0.get('lf', 0.1757)), lr=float(_mp0.get('lr', 0.1441)))
 
     if controller == 'auto':
         controller = DEFAULT_CONTROLLER[mode]
@@ -515,11 +540,18 @@ def generate_launch_description():
                 # 0 이면 물리에서 자동: 가속=μ_eff·g·lf/L(후륜하중), 제동=μ_eff·g
                 'a_lon_acc':     a_lon_acc,
                 'a_lon_brk':     a_lon_brk,
+                # 구동계 지연 보상 (실측 0.25~0.29s) — 감속만 앞당긴다
+                'speed_lag':     float(_lim.get('speed_lag', 0.25)),
                 # ↓ 폐기. 옛 설정이 죽지 않게만 남겨둔다 (컨트롤러가 경고하고 무시)
                 'a_brake':       float(mp.get('a_brake',     0.0)),
                 'speed_scale':   float(mp.get('speed_scale', 1.0)),
                 'mu_cap':        bool( mp.get('mu_cap',      True)),
                 'steer_alpha':   float(mp.get('steer_alpha', 0.1981)),
+                # 슬립보정 이득 (1.0=모델값). 코너 과조향이면 낮춘다
+                'slip_gain':     float(mp.get('slip_gain',   1.0)),
+                # AMCL 보정 슬루 제한 (0=끔). 맵-실제 불일치 시 조향 킥 방지
+                'pose_corr_rate':     float(loc.get('pose_corr_rate',     4.0)),
+                'pose_corr_yaw_rate': float(loc.get('pose_corr_yaw_rate', 2.1)),
                 'reverse_check': bool( mp.get('reverse_check', True)),
                 # AMCL 첫 pose 전까지의 위치 가정 (stanley 와 같은 값을 쓴다).
                 # 없으면 출발선에서 pose 를 기다리다 영영 못 움직인다.

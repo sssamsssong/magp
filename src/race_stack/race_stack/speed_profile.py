@@ -90,20 +90,41 @@ def solve_profile(x, y, csv_v=None, *, mu_eff, grip_util, lf, lr, v_min,
     if hard_cap and hard_cap > 0:
         v = np.minimum(v, float(hard_cap))
 
-    def lon_avail(vi, ki, cap):
-        r = min(vi * vi * ki / max(a_g, 1e-9), 1.0)
-        return cap * math.sqrt(max(0.0, 1.0 - r * r))
+    def _step(v_from, ki, cap, dsi, inner=4):
+        """마찰원 결합 한 스텝을 **음함수로** 푼다.
+
+        구하려는 속도 u=v² 가 자기 자신의 횡가속에 들어가므로 음함수다:
+            u = v_from² + 2·ds·cap·√(1 − (u·κ/a_g)²)
+
+        ★ 이걸 명시적으로(현재 v 로 횡가속을 평가) 풀면 안 된다 (2026-08-09).
+          곡률 한계에서 출발하면 r = v²κ/a_g 가 정확히 1 이라 a_lon = 0 이 되고,
+          그러면 역방향 패스가 v[i] = min(v[i], v[j]) 로 변해 **코너 속도가
+          직선까지 그대로 전파**된다. 게다가 패스가 단조 감소(min)라 한 번
+          낮아지면 회복되지 않는다. 실제로 CSV 상한을 빼면 최고 속도가
+          5.00 → 2.57㎧ 로 **떨어지는** 증상이 나왔다 — 상한을 없앴는데 느려지는
+          모순. CSV 가 대부분의 점을 한계 아래로 낮춰준 덕에 가려져 있었다.
+
+        v_from(이웃의 속도)에서 시작해 몇 번 되풀이하면 수렴한다. 시작점이
+        한계 아래라 첫 평가에서 여력이 살아 있고, 반복하며 정확한 값으로 내려온다.
+        """
+        u = v_from * v_from
+        for _ in range(inner):
+            r = min(u * ki / max(a_g, 1e-9), 1.0)
+            u = v_from * v_from + 2.0 * dsi * cap * math.sqrt(max(0.0, 1.0 - r * r))
+        return math.sqrt(max(u, 0.0))
+
+    # ★ 구간 곡률은 두 끝의 **큰 쪽**을 쓴다. 한쪽 끝만 보면 곡률이 급히 변하는
+    #   구간에서 합성 가속이 마찰원을 벗어난다 (실측 5.8% 초과).
+    kseg = np.maximum(kap, np.roll(kap, -1))
 
     rng = range(n - 1, -1, -1) if closed else range(n - 2, -1, -1)
     for _ in range(int(iters)):
         for i in rng:                                   # 역방향 — 감속
             j = (i + 1) % n
-            v[i] = min(v[i], math.sqrt(v[j] ** 2
-                                       + 2.0 * lon_avail(v[i], kap[i], a_brk) * ds[i]))
+            v[i] = min(v[i], _step(v[j], kseg[i], a_brk, ds[i]))
         for i in range(n if closed else n - 1):         # 전진 — 가속
             j = (i + 1) % n
-            v[j] = min(v[j], math.sqrt(v[i] ** 2
-                                       + 2.0 * lon_avail(v[i], kap[i], a_acc) * ds[i]))
+            v[j] = min(v[j], _step(v[i], kseg[i], a_acc, ds[i]))
         if hard_cap and hard_cap > 0:
             v = np.minimum(v, float(hard_cap))
 

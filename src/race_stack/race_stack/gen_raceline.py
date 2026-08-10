@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-gen_raceline.py — TUMFTM 방식 최소 곡률 레이싱라인 생성기
+gen_raceline.py — TUMFTM 최소 곡률 레이싱라인 생성기 + GUI 드로잉 모드
 
 알고리즘: Heilmeier et al. "Minimum Curvature Trajectory Planning and Control
 for an Autonomous Racecar" (2019), DOI: 10.1080/00423114.2019.1631455
@@ -9,9 +9,11 @@ for an Autonomous Racecar" (2019), DOI: 10.1080/00423114.2019.1631455
   pip install numpy scipy osqp opencv-python Pillow
 
 사용법:
-  python3 gen_raceline.py                          # 대화형 맵 선택
-  python3 gen_raceline.py --map sohot_clean        # 맵 지정
-  python3 gen_raceline.py --map sohot_clean --vmax 8.0 --vmin 1.0
+  python3 gen_raceline.py                            # 대화형 맵 선택 → TUMFTM
+  python3 gen_raceline.py --map halfhot_clean        # 맵 지정 → TUMFTM
+  python3 gen_raceline.py --map halfhot_clean --gui  # GUI 드로잉 모드
+  python3 gen_raceline.py --map halfhot_clean --gui --out halfhot_clean_late_wp
+  python3 gen_raceline.py --map halfhot_clean --vmax 8.0 --mu 0.4 --rmin 1.0
 """
 
 import os, sys, csv, argparse, math
@@ -23,22 +25,42 @@ from scipy.spatial import cKDTree
 import osqp
 import scipy.sparse as sp
 
-# ── 경로 (환경변수 RACE_WS 로 워크스페이스 지정, 기본은 이 파일 기준) ────────
-# gen_waypoints_kappa.py 와 같은 규약. abspath 만 쓰면 심링크를 안 풀어
-# build/race_stack/maps(빌드 시점 스냅샷)를 읽는다 — 새 맵이 안 보이고, 생성한
-# 웨이포인트가 repo 밖에 떨어져 커밋도 안 되고 다음 빌드에 사라진다.
-# (2026-07-17 에 gen_waypoints 계열은 고쳤는데 이 파일만 남아 있었다)
-_PKG_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-if os.environ.get('RACE_WS'):
-    _PKG_DIR = os.path.join(
-        os.path.expanduser(os.environ['RACE_WS']), 'src', 'race_stack')
+_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# ★ 차량 최소회전반경 [m] — 라인이 아무리 빨라도 못 도는 건 소용없다.
+#   R = wheelbase / tan((servo_min − offset) / (−gain))
+#
+#   ★ 손으로 적지 않는다. config/vehicle_<차>.yaml 에서 읽어 계산한다 —
+#     예전엔 여기 0.856 이 박혀 있었는데 컨트롤러는 wheelbase 0.33 을 써서
+#     0.872 로 보고 있었다. 같은 값을 두 군데 적으면 반드시 갈라진다.
+#     차량 파일이 없으면(다른 기기에서 분석만 할 때) 아래 폴백을 쓴다.
+def _car_min_radius(fallback=0.872):
+    import math
+    for name in ('.vehicle_overlay.yaml',):
+        p = os.path.join(_PKG_DIR, '..', '..', 'config', name)
+        p = os.path.abspath(p)
+        if not os.path.exists(p):
+            continue
+        try:
+            import yaml as _y
+            o = _y.safe_load(open(p))
+            ms = float(o['pure_pursuit']['max_steer'])
+            wb = float(o['pure_pursuit']['wheelbase'])
+            return wb / math.tan(ms)
+        except Exception:
+            pass
+    return fallback
+
+
+R_CAR_MIN = _car_min_radius()
 MAPS_DIR = os.path.join(_PKG_DIR, 'maps')
 WP_DIR   = os.path.join(_PKG_DIR, 'waypoints')
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. 맵 → 트랙 경계 추출
 # ══════════════════════════════════════════════════════════════════════════════
-def extract_reftrack(map_name: str, safety_m: float, n_cl: int = 300) -> np.ndarray:
+def extract_reftrack(map_name: str, safety_m: float, n_cl: int = 300,
+                     return_bounds: bool = False):
     """
     pgm 맵에서 centerline + 트랙 폭을 추출한다.
     반환: [N, 4] = [x, y, w_right, w_left] (미터)
@@ -129,13 +151,21 @@ def extract_reftrack(map_name: str, safety_m: float, n_cl: int = 300) -> np.ndar
     d_i, _ = tree_inner.query(cl)
 
     # 안전 마진 적용 후 최소 폭 보장
-    min_w = 0.20  # 물리 최솟값
+    # ★ 이 하한은 작아야 한다 (2026-08-09). 0.20 이면 실제로 0.12m 밖에 없는
+    #   병목에서 QP 가 0.20m 를 쓸 수 있다고 착각해 벽 쪽으로 8cm 더 나간다.
+    #   없는 폭을 만들어내면 안 된다 — 좁으면 좁은 대로 보여야 α 가 0 이 된다.
+    min_w = 0.02
     w_right = np.maximum(d_o - safety_m, min_w)
     w_left  = np.maximum(d_i - safety_m, min_w)
 
     reftrack = np.column_stack([cl, w_right, w_left])
     print(f'  트랙 추출: {n_cl}pts  길이≈{np.sum(np.linalg.norm(np.diff(cl, axis=0), axis=1)):.1f}m')
     print(f'  폭: right {d_o.min():.2f}~{d_o.max():.2f}m  left {d_i.min():.2f}~{d_i.max():.2f}m')
+    if return_bounds:
+        # 반복 최적화가 매 스텝 폭을 **경계에서 다시 재려면** 이게 필요하다.
+        # α 를 더해 빼는 근사(w_right−α)만 쓰면 반복하며 오차가 누적돼
+        # 라인이 조용히 트랙 밖으로 샌다.
+        return reftrack, outer_w, inner_w
     return reftrack
 
 
@@ -239,7 +269,9 @@ def opt_min_curv(reftrack: np.ndarray,
                  normvec:  np.ndarray,
                  M_spl:   np.ndarray,
                  w_veh:   float,
-                 kappa_max: float = None) -> np.ndarray:
+                 r_min:   float = 0.9,
+                 alpha_max: float = 0.0,
+                 quiet:   bool = False) -> np.ndarray:
     """
     최소 곡률 경로 최적화 (OSQP QP 풀이).
 
@@ -248,18 +280,12 @@ def opt_min_curv(reftrack: np.ndarray,
       목적: min Σ κ_i²(α)
       → QP: min ½ α' H α + f' α
       제약: -w_left[i]+W/2 ≤ α[i] ≤ w_right[i]-W/2
-      (kappa_max 지정 시 추가) -κ_max ≤ κ_ref + E·α ≤ κ_max
 
     H = E'E,  f = 2 E' κ_ref
     E = diag(cx) T_ny − diag(cy) T_nx
     cx_i = x'_i / ||(x',y')||^(3/2),  cy_i = y'_i / ||(x',y')||^(3/2)
     T_nx = (A_ex_c @ A_inv) @ M_x_norm
     T_ny = (A_ex_c @ A_inv) @ M_y_norm
-
-    kappa_max: 차량의 물리적 최대 곡률(예: tan(max_steer)/wheelbase). 주면
-      평균 곡률을 희생해서라도 이 한계를 넘는 지점이 생기지 않도록 하드
-      제약을 추가한다 — "전체적으로 매끈함"보다 "못 도는 스파이크가 없음"이
-      우선일 때 씀.
     """
     N = reftrack.shape[0]
 
@@ -335,25 +361,31 @@ def opt_min_curv(reftrack: np.ndarray,
     dev_right = np.maximum(dev_right, 0.01)
     dev_left  = np.maximum(dev_left,  0.01)
 
-    # OSQP: min ½ x'Px + q'x  s.t. l ≤ Ax ≤ u
-    # 폭 제약(항상): -dev_left ≤ α ≤ dev_right → A=I, l=-dev_left, u=dev_right
-    A_rows = [sp.eye(N, format='csc')]
-    l_rows = [-dev_left]
-    u_rows = [dev_right]
+    # ★ 신뢰영역 — E 는 '노드를 α 만큼 밀어도 호길이는 그대로'라는 1차 전개다.
+    #   |α| 가 격자 간격에 근접하면 그 가정이 무너져 **모델이 실제 곡률과
+    #   완전히 어긋난다** (2026-08-09 실측: QP 는 R=0.90 이라는데 그 노드를
+    #   정확히 통과시키면 R=0.12 였다). 한 번에 조금만 움직이고 재선형화한다.
+    if alpha_max and alpha_max > 0:
+        dev_right = np.minimum(dev_right, alpha_max)
+        dev_left  = np.minimum(dev_left,  alpha_max)
 
-    if kappa_max is not None:
-        # 곡률 하드 제약: -κ_max ≤ κ_ref + E·α ≤ κ_max
-        A_rows.append(sp.csc_matrix(E))
-        l_rows.append(-kappa_max - kappa_ref)
-        u_rows.append(kappa_max - kappa_ref)
+    # OSQP: min ½ x'Px + q'x  s.t. l ≤ Ax ≤ u
+    # 제약 1: 트랙 폭  -dev_left ≤ α ≤ dev_right
+    # 제약 2: R_min   |κ_ref + E·α| ≤ 1/r_min
+    #          → -1/r_min - κ_ref ≤ E·α ≤ 1/r_min - κ_ref
+    kappa_max = 1.0 / max(r_min, 1e-3)
+    A_full = sp.vstack([sp.eye(N, format='csc'),
+                        sp.csc_matrix(E)], format='csc')
+    l_full = np.concatenate([-dev_left,  -kappa_max - kappa_ref])
+    u_full = np.concatenate([ dev_right,  kappa_max - kappa_ref])
 
     prob = osqp.OSQP()
     prob.setup(
         P=sp.csc_matrix(H),
         q=f,
-        A=sp.vstack(A_rows, format='csc'),
-        l=np.concatenate(l_rows),
-        u=np.concatenate(u_rows),
+        A=A_full,
+        l=l_full,
+        u=u_full,
         verbose=False,
         eps_abs=1e-9,
         eps_rel=1e-9,
@@ -363,18 +395,15 @@ def opt_min_curv(reftrack: np.ndarray,
     )
     result = prob.solve()
     if result.info.status not in ('solved', 'solved_inaccurate'):
-        # infeasible(예: 곡률 하드캡과 트랙폭이 동시에 못 맞음) 등에서
-        # result.x 는 유효한 해가 아니다 — 그걸 쓰면 오히려 경로가 망가지니
-        # "이번 라운드는 보정 없음"으로 안전하게 후퇴한다.
-        print(f'  경고: OSQP 상태 = {result.info.status} → 이번 라운드 보정 생략(α=0)')
-        return np.zeros(N)
+        print(f'  경고: OSQP 상태 = {result.info.status}')
 
     alpha = np.clip(result.x, -dev_left, dev_right)
 
     # 곡률 개선 확인
     kappa_new = kappa_ref + E @ alpha
-    print(f'  참조선 |κ|_max={np.abs(kappa_ref).max():.4f}  '
-          f'레이싱라인 |κ|_max={np.abs(kappa_new).max():.4f} 1/m')
+    if not quiet:
+        print(f'  참조선 |κ|_max={np.abs(kappa_ref).max():.4f}  '
+              f'레이싱라인 |κ|_max={np.abs(kappa_new).max():.4f} 1/m')
     return alpha
 
 
@@ -384,15 +413,13 @@ def opt_min_curv(reftrack: np.ndarray,
 def build_raceline(reftrack: np.ndarray,
                    normvec:  np.ndarray,
                    alpha:    np.ndarray,
-                   stepsize: float = 0.1,
-                   smooth_factor: float = 0.002) -> tuple:
-    """
-    α 오프셋을 적용한 레이싱라인을 생성하고 CubicSpline으로 균일 리샘플.
-    반환: (raceline [M,2], el_lengths [M], kappa [M])
+                   stepsize: float = 0.1) -> tuple:
+    """⚠ 폐기됨 (2026-08-09). eval_spline_dense 를 쓸 것.
 
-    smooth_factor: splprep 의 s = len(nodes)*smooth_factor. 0으로 주면 노드를
-      정확히 통과(보간)한다 — 곡률이 이미 QP로 제약된 노드(IQP 결과)라면
-      추가 스무딩이 오히려 국소 곡률을 더 키울 수 있어 0이 나을 때가 있다.
+    splprep 로 노드를 **근사**하는 별개의 곡선을 만들기 때문에, QP 가 최적화한
+    곡선과 다르다. r_min 을 0.9/1.0/1.1 로 바꿔도 출력 R 이 0.803/0.813/0.813 로
+    거의 변하지 않았다 — 최종 라인을 QP 가 아니라 스무더가 정하고 있었다.
+    호출부는 남아 있지 않지만, 같은 실수를 다시 하지 않도록 이유와 함께 남긴다.
     """
     N = len(reftrack)
     nodes = reftrack[:, :2] + alpha[:, None] * normvec   # [N, 2]
@@ -401,10 +428,10 @@ def build_raceline(reftrack: np.ndarray,
     ds_n  = np.linalg.norm(np.diff(np.vstack([nodes, nodes[0]]), axis=0), axis=1)
     total = ds_n.sum()
 
-    # splprep (periodic, 가벼운 스무딩) → 진동 방지
+    # splprep (periodic, 가벼운 스무딩) — 진동 방지
     from scipy.interpolate import splprep, splev
     tck, _ = splprep([nodes[:, 0], nodes[:, 1]],
-                     s=len(nodes) * smooth_factor, per=True, k=3)
+                     s=N * 0.002, per=True, k=3)
 
     M   = max(3, int(total / stepsize))
     u_u = np.linspace(0, 1, M, endpoint=False)
@@ -412,10 +439,8 @@ def build_raceline(reftrack: np.ndarray,
     xi, yi = splev(u_u, tck)
     rl = np.column_stack([xi, yi])
 
-    # 각 점 간 거리
     el = np.linalg.norm(np.diff(np.vstack([rl, rl[0]]), axis=0), axis=1)
 
-    # 1·2차 도함수로 곡률 계산
     dx, dy   = splev(u_u, tck, der=1)
     ddx, ddy = splev(u_u, tck, der=2)
     kappa = np.abs(dx * ddy - dy * ddx) / np.maximum((dx**2 + dy**2) ** 1.5, 1e-9)
@@ -424,19 +449,152 @@ def build_raceline(reftrack: np.ndarray,
     return rl, el, kappa
 
 
+
+def eval_spline_dense(nodes: np.ndarray, stepsize: float, n_sub: int = 40):
+    """노드를 **정확히 통과하는** 닫힌 3차 스플라인을 조밀 평가해 균일 리샘플.
+
+    ★ 왜 splprep 스무딩을 안 쓰나 (2026-08-09) ────────────────────────────
+    예전 build_raceline 은 `splprep(..., s=N*0.002)` 로 노드를 **근사**하는 별개의
+    곡선을 새로 만들었다. QP 가 최적화한 곡선(calc_splines 의 보간 스플라인)과
+    다른 곡선이라, r_min 을 아무리 조여도 출력 곡률이 따라오지 않았다:
+
+        r_min 0.9 → 출력 R 0.803 / r_min 1.0 → 0.813 / r_min 1.1 → 0.813
+
+    즉 최종 라인은 QP 가 아니라 **스무더가** 정하고 있었다. 최적화한 것과
+    주행하는 것이 달랐다. 여기서는 calc_splines 를 그대로 써서 둘을 일치시킨다.
+    """
+    closed = np.vstack([nodes, nodes[0]])
+    cx, cy, _, _ = calc_splines(closed)
+    N = len(nodes)
+
+    t = np.linspace(0.0, 1.0, n_sub, endpoint=False)
+    P  = np.array([np.ones_like(t), t, t**2, t**3])          # [4, n_sub]
+    D1 = np.array([np.zeros_like(t), np.ones_like(t), 2*t, 3*t**2])
+    D2 = np.array([np.zeros_like(t), np.zeros_like(t), 2*np.ones_like(t), 6*t])
+
+    x   = (cx @ P ).ravel();  y   = (cy @ P ).ravel()
+    dx  = (cx @ D1).ravel();  dy  = (cy @ D1).ravel()
+    ddx = (cx @ D2).ravel();  ddy = (cy @ D2).ravel()
+
+    # 곡률은 매개변수화에 무관한 식이라 t 로 미분해도 그대로 쓸 수 있다
+    kap = np.abs(dx * ddy - dy * ddx) / np.maximum((dx**2 + dy**2) ** 1.5, 1e-9)
+
+    pts = np.column_stack([x, y])
+    seg = np.linalg.norm(np.diff(np.vstack([pts, pts[0]]), axis=0), axis=1)
+    s_c = np.concatenate([[0.0], np.cumsum(seg)])            # [n+1]
+    total = float(s_c[-1])
+
+    M = max(3, int(total / stepsize))
+    s_new = np.linspace(0.0, total, M, endpoint=False)
+    xi = np.interp(s_new, s_c, np.append(x, x[0]))
+    yi = np.interp(s_new, s_c, np.append(y, y[0]))
+    ki = np.interp(s_new, s_c, np.append(kap, kap[0]))
+
+    rl = np.column_stack([xi, yi])
+    el = np.linalg.norm(np.diff(np.vstack([rl, rl[0]]), axis=0), axis=1)
+    return rl, el, ki, total
+
+
+def track_widths(line: np.ndarray, outer: np.ndarray, inner: np.ndarray,
+                 safety_m: float, min_w: float = 0.05):
+    """임의의 라인에서 좌우 트랙 폭을 **경계에서 다시 잰다**.
+
+    반복 최적화가 매 스텝 라인을 옮기므로, 폭을 α 로 더하고 빼는 근사만 쓰면
+    오차가 누적돼 라인이 조용히 트랙 밖으로 샌다. 매번 실측하면 그 경로가 없다.
+    right = outer(바깥 경계), left = inner — 중심선이 CCW 라 바깥이 오른쪽이다.
+    """
+    d_o, _ = cKDTree(outer).query(line)
+    d_i, _ = cKDTree(inner).query(line)
+    return (np.maximum(d_o - safety_m, min_w),
+            np.maximum(d_i - safety_m, min_w))
+
+
+def optimize_raceline(reftrack, outer, inner, *, w_veh, r_min, stepsize,
+                      out_step, safety_m, iters=12, step_limit=0.15,
+                      wall_clear=0.06, tol=0.995):
+    """재선형화 반복 최소곡률 최적화 (TUMFTM iqp 에 해당).
+
+    ★ 한 번만 푸는 게 왜 안 되나 ─────────────────────────────────────────
+    E 는 "노드를 α 만큼 밀어도 **호길이는 그대로**"라는 1차 전개다. 한 방에 풀면
+    |α| 가 격자 간격(0.5m)을 넘어(실측 0.815m) 그 가정이 완전히 깨진다.
+    그때 QP 는 자기 모델에서 R=0.900 을 만족한다고 보고하지만, 그 노드를 정확히
+    통과시킨 실제 곡선은 R=0.117 이었다 — 8배 차이. 모델과 기하가 따로 논다.
+
+    그래서 한 번에 step_limit 만큼만 움직이고, 옮긴 라인을 **새 기준선으로 삼아**
+    스플라인·법선·폭을 다시 계산한 뒤 또 푼다. 매 스텝 α 가 작으니 선형화가 유효하다.
+    """
+    ref = reftrack.copy()
+    best = None
+    for it in range(iters):
+        ru = interp_track(ref, stepsize)
+        path_cl = np.vstack([ru[:, :2], ru[0, :2]])
+        _, _, M_spl, nv = calc_splines(path_cl)
+
+        alpha = opt_min_curv(ru, nv, M_spl, w_veh=w_veh, r_min=r_min,
+                             alpha_max=step_limit, quiet=True)
+        if not np.all(np.isfinite(alpha)):
+            print(f'  iter {it:2d}: QP 해가 유효하지 않다 — 중단')
+            break
+
+        nodes = ru[:, :2] + alpha[:, None] * nv
+        rl, el, kap, total = eval_spline_dense(nodes, out_step)
+        r_act = 1.0 / float(np.abs(kap).max())
+
+        # 트랙 이탈 검사 — 경계까지의 **생거리**로 잰다.
+        # ★ safety_m 을 빼면 안 된다: QP 의 dev 는 이미 (폭 − safety − w_veh/2) 라
+        #   여기서 또 빼면 이중 차감이 된다. 실제로 그렇게 했더니 중심선조차
+        #   탈락해 "해를 못 찾았다"가 나왔다 (이 트랙은 최협 반폭이 0.27m 다).
+        #   합격 조건은 물리 조건 하나 — 차가 들어가는가.
+        d_o, d_i = track_widths(rl, outer, inner, safety_m=0.0, min_w=0.0)
+        clear = float(min(d_o.min(), d_i.min())) - w_veh / 2.0
+
+        print(f'  iter {it:2d}: |α|max={np.abs(alpha).max():.3f}  '
+              f'R_act={r_act:.3f} m  길이={total:.2f}m  차폭여유={clear:+.3f}m')
+
+        # ★ 곡률만 보고 고르면 안 된다. 반복이 진행될수록 라인은 코너를 더
+        #   파고들어 R 은 좋아지지만 **벽에 붙는다.** 이 트랙은 중심선조차 차폭
+        #   여유가 0.112m 뿐이라 여유가 곧 사라진다. 실제로 완주한 라인
+        #   (halfhot_forza_opt_wp)의 여유가 0.060m 였으므로 그 이상을 요구한다.
+        if clear >= wall_clear and (best is None or r_act > best[0]):
+            best = (r_act, nodes.copy(), rl, el, kap, total, clear)
+
+        # 다음 반복의 기준선 = 방금 옮긴 라인 (폭은 경계에서 다시 잰다)
+        w_r2, w_l2 = track_widths(nodes, outer, inner, safety_m)
+        ref = np.column_stack([nodes, w_r2, w_l2])
+
+        if np.abs(alpha).max() < 1e-3:
+            print(f'  iter {it:2d}: α 수렴 — 종료')
+            break
+
+    if best is None:
+        raise RuntimeError(
+            f'optimize_raceline: 벽 여유 {wall_clear:.3f}m 를 만족하는 해가 없다. '
+            f'--wallclear 를 낮추거나 --safety 를 줄일 것')
+    return best
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 6. 속도 프로파일 (전방/역방향 스윕)
 # ══════════════════════════════════════════════════════════════════════════════
-def apply_accel_brake_sweep(v:        np.ndarray,
-                            el:       np.ndarray,
-                            a_lon_acc: float,
-                            a_lon_brk: float) -> np.ndarray:
+def calc_vel_profile(kappa:    np.ndarray,
+                     el:       np.ndarray,
+                     mu:       float,
+                     v_max:    float,
+                     v_min:    float,
+                     a_lon_acc: float,
+                     a_lon_brk: float) -> np.ndarray:
     """
-    횡가속도 한계로 정해진 v_lat(v 초기값)에 종방향 가속·제동 한계를 적용.
-    (닫힌 트랙 기준 전/후방 스윕 — LUT 기반 속도 프로파일과 공유)
+    횡방향 마찰 한계 + 전/후방 종방향 가속도로 속도 프로파일 계산.
     """
-    v = v.copy()
-    n = len(v)
+    n = len(kappa)
+    g = 9.81
+    a_lat_max = mu * g
+
+    # 횡가속도 한계: v = sqrt(a_lat_max / |κ|)
+    v_lat = np.where(kappa > 1e-4,
+                     np.sqrt(a_lat_max / kappa),
+                     v_max)
+    v = np.minimum(np.full(n, v_max), v_lat)
 
     # 역방향 스윕 (제동 한계)
     for _ in range(3):
@@ -454,30 +612,6 @@ def apply_accel_brake_sweep(v:        np.ndarray,
             if v[j] > v_lim:
                 v[j] = v_lim
 
-    return v
-
-
-def calc_vel_profile(kappa:    np.ndarray,
-                     el:       np.ndarray,
-                     mu:       float,
-                     v_max:    float,
-                     v_min:    float,
-                     a_lon_acc: float,
-                     a_lon_brk: float) -> np.ndarray:
-    """
-    횡방향 마찰 한계(상수 mu 원) + 전/후방 종방향 가속도로 속도 프로파일 계산.
-    """
-    n = len(kappa)
-    g = 9.81
-    a_lat_max = mu * g
-
-    # 횡가속도 한계: v = sqrt(a_lat_max / |κ|)
-    v_lat = np.where(kappa > 1e-4,
-                     np.sqrt(a_lat_max / kappa),
-                     v_max)
-    v = np.minimum(np.full(n, v_max), v_lat)
-
-    v = apply_accel_brake_sweep(v, el, a_lon_acc, a_lon_brk)
     v = np.clip(v, v_min, v_max)
     lap_t = float(np.sum(el / np.maximum(v, 0.01)))
     print(f'  속도: {v.min():.2f}~{v.max():.2f} m/s  예상 랩타임={lap_t:.1f}s')
@@ -544,7 +678,176 @@ def save_overlay(map_name, raceline, v, wp_path):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 8. main
+# 8. GUI 드로잉 모드
+# ══════════════════════════════════════════════════════════════════════════════
+def gui_draw_raceline(map_name: str, args) -> tuple | None:
+    """
+    맵 위에서 클릭으로 경로를 그리는 대화형 GUI.
+    좌클릭: 점 추가  |  우클릭/u: 언두  |  d: 초기화  |  Enter: 확정  |  q: 취소
+    반환: (raceline [M,2], el [M], kappa [M], v [M])  또는  None (취소)
+    """
+    import matplotlib
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from scipy.interpolate import splprep, splev
+    import yaml
+
+    # ── 맵 로드 ──
+    yaml_path = os.path.join(MAPS_DIR, map_name + '.yaml')
+    with open(yaml_path) as f:
+        cfg = yaml.safe_load(f)
+    res    = float(cfg['resolution'])
+    origin = np.array(cfg['origin'][:2])
+
+    img_path = None
+    for ext in ['.pgm', '.png']:
+        p = os.path.join(MAPS_DIR, map_name + ext)
+        if os.path.exists(p):
+            img_path = p; break
+    img = np.array(Image.open(img_path).convert('L'))
+    h_img, w_img = img.shape
+    xmin, xmax = origin[0], origin[0] + w_img * res
+    ymin, ymax = origin[1], origin[1] + h_img * res
+
+    # ── 트랙 경계 ──
+    reftrack = extract_reftrack(map_name, safety_m=args.safety)
+    cl = reftrack[:, :2]
+    path_cl = np.vstack([cl, cl[0]])
+    _, _, _, nv = calc_splines(path_cl)
+    bnd_r = np.vstack([cl + reftrack[:, 2:3] * nv, cl[0] + reftrack[0, 2] * nv[0]])
+    bnd_l = np.vstack([cl - reftrack[:, 3:4] * nv, cl[0] - reftrack[0, 3] * nv[0]])
+
+    # ── 기존 웨이포인트 후보 로드 ──
+    candidates = {}
+    if os.path.isdir(WP_DIR):
+        for fname in sorted(os.listdir(WP_DIR)):
+            if fname.startswith(map_name) and fname.endswith('.csv'):
+                try:
+                    pts = []
+                    with open(os.path.join(WP_DIR, fname)) as f:
+                        for row in csv.DictReader(f):
+                            pts.append([float(row['x']), float(row['y'])])
+                    candidates[fname[:-4]] = np.array(pts)
+                except Exception:
+                    pass
+
+    # ── 그림 ──
+    fig, ax = plt.subplots(figsize=(13, 10))
+    ax.imshow(img, origin='lower', extent=[xmin, xmax, ymin, ymax],
+              cmap='gray', alpha=0.75)
+    ax.set_aspect('equal')
+
+    ax.plot(bnd_r[:, 0], bnd_r[:, 1], color='orange', lw=1.2, alpha=0.7, label='우측 한계')
+    ax.plot(bnd_l[:, 0], bnd_l[:, 1], color='cyan',   lw=1.2, alpha=0.7, label='좌측 한계')
+    cl_cl = np.vstack([cl, cl[0]])
+    ax.plot(cl_cl[:, 0], cl_cl[:, 1], 'b--', lw=0.8, alpha=0.35, label='중심선')
+
+    pal = ['red', 'lime', 'magenta', 'yellow', 'deepskyblue']
+    for i, (cname, cpts) in enumerate(candidates.items()):
+        short = cname.replace(map_name + '_', '')
+        ax.plot(cpts[:, 0], cpts[:, 1], '-', color=pal[i % len(pal)],
+                lw=2.0, alpha=0.8, label=short)
+
+    ax.legend(loc='upper right', fontsize=7, framealpha=0.6)
+    ax.set_title(
+        f'{map_name}  ─  좌클릭: 점 추가  |  우클릭/u: 언두  |  '
+        f'd: 초기화  |  Enter: 확정  |  q: 취소',
+        fontsize=9)
+
+    # 현재 그린 경로 표시
+    state = dict(pts=[], artists=[])
+
+    def _redraw():
+        for a in state['artists']:
+            try: a.remove()
+            except Exception: pass
+        state['artists'].clear()
+        pts = state['pts']
+        if not pts:
+            fig.canvas.draw_idle(); return
+        arr = np.array(pts)
+        state['artists'].append(
+            ax.scatter(arr[:, 0], arr[:, 1], c='white', edgecolors='red',
+                       s=28, zorder=12, linewidths=1.2))
+        if len(pts) >= 2:
+            ln, = ax.plot(arr[:, 0], arr[:, 1], 'r--', lw=1, alpha=0.45, zorder=10)
+            state['artists'].append(ln)
+        if len(pts) >= 4:
+            try:
+                tck, _ = splprep([arr[:, 0], arr[:, 1]], s=0, per=False, k=3)
+                u_f = np.linspace(0, 1, max(300, len(pts) * 12))
+                sx, sy = splev(u_f, tck)
+                prev, = ax.plot(sx, sy, 'r-', lw=2.5, zorder=11)
+                state['artists'].append(prev)
+            except Exception:
+                pass
+        fig.canvas.draw_idle()
+
+    def on_click(ev):
+        if ev.inaxes != ax: return
+        if ev.button == 1:
+            state['pts'].append([ev.xdata, ev.ydata])
+        elif ev.button == 3 and state['pts']:
+            state['pts'].pop()
+        _redraw()
+
+    def on_key(ev):
+        if ev.key == 'u' and state['pts']:
+            state['pts'].pop()
+        elif ev.key == 'd':
+            state['pts'].clear()
+        elif ev.key in ('enter', 'return'):
+            plt.close(fig)
+        elif ev.key == 'q':
+            state['pts'].clear()
+            plt.close(fig)
+        _redraw()
+
+    fig.canvas.mpl_connect('button_press_event', on_click)
+    fig.canvas.mpl_connect('key_press_event', on_key)
+    plt.tight_layout()
+    plt.show()
+
+    pts = state['pts']
+    if len(pts) < 4:
+        print('  점이 부족합니다 (최소 4개 필요). 취소됨.')
+        return None
+
+    # ── 스플라인 피팅 ──
+    print(f'\n  {len(pts)}점 → 주기 스플라인 피팅...')
+    arr = np.array(pts)
+    tck, _ = splprep([arr[:, 0], arr[:, 1]], s=0, per=True, k=3)
+
+    # 총 길이 추정
+    u_est = np.linspace(0, 1, 600, endpoint=False)
+    xe, ye = splev(u_est, tck)
+    pts_est = np.column_stack([xe, ye])
+    total = float(np.linalg.norm(
+        np.diff(np.vstack([pts_est, pts_est[0]]), axis=0), axis=1).sum())
+
+    M   = max(3, int(total / args.step))
+    u_u = np.linspace(0, 1, M, endpoint=False)
+    xi, yi = splev(u_u, tck)
+    raceline = np.column_stack([xi, yi])
+
+    el = np.linalg.norm(np.diff(np.vstack([raceline, raceline[0]]), axis=0), axis=1)
+    dx, dy   = splev(u_u, tck, der=1)
+    ddx, ddy = splev(u_u, tck, der=2)
+    kappa = np.abs(dx * ddy - dy * ddx) / np.maximum((dx**2 + dy**2) ** 1.5, 1e-9)
+
+    r_act = 1.0 / float(kappa.max())
+    print(f'  레이싱라인: {M}pts  길이={total:.1f}m  |κ|_max={kappa.max():.4f}  R_min={r_act:.3f}m')
+    if r_act < args.rmin * 0.995:
+        print(f'  ⚠ R_min {r_act:.3f}m < 목표 {args.rmin}m — 헤어핀을 더 넓게 그려 보세요')
+
+    v = calc_vel_profile(kappa, el,
+                         mu=args.mu, v_max=args.vmax, v_min=args.vmin,
+                         a_lon_acc=args.acc, a_lon_brk=args.brk)
+    return raceline, el, kappa, v
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 9. main
 # ══════════════════════════════════════════════════════════════════════════════
 def main():
     p = argparse.ArgumentParser(description='TUMFTM 최소 곡률 레이싱라인 생성기')
@@ -559,9 +862,21 @@ def main():
     p.add_argument('--acc',    type=float, default=5.0,  help='가속도 (m/s²)')
     p.add_argument('--brk',    type=float, default=8.0,  help='제동 (m/s²)')
     p.add_argument('--step',   type=float, default=0.1,  help='웨이포인트 간격 (m)')
+    p.add_argument('--rmin',   type=float, default=1.0,
+                   help='최소 회전반경 (m). 차량 한계 0.856m 보다 크게 —'
+                        ' 여유가 없으면 AMCL 오차·조향 지연을 흡수 못 한다')
+    p.add_argument('--gridstep', type=float, default=0.5,
+                   help='QP 격자 간격 (m). |α| 가 이 값에 근접하면 선형화가 깨진다')
+    p.add_argument('--steplimit', type=float, default=0.15,
+                   help='반복 1회당 최대 횡이동 (m) — 신뢰영역')
+    p.add_argument('--iters',  type=int, default=12, help='재선형화 반복 횟수')
+    p.add_argument('--wallclear', type=float, default=0.06,
+                   help='벽까지 최소 여유 (m, 차폭 제외). 실주행 검증된 라인이 0.060')
+    p.add_argument('--gui',   action='store_true',       help='클릭 GUI 드로잉 모드')
+    p.add_argument('--out',   default=None,              help='출력 웨이포인트 이름 (기본: {map}_map_wp 또는 {map}_draw_wp)')
     args = p.parse_args()
 
-    # 맵 선택
+    # ── 맵 선택 ──
     if args.map:
         map_name = args.map
     else:
@@ -576,38 +891,92 @@ def main():
         val = input('맵 이름 또는 번호: ').strip()
         map_name = maps[int(val) - 1] if val.isdigit() else val
 
-    wp_path = os.path.join(WP_DIR, f'{map_name}_wp.csv')
     os.makedirs(WP_DIR, exist_ok=True)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # GUI 드로잉 모드
+    # ══════════════════════════════════════════════════════════════════════
+    if args.gui:
+        out_name = args.out or f'{map_name}_draw_wp'
+        wp_path  = os.path.join(WP_DIR, out_name + '.csv')
+
+        print(f'\n[GUI] 맵: {map_name}  출력: {out_name}')
+        result = gui_draw_raceline(map_name, args)
+        if result is None:
+            return
+        raceline, el, kappa, v = result
+
+        # ★ 손으로 그린 경로도 차량 기하를 만족해야 한다. TUMFTM 경로와 같은 검사다 —
+        #   여기 빠뜨리면 "그렸으니 되겠지" 하고 못 도는 라인이 그대로 나간다.
+        r_act = 1.0 / float(np.abs(kappa).max())
+        print(f'\nR_min = {r_act:.3f} m  (차량 한계 {R_CAR_MIN:.3f} m)', end='')
+        n_bad = int(np.sum(kappa > 1.0 / R_CAR_MIN))
+        if n_bad:
+            print(f'\n  ★★ 차량이 못 도는 점 {n_bad}/{len(kappa)}개 — 헤어핀을 더 크게 그릴 것')
+        else:
+            print(f'  여유 {r_act - R_CAR_MIN:+.3f} m ✓')
+
+        print(f'속도: {v.min():.2f}~{v.max():.2f} m/s')
+
+        # 저장
+        with open(wp_path, 'w', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(['x', 'y', 'speed'])
+            for (x, y), vi in zip(raceline, v):
+                w.writerow([f'{x:.4f}', f'{y:.4f}', f'{vi:.4f}'])
+        print(f'  저장: {len(raceline)}pts → {wp_path}')
+        save_overlay(map_name, raceline, v, wp_path)
+        print(f'\n완료!  race_script.yaml → waypoints: {out_name}')
+        return
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TUMFTM 최적화 모드
+    # ══════════════════════════════════════════════════════════════════════
+    out_name = args.out or f'{map_name}_map_wp'
+    wp_path  = os.path.join(WP_DIR, out_name + '.csv')
 
     print(f'\n맵: {map_name}  vmax={args.vmax}  wveh={args.wveh}  safety={args.safety}')
 
-    # ── 단계별 실행 ──
     print('\n[1] 트랙 경계 추출...')
-    reftrack = extract_reftrack(map_name, safety_m=args.safety)
+    reftrack, outer_w, inner_w = extract_reftrack(
+        map_name, safety_m=args.safety, return_bounds=True)
 
-    print('\n[2] 균일 리샘플 (0.5m 간격)...')
-    reftrack_u = interp_track(reftrack, stepsize=0.5)
-    N = len(reftrack_u)
-    print(f'  {N}pts')
+    print(f'\n[2~4] 재선형화 반복 최소곡률 최적화 '
+          f'(격자 {args.gridstep}m, 스텝한계 {args.steplimit}m, 최대 {args.iters}회)...')
+    r_act, nodes, raceline, el, kappa, total, wclear = optimize_raceline(
+        reftrack, outer_w, inner_w,
+        w_veh=args.wveh, r_min=args.rmin,
+        stepsize=args.gridstep, out_step=args.step,
+        safety_m=args.safety, iters=args.iters, step_limit=args.steplimit,
+        wall_clear=args.wallclear)
 
-    print('\n[3] 3차 스플라인 피팅...')
-    path_cl = np.vstack([reftrack_u[:, :2], reftrack_u[0, :2]])
-    coeffs_x, coeffs_y, M_spl, normvec = calc_splines(path_cl)
+    print(f'\n[5] 결과: {len(raceline)}pts  길이={total:.2f}m  '
+          f'|κ|_max={1/r_act:.4f} 1/m')
+    print(f'  최종 R_min = {r_act:.3f} m  (목표 {args.rmin} m)', end='')
+    if r_act < args.rmin * 0.995:
+        print('  ⚠ 목표 미달 — 트랙 여유 부족 또는 반복 한계')
+    else:
+        print('  ✓')
+    print(f'  벽 여유 (차폭 제외) {wclear:+.3f} m  '
+          f'(요구 {args.wallclear:.3f} / 실주행 검증된 라인 0.060)')
 
-    print('\n[4] 최소 곡률 QP (OSQP)...')
-    alpha = opt_min_curv(reftrack_u, normvec, M_spl, w_veh=args.wveh)
-    print(f'  α: [{alpha.min():.3f}, {alpha.max():.3f}] m')
-
-    print('\n[5] 레이싱라인 생성...')
-    raceline, el, kappa = build_raceline(reftrack_u, normvec, alpha,
-                                         stepsize=args.step)
+    # ★ 차량 기하와 직접 대조한다. 라인이 아무리 빨라도 못 도는 건 소용없다.
+    #   R_min(차량) = wheelbase / tan((servo_min − offset)/(−gain))  ← config/vesc.yaml
+    #   2026-08-09 기준 좌회전 0.856m (servo_min 0.12, offset 0.3954, gain −0.761).
+    #   실제로 08/09 주행에서 R 0.91m 라인의 헤어핀에서 라인 밖으로 0.39m 밀렸다.
+    R_CAR = R_CAR_MIN
+    n_bad = int(np.sum(kappa > 1.0 / R_CAR))
+    if n_bad:
+        print(f'  ★★ 차량 최소회전반경({R_CAR:.3f}m)을 넘는 점이 {n_bad}/{len(kappa)}개 '
+              f'— 이 라인은 못 돈다. --rmin 을 올려 다시 생성할 것')
+    else:
+        print(f'  차량 최소회전반경 {R_CAR:.3f}m 대비 여유 {r_act - R_CAR:+.3f}m ✓')
 
     print('\n[6] 속도 프로파일...')
     v = calc_vel_profile(kappa, el,
                          mu=args.mu, v_max=args.vmax, v_min=args.vmin,
                          a_lon_acc=args.acc, a_lon_brk=args.brk)
 
-    # ── 저장 ──
     print('\n[7] 저장...')
     with open(wp_path, 'w', newline='') as f:
         w = csv.writer(f)
@@ -619,7 +988,7 @@ def main():
     save_overlay(map_name, raceline, v, wp_path)
 
     print('\n완료! 다음 단계:')
-    print(f'  race_script.yaml: map_name: {map_name}')
+    print(f'  race_script.yaml → waypoints: {out_name}')
     print(f'  SPEED_SCALE 1.0 으로 시작 (웨이포인트가 이미 고속 최적화됨)')
 
 

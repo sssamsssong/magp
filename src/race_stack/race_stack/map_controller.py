@@ -163,10 +163,46 @@ class MapController(Node):
         self.declare_parameter('a_lon_acc',   0.0)
         self.declare_parameter('a_lon_brk',   0.0)
 
+        # 구동계 지연 [s]. 지령→실측 속도의 상호상관으로 실측한 값(2026-08-09:
+        # 250~290ms). 이만큼 앞의 프로파일 **최솟값**을 미리 지령해 감속을
+        # 앞당긴다. 0 = 끔. 자세한 이유는 _profile_speed 참고.
+        self.declare_parameter('speed_lag',   0.25)
+
         # ★ 박스 위 벤치 모드. true 면 **발행 직전에 속도를 0 으로 못박는다**
         #   (_publish_cmd). 조향은 살아 있어야 검증이 되므로 건드리지 않는다.
         self.declare_parameter('bench',       False)
 
+        # 슬립보정(α_f) 이득 [0~1]. 1.0 = 모델값 그대로.
+        #   ★ 2026-08-09 실차: 코너에서 α_f 가 기구학항만큼 커져 **과조향**이 났다.
+        #     주행 궤적 곡률이 기준의 1.2~1.9배 (s=20~28m 구간, cool_clean).
+        #     타이어가 모델만큼 안 미끄러진다는 뜻 — mu 나 pac_b 가 실제보다
+        #     낮게 잡혀 있다. 둘 다 [미검증] 값이다.
+        #     mu 를 올리면 속도 프로파일까지 같이 빨라져 원인이 섞이므로,
+        #     **조향 보정만** 따로 줄일 수 있는 손잡이를 둔다.
+        self.declare_parameter('slip_gain',   1.0)
+
+        # ── AMCL 보정 슬루 제한 ──────────────────────────────────────
+        #   ★ 2026-08-09 실차: q2 로 장애물을 치고 다니며 **트랙 구조물이 실제로
+        #     움직였다.** 맵-스캔 잔차가 평균 4.1 → 8.2cm, 최대 15 → 39cm 로 두 배.
+        #     그 상태로 q1 을 6㎧ 로 돌리자 AMCL 이 s=17.6m 에서 2.90m,
+        #     s=18.6m 에서 **4.50m** 점프했다 (yaw 는 52.9°). 그 자리가 정확히
+        #     주행이 이탈한 지점이다.
+        #
+        #   예전 pose_cb 는 새 보정을 **그대로 즉시** 반영했다. 4.5m 점프가 다음
+        #   50Hz 틱에서 그대로 조향 오차가 된다. 게다가 오늘 steer_alpha 를
+        #   0.8892(170ms) → 0.555(34ms) 로 낮추면서, 그 점프를 **우연히 뭉개주던
+        #   필터마저 얇아졌다.** 요 진동은 잡혔지만 pose 점프에는 더 취약해졌다.
+        #
+        #   그래서 보정을 순간에 반영하지 않고 **속도 제한**을 건다. 위치추정이
+        #   틀린 채로 잠깐 가는 것보다, 조향이 튀어 벽으로 가는 게 훨씬 나쁘다.
+        #   거부(reject)가 아니라 제한이라 AMCL 이 옳으면 몇 초 안에 수렴한다.
+        #   0 = 끔(옛 동작).
+        #   한계값은 bag 에서 분포를 재서 정했다 — AMCL 은 평상시에도 파티클
+        #   잡음으로 보정을 흔든다(정상 주행 p99 3.63㎧). 너무 조이면 위치추정을
+        #   망가뜨리고, 너무 풀면 점프가 그대로 통과한다. 4.0㎧/120°/s 에서
+        #   정상 주행의 0.8% 만 걸리고 4.5m 점프는 1.1s 에 걸쳐 반영된다.
+        self.declare_parameter('pose_corr_rate',     4.0)   # m/s
+        self.declare_parameter('pose_corr_yaw_rate', 2.1)   # rad/s
 
         # ↓ 폐기됨. 남겨둔 건 옛 설정이 죽지 않게 하려는 것뿐이고, 1.0 이 아니면
         #   경고하고 **무시한다**. 위 grip_util 을 쓸 것.
@@ -201,6 +237,7 @@ class MapController(Node):
                 '조향은 정상 동작하므로 박스 위에서 확인할 수 있다.')
 
         wp_file = self.get_parameter('waypoint_file').value
+        self._wp_ds = 0.1
         self.wp = self._load_waypoints(wp_file)
         if self.wp is None:
             self.get_logger().error(
@@ -208,6 +245,8 @@ class MapController(Node):
                 f'./race.sh log <이름> 으로 웨이포인트를 먼저 기록하세요.')
         else:
             self.get_logger().info(f'웨이포인트 {len(self.wp)}개 로드')
+            _d = np.hypot(np.diff(self.wp[:, 0]), np.diff(self.wp[:, 1]))
+            self._wp_ds = float(np.median(_d)) if len(_d) else 0.1
             self._curvature = self._compute_curvature()
             self._v_profile = self._compute_speed_profile()
         self._pac_alpha_lut, self._pac_Fy_lut = self._pacejka_lut()
@@ -227,6 +266,8 @@ class MapController(Node):
         self._odom_last = None       # (t, x, y, yaw)
         self._odom_buf = deque(maxlen=100)
         self._map_from_odom = None   # (th, tx, ty) — map←odom 보정 변환
+        self._corr_t = time.time()   # 마지막 보정 갱신 시각 (슬루 제한용)
+        self._corr_clamped = 0       # 제한이 걸린 횟수 — 주행 후 요약에 쓴다
         self._seed_pose = (float(self.p('init_x')), float(self.p('init_y')),
                            float(self.p('init_yaw')))
 
@@ -354,7 +395,43 @@ class MapController(Node):
             f"| 예상 랩 {info['lap_time']:.1f}s"
             + (f" | ⚠ hard_cap 에 걸린 구간 {100*info['capped']:.0f}%"
                if info['capped'] > 0.01 else ''))
+
+        # ★ 조향 쪽 유효값도 같이 찍는다 (2026-08-09).
+        #   yaml → launch → declare_parameter 3단 폴백이라, 코드에 적힌 기본값을
+        #   보고 "지금 이 값이겠거니" 하고 오해하기 쉽다. 실제로 map_controller 의
+        #   declare_parameter(slip_gain, 1.0) 을 보고 1.0 이 걸린 줄 안 적이 있다.
+        #   **적용된 값은 여기서 확인할 것.** 오늘만 이 종류 함정이 다섯 번 나왔다.
+        a = float(self.p('steer_alpha'))
+        tau = -0.02 / math.log(a) if 0.0 < a < 1.0 else 0.0
+        self.get_logger().info(
+            f"  조향 l1={self.p('l1_min'):.3f}+{self.p('l1_k'):.3f}·v  "
+            f"alpha={a:.3f}(τ{tau*1000:.0f}ms)  slip_gain={self.p('slip_gain'):.2f}  "
+            f"speed_lag={self.p('speed_lag'):.2f}s  max_steer={self.p('max_steer'):.3f}")
         return v
+
+    def _profile_speed(self, near, v):
+        """프로파일에서 지령 속도를 뽑되 **구동계 지연만큼 미리 감속**한다.
+
+        2026-08-09 실측 (driven_path.csv 의 speed 와 cmd_v 상호상관):
+        지령→실측 지연이 **250~290ms**. 4.7㎧ 이면 1.2m 를 지나서야 반응한다.
+        헤어핀(s=14m, 프로파일 2.09㎧) 진입에서 실측이 3.30㎧ 로 1.2㎧ 초과했고,
+        그 다음 점(s=16m)에서 라인 바깥으로 0.39m 밀렸다 — 그립이 모자라서가
+        아니라 **감속을 늦게 시작해서**다.
+
+        보정은 감속 방향에만 건다:  앞으로 v·t_lag 만큼의 구간에서 프로파일의
+        **최솟값**을 취한다. 가속까지 앞당기면 코너를 다 빠져나오기 전에 밟게 되어
+        마찰원을 넘는다 — 브레이크는 미리, 액셀은 제때가 맞다.
+        """
+        i = int(near)
+        lag = float(self.p('speed_lag'))
+        if lag <= 0.0 or self._wp_ds <= 0.0:
+            return float(self._v_profile[i])
+        k = int(round(v * lag / self._wp_ds))
+        if k <= 0:
+            return float(self._v_profile[i])
+        n = len(self._v_profile)
+        idx = (np.arange(i, i + k + 1) % n)
+        return float(self._v_profile[idx].min())
 
     def _friction_cap(self):
         """마찰원 곡률 한계속도. (진단용 — 프로파일 계산은 _compute_speed_profile 안에서)"""
@@ -434,6 +511,7 @@ class MapController(Node):
         Fzf = mass * GRAVITY * lr / wb          # 앞축 수직하중
         F_yf = mass * a_lat * lr / wb           # 앞축 필요 횡력
         alpha_f = self._pacejka_inv(F_yf / (mu * Fzf))   # 슬립각 보정
+        alpha_f *= float(self.p('slip_gain'))            # ★ 과조향 억제 (위 주석)
 
         delta_kin = math.atan(wb * 2.0 * math.sin(eta) / max(L1, 1e-3))
         max_steer = float(self.p('max_steer'))
@@ -534,8 +612,60 @@ class MapController(Node):
         _, ox, oy, oyaw = od
         th = _normalize(yaw - oyaw)
         c, s = math.cos(th), math.sin(th)
-        self._map_from_odom = (th, px - (c * ox - s * oy),
-                               py - (s * ox + c * oy))
+        target = (th, px - (c * ox - s * oy), py - (s * ox + c * oy))
+
+        self._map_from_odom = self._slew_correction(target)
+
+    def _slew_correction(self, target):
+        """보정 변환을 목표로 **제한된 속도로** 옮긴다. 자세한 이유는
+        pose_corr_rate 파라미터 주석 참고.
+
+        변환 계수(th,tx,ty)를 직접 자르지 않는다 — th 가 조금만 변해도 원점에서
+        먼 곳의 위치는 크게 움직이기 때문이다. **지금 위치가 얼마나 뛰는지**를
+        기준으로 자른 뒤 그 위치를 만드는 변환을 되계산한다.
+        """
+        rate = float(self.p('pose_corr_rate'))
+        yrate = float(self.p('pose_corr_yaw_rate'))
+        now = time.time()
+        prev = self._map_from_odom
+        dt = min(max(now - self._corr_t, 1e-3), 0.5)
+        self._corr_t = now
+
+        # 출발 전에는 자유롭게 수렴시킨다 — 초기 정렬을 막으면 안 된다
+        if prev is None or rate <= 0.0 or not self.enabled or self._odom_last is None:
+            return target
+
+        def apply(T, o):
+            th, tx, ty = T
+            _, ox, oy, oyaw = o
+            c, s = math.cos(th), math.sin(th)
+            return (tx + c * ox - s * oy, ty + s * ox + c * oy, _normalize(th + oyaw))
+
+        o = self._odom_last
+        x0, y0, w0 = apply(prev,   o)
+        x1, y1, w1 = apply(target, o)
+        d = math.hypot(x1 - x0, y1 - y0)
+        dw = _normalize(w1 - w0)
+        lim, wlim = rate * dt, yrate * dt
+        if d <= lim and abs(dw) <= wlim:
+            return target
+
+        k = min(1.0, lim / d) if d > 1e-9 else 1.0
+        kw = min(1.0, wlim / abs(dw)) if abs(dw) > 1e-9 else 1.0
+        xt, yt = x0 + (x1 - x0) * k, y0 + (y1 - y0) * k
+        wt = _normalize(w0 + dw * kw)
+
+        self._corr_clamped += 1
+        self.get_logger().warn(
+            f'AMCL 보정 {d*100:.0f}cm / {math.degrees(abs(dw)):.0f}° 를 '
+            f'{lim*100:.0f}cm / {math.degrees(wlim):.0f}° 로 제한 '
+            f'(누적 {self._corr_clamped}회) — 맵과 실제가 어긋났을 수 있다',
+            throttle_duration_sec=2.0)
+
+        _, ox2, oy2, oyaw2 = o
+        th2 = _normalize(wt - oyaw2)
+        c2, s2 = math.cos(th2), math.sin(th2)
+        return (th2, xt - (c2 * ox2 - s2 * oy2), yt - (s2 * ox2 + c2 * oy2))
 
     def _current_pose(self):
         """AMCL 보정 ⊕ 최신 odom = 고주기 pose. 보정이 없으면 AMCL 원시값 폴백."""
@@ -586,7 +716,7 @@ class MapController(Node):
 
         # 프로파일이 이미 물리(마찰원)와 min_speed·hard_cap 을 다 반영했다.
         # 여기서 다시 max_speed 로 자르면 상한이 부활해 등속 주행이 된다.
-        speed = float(self._v_profile[near])
+        speed = self._profile_speed(near, v)
 
         self.get_logger().info(
             f'[MAP] κ={self._curvature[near]:.3f}  '

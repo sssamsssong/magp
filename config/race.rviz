@@ -110,7 +110,7 @@ Visualization Manager:
       Enabled: true
       Name: Obstacles
       Namespaces:
-        {}
+        obstacle: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -219,7 +219,7 @@ Visualization Manager:
       Enabled: true
       Name: MarkerArray
       Namespaces:
-        {}
+        obstacle: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -259,7 +259,7 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      Angle: -1.4699997901916504
+      Angle: -1.5699996948242188
       Class: rviz_default_plugins/TopDownOrtho
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
@@ -269,7 +269,7 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Scale: 32.16206359863281
+      Scale: 29.292314529418945
       Target Frame: base_link
       Value: TopDownOrtho (rviz_default_plugins)
       X: 4.210108280181885

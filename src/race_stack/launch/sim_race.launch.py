@@ -166,6 +166,7 @@ def generate_launch_description():
                 'a_max':   float(cfg.get('sim_vehicle', {}).get('a_max', 9.51)),
                 'a_brake': map_params['a_brake'],
                 's_max':   map_params['max_steer'],
+                'tau_v':   float(cfg.get('sim_vehicle', {}).get('tau_v', 0.25)),
             }])
     else:
         sv = cfg.get('sim_vehicle', {})
@@ -173,8 +174,8 @@ def generate_launch_description():
             'veh_mu':          float(sv.get('mu',          1.0489)),
             'veh_C_Sf':        float(sv.get('C_Sf',        4.718)),
             'veh_C_Sr':        float(sv.get('C_Sr',        5.4562)),
-            'veh_lf':          float(sv.get('lf',          0.15875)),
-            'veh_lr':          float(sv.get('lr',          0.17145)),
+            'veh_lf':          float(sv.get('lf',          0.1757)),
+            'veh_lr':          float(sv.get('lr',          0.1441)),
             'veh_h':           float(sv.get('h',           0.074)),
             'veh_m':           float(sv.get('m',           3.74)),
             'veh_I':           float(sv.get('I',           0.04712)),

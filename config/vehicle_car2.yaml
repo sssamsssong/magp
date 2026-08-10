@@ -1,0 +1,69 @@
+# ═══════════════════════════════════════════════════════════════════
+#  2호차
+#
+#  ★ "미측정" 이라고 적힌 값은 **1호차에서 빌려온 출발점**이다.
+#    재고 나면 값을 고치고 그 표시를 지울 것. 기동할 때 몇 개 남았는지 센다.
+#
+#  측정 순서 (뒤 단계가 앞 단계에 의존한다):
+#    ① 모터 방향        ✅ 완료 — 아래 부호
+#    ② 오도메트리 스케일  ros2 run race_stack odom_scale   (줄자, 6회)
+#    ③ 조향 중립·게인    ./race.sh steertrim
+#    ④ 기구 스토퍼       vesc_steer_test.yaml + steer_limit_check
+#    ⑤ 무게·하중분포     저울
+#  ②가 틀리면 그 위의 전부가 틀린다 — 속도 프로파일·μ 추정이 v² 에 비례한다.
+# ═══════════════════════════════════════════════════════════════════
+
+vesc:
+  # ★ 부호: 이 차는 모터 결선이 1호차와 반대다 (2026-08-09 실측).
+  #   양수 speed 지령이 후진이었고, vesc_to_odom 도 같은 게인을 쓰므로
+  #   물리적 전진을 "후진" 으로 보고해 SLAM 맵이 방사형으로 깨졌다.
+  #   조이스틱만 speed_invert:true 로 덮여 있어 수동 주행은 정상처럼 보였다 —
+  #   증상을 덮으면 원인이 숨는다는 사례다.
+  #   ⚠ 크기 4203 은 1호차 값이다. 미측정 — odom_scale 로 재실측할 것.
+  speed_to_erpm_gain: -4203.0
+
+  steering_angle_to_servo_gain:   -0.761    # 미측정 (1호차 값)
+  steering_angle_to_servo_offset:  0.3954   # 미측정 (1호차 값) — steertrim 필요
+  servo_min: 0.12                           # 미측정 (1호차 값) — 스토퍼 실측 필요
+  servo_max: 0.85                           # 미측정 (1호차 값)
+
+geometry:
+  wheelbase: 0.33      # 미측정
+  mass:      3.354     # 미측정
+  lf:        0.1757    # 미측정
+  lr:        0.1441    # 미측정
+
+tire:
+  mu: 0.348            # 미측정 — η 스윕으로 확인 (그게 곧 μ 측정이다)
+  pac_b:  3.8
+  pac_c:  1.3
+  pac_d:  1.15
+  pac_e: -0.5
+
+# ── 튜닝값 — 1호차 검증값에서 출발 ─────────────────────────────────
+#   실차 로그로 확인된 값이라 출발점으로 안전하다. 2호차 로그가 쌓이면
+#   같은 방법으로 다시 잡을 것:
+#     speed_lag  = speed ↔ cmd_v 상호상관 최대 지점
+#     slip_gain  = 주행 궤적 곡률 ÷ 기준 곡률 (1.0 이 목표)
+#     steer_alpha/l1_k = 직선 구간 δ·헤딩·CTE 주파수 분해
+tuning:
+  l1_min: 1.4983
+  l1_k:   0.75
+  steer_alpha: 0.555     # ★ 50Hz 루프 기준 시정수 34ms. 주기가 다르면 환산할 것
+  slip_gain:   0.5
+  speed_lag:   0.40
+  a_lon_acc:   0.0
+  a_lon_brk:   0.0
+  # ★ 첫 주행은 낮게. 캘리브레이션이 다 끝난 뒤 0.1 씩 올리며 한계를 찾는다.
+  grip_util: {q1: 0.5, q2: 0.5, q3: 0.5, race: 0.5}
+
+joystick:
+  steer_invert:   true      # 2026-08-09 실측 — 서보 결선이 1호차와 반대
+  speed_invert:   false     # ★ 게인 부호로 고쳤으므로 여기서 또 뒤집지 말 것
+  trigger_invert: true
+  device:      /dev/input/js0
+  axis_steer:  0
+  axis_speed:  5
+  btn_reverse: 5
+  btn_toggle:  4
+  debug:       true

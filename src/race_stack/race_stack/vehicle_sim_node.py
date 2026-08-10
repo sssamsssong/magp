@@ -70,7 +70,7 @@ class VehicleSimNode(Node):
         self.declare_parameter('sx',       0.0)
         self.declare_parameter('sy',       0.0)
         self.declare_parameter('stheta',   0.0)
-        self.declare_parameter('tau_v',    0.15)
+        self.declare_parameter('tau_v',    0.25)
         self.declare_parameter('a_max',    9.51)
         self.declare_parameter('a_brake',  6.09)
         self.declare_parameter('s_max',    0.4189)

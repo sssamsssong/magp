@@ -46,6 +46,16 @@ ln -sfn "$SCRIPT_DIR/race.sh"           "$WS/race.sh"   # jetson.sh 가 WS 에�
 # 보존해야 하므로 src 와 install 양쪽을 repo/config/vesc.yaml 로 건다.
 # ★ f1tenth_stack 을 colcon build 하면 install 쪽 심링크가 복사본으로
 #   덮이므로, 그 뒤엔 이 스크립트를 다시 실행해 재링크할 것.
+# ★ config/vesc.yaml 은 git 에 없다 (자동 생성). 심링크를 걸기 전에 만든다.
+#   차량별 캘리브레이션이 섞이는 사고를 막으려고 추적에서 뺐다 —
+#   config/vehicle_<차>.yaml 이 원본이고 .car 가 어느 차인지 가리킨다.
+if [ ! -f "$SCRIPT_DIR/.car" ]; then
+    echo "[install] ✗ $SCRIPT_DIR/.car 가 없습니다."
+    echo "          이 젯슨이 몇 호차인지 적어주세요:  echo car1 > $SCRIPT_DIR/.car"
+    exit 1
+fi
+python3 "$SCRIPT_DIR/config/apply_vehicle.py" || exit 1
+
 F1T_SRC="$WS/src/f1tenth_system/f1tenth_stack/config/vesc.yaml"
 F1T_INST="$WS/install/f1tenth_stack/share/f1tenth_stack/config/vesc.yaml"
 [ -e "$(dirname "$F1T_SRC")" ]  && ln -sf "$SCRIPT_DIR/config/vesc.yaml" "$F1T_SRC"
