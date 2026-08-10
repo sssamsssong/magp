@@ -18,23 +18,43 @@ _DDS_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 _DDS_YAML="${RACE_SCRIPT:-$_DDS_DIR/../race_script.yaml}"
 _DDS_TPL="$_DDS_DIR/cyclonedds.xml.in"
 
+# 차량별 overlay. apply_vehicle.py 가 vehicle_car{1,2}.yaml 에서 만든다.
+# ★ network.peers 는 차마다 다르므로(젯슨 IP) overlay 가 race_script.yaml 을 이긴다.
+#   이 파일은 race.sh 가 apply_vehicle.py 를 돌린 뒤에 source 되므로 항상 최신이다.
+#   없으면(생성 전이거나 --car 미설정) race_script.yaml 값을 그대로 쓴다.
+_DDS_OVL="$_DDS_DIR/.vehicle_overlay.yaml"
+
 _dds_yaml_get () {   # $1=키경로(점 구분)  $2=기본값
     # conda base 의 python3 엔 PyYAML 이 없는 경우가 많다 → 시스템 python 우선.
     local _py=python3
     [ -x /usr/bin/python3 ] && _py=/usr/bin/python3
-    "$_py" - "$_DDS_YAML" "$1" "$2" <<'PY' 2>/dev/null || echo "$2"
+    "$_py" - "$_DDS_YAML" "$1" "$2" "$_DDS_OVL" <<'PY' 2>/dev/null || echo "$2"
 import sys, yaml
 path, key, default = sys.argv[1], sys.argv[2], sys.argv[3]
-try:
-    d = yaml.safe_load(open(path))
+ovl = sys.argv[4] if len(sys.argv) > 4 else None
+
+def dig(src, key):
+    d = yaml.safe_load(open(src))
     for k in key.split('.'):
         d = d[k]
-    if isinstance(d, list):
-        print('\n'.join(str(x) for x in d))
-    else:
-        print(d)
-except Exception:
-    print(default)
+    return d
+
+val = None
+if ovl:                      # ① 차량 overlay 우선
+    try:
+        val = dig(ovl, key)
+    except Exception:
+        val = None
+if val is None:              # ② 없으면 race_script.yaml
+    try:
+        val = dig(path, key)
+    except Exception:
+        val = default
+
+if isinstance(val, list):
+    print('\n'.join(str(x) for x in val))
+else:
+    print(val)
 PY
 }
 

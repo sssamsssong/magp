@@ -74,6 +74,10 @@ OVERLAY_MAP = [
     ('tuning.a_lon_acc',   'limits.a_lon_acc'),
     ('tuning.a_lon_brk',   'limits.a_lon_brk'),
     ('tuning.grip_util',   'limits.grip_util'),
+    # ★ 젯슨 IP 는 차마다 다르다 (1호차 .57 / 2호차 .77). CycloneDDS 가 유니캐스트로
+    #   인사할 고정 피어 목록이라, 남의 차 IP 가 들어가면 노트북 RViz 가 먹통이 된다.
+    #   race_script.yaml 에 두면 두 차가 머지할 때마다 이 한 줄이 충돌한다.
+    ('network.peers',      'network.peers'),
 ]
 # joystick 은 키 이름이 같으므로 통째로 옮긴다
 OVERLAY_PASSTHROUGH = ['joystick']

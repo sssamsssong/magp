@@ -2,28 +2,67 @@
 
 ---
 
-## ⚠️ 두 번째 차량(car2)에서 작업 중이라면 — push 전 반드시 읽을 것
+## ⚠️ 두 대의 차가 이 저장소를 함께 씁니다 — 작업 전 반드시 읽을 것
 
-**main 브랜치에 직접 push하지 마세요.**
+**브랜치는 `main` 하나입니다. 코드는 합치고 값만 분리합니다.** (2026-08-10 전환)
 
-car1(1호차)과 car2(2호차)가 같은 저장소를 공유합니다.
-car2의 근본 세팅(VESC 캘리브레이션, 조향 파라미터 등)을 main에 바로 올리면
-**car1 설정이 덮여 대회 주행이 망가질 수 있습니다.**
+예전엔 차마다 브랜치를 나눴는데, 그러면 **코드까지 갈라져 같은 버그를 두 번**
+고치게 됩니다. 실제로 그랬습니다 — `bench(box)` 모드가 무력화된 걸 두 차가
+따로 디버깅해 각자 커밋했습니다. 그래서 값만 파일로 분리했습니다.
 
-### 해야 할 것
+### 첫 실행 전에 한 번 — 이 젯슨이 몇 호차인지 알려주기
 
 ```bash
-# 브랜치 생성 후 작업
-git checkout -b car2/작업내용   # 예: car2/vesc-calib, car2/steering-fix
-git push -u origin car2/작업내용
+echo car2 > .car        # 1호차면 car1
 ```
 
-브랜치에 올린 뒤 팀장(hj)에게 알려주세요. main 머지는 팀장이 검토 후 합니다.
+`.car` 는 `.gitignore` 라 커밋되지 않습니다. 기기마다 한 번만 하면 됩니다.
 
-### main에 올려도 되는 것
+### 구조
 
-- 문서(docs/)
-- 두 차량 공통으로 검증된 코드 변경 (팀장 확인 후)
+```
+config/vesc_base.yaml       배관(포트·스무더·리밋). 두 차 공용, git
+config/vehicle_car1.yaml    1호차가 재서 나온 값,      git
+config/vehicle_car2.yaml    2호차,                     git
+.car                        "car2" 한 줄               .gitignore
+        ↓ config/apply_vehicle.py  (race.sh 가 매 실행 호출)
+config/vesc.yaml                생성물  .gitignore
+config/.vehicle_overlay.yaml    race_script.yaml 위에 덮을 값  .gitignore
+```
+
+**`config/vesc.yaml` 은 git 에 없습니다.** 차량 캘리브레이션을 잘못 커밋할
+방법 자체가 없어졌습니다.
+
+### 무엇이 차량별인가
+
+| 절 | 키 |
+|---|---|
+| `vesc` | `speed_to_erpm_gain`, 조향 `gain`/`offset`, `servo_min`/`max` |
+| `geometry` | `wheelbase`, `mass`, `lf`, `lr` |
+| `tire` | `mu`, `pac_b/c/d/e` |
+| `tuning` | `l1_min`, `l1_k`, `steer_alpha`, `slip_gain`, `speed_lag`, `a_lon_*`, `grip_util` |
+| `joystick` | `steer_invert`, `speed_invert`, `device`, `axis_*`, `btn_*` |
+| `network` | `peers` (젯슨 IP — 1호차 `.57` / 2호차 `.77`) |
+
+`race_script.yaml` 의 나머지(알고리즘·안전·회피·계측)는 **그대로 공용**입니다.
+이게 핵심입니다 — 한쪽에서 고친 알고리즘이 자동으로 양쪽에 흐릅니다.
+
+`max_steer` 는 **손으로 적지 않습니다.** `(servo_min − offset) / (−gain)` 으로
+`apply_vehicle.py` 가 계산해 내려보냅니다. 따로 적으면 반드시 어긋납니다.
+
+### 규칙
+
+- **남의 차 파일(`vehicle_car1.yaml` ↔ `vehicle_car2.yaml`)은 건드리지 마세요.**
+  각자 실측값입니다
+- 코드·알고리즘 수정은 **`main` 에 바로 올리세요** — 그래야 양쪽에 흐릅니다
+- 기동 로그의 `[vehicle]` 줄을 매번 확인하세요. `⚠` 가 뜨면 이유가 있습니다
+- 자세한 절차와 캘리브레이션 순서: `docs/car2_merge_guide.md`
+
+### ⚠ 아직 안 나눈 것 — 트랙 설정
+
+`map_name` / `waypoints` / `mission.start_*` / `localization.init_*` 는
+`race_script.yaml` 에 있고 **두 차가 공유**합니다. 두 차가 다른 트랙을 돌면
+부딪히니, 당장은 **커밋하지 말고 로컬 수정으로** 두세요.
 
 ---
 
