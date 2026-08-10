@@ -82,7 +82,23 @@ def generate_launch_description():
     # 바퀴가 돌면 VESC 엔코더 odom 은 "전진 중"이라 하고 LiDAR 는 "제자리"라 해서
     # AMCL 이 요동친다 → 정작 확인하려던 RViz 위치가 쓰레기가 되고, 출발선 반경을
     # 들락날락하며 mission_manager 가 가짜 랩을 세어 /race/enabled 를 꺼버린다.
-    # 세 컨트롤러 모두 최종 속도를 clip(v, min_speed, max_speed) 하므로 둘 다 0이면 정지.
+    #
+    # ★★ 2026-08-09 사고 — bench 가 **완전히 무력화돼 있었다.** ★★
+    #   예전 구현은 "세 컨트롤러가 최종 속도를 clip(v, min_speed, max_speed) 하므로
+    #   둘 다 0 이면 정지" 였다. 그런데 08/09 속도 개편(81730cf/d8324a9)에서
+    #   **그 클램프를 전부 없앴다.** 속도는 이제 마찰 예산 프로파일이 정하고
+    #   max_speed 를 아무도 안 본다 → bench 가 아무 효과가 없다.
+    #   동시에 아래 start_gate 를 `and not bench` 로 꺼두고 있어서,
+    #   `./race.sh box` 가 **시작 버튼도 없이 풀속도 자율주행**이 됐다.
+    #   실차에서 실제로 발생했다.
+    #
+    #   교훈: 안전 기능을 "다른 코드가 우연히 하는 일"에 얹으면 안 된다.
+    #   그 코드는 다른 이유로 사라진다. 이제 bench 는 **각 컨트롤러의 발행 직전**
+    #   한 곳에서 속도를 0 으로 못박는다(`bench` 파라미터). 리팩터링으로 지워질 수
+    #   있는 중간 계산이 아니라 최종 출력점이다.
+    #
+    #   max_speed/min_speed 0 은 남겨둔다 — 지금은 min_speed 만 프로파일 바닥으로
+    #   쓰이지만, 층을 하나 더 두는 비용이 0 이다.
     if bench:
         max_speed = 0.0
         min_speed = 0.0
@@ -283,7 +299,12 @@ def generate_launch_description():
         name='mission_manager', output='screen',
         parameters=[{'laps': laps,
                      'time_limit_sec': time_limit,
-                     'start_gate':   bool(m.get('start_gate',   False)) and not bench,
+                     # ★ 2026-08-09: 예전엔 `and not bench` 로 bench 에서 출발
+                     #   게이트를 껐다. "어차피 속도 0 이니 버튼 누를 필요 없다"는
+                     #   전제였는데 그 전제가 깨지자(위 주석) **버튼 없이 풀속도로
+                     #   출발**했다. bench 도 실주행과 똑같이 출발 버튼을 요구한다 —
+                     #   차이는 바퀴가 안 도는 것뿐이어야 한다.
+                     'start_gate':   bool(m.get('start_gate',   False)),
                      'start_button': int( m.get('start_button', 1)),
                      'start_key':    bool(m.get('start_key',    True)),
                      'start_x': float(m.get('start_x', 0.0)),
@@ -328,6 +349,9 @@ def generate_launch_description():
             parameters=[{'mode': mode,
                          'waypoint_file': wp_csv,
                          'max_speed': max_speed, 'min_speed': min_speed,
+                         # ★ bench 는 여기서 끝난다 — 컨트롤러가 발행 직전에 속도를 0 으로
+                         #   못박는다. 중간 계산(클램프)에 얹지 말 것 (2026-08-09 사고).
+                         'bench': bench,
                          'lookahead': float(pp['lookahead']),
                          'lookahead_speed_gain': float(pp['lookahead_speed_gain']),
                          'wheelbase': float(pp['wheelbase']),
@@ -369,6 +393,9 @@ def generate_launch_description():
                 'mode':            mode,
                 'waypoint_file':   wp_csv,
                 'max_speed':       max_speed,
+                # ★ bench 는 여기서 끝난다 — 컨트롤러가 발행 직전에 속도를 0 으로
+                #   못박는다. 중간 계산(클램프)에 얹지 말 것 (2026-08-09 사고).
+                'bench':           bench,
                 'min_speed':       min_speed,
                 # ★ 마찰원 속도 프로파일 (map_controller 와 같은 코드)
                 'grip_util':       grip_util,
@@ -464,6 +491,9 @@ def generate_launch_description():
                 'mode':          mode,
                 'waypoint_file': wp_csv,
                 'max_speed':     max_speed,
+                # ★ bench 는 여기서 끝난다 — 컨트롤러가 발행 직전에 속도를 0 으로
+                #   못박는다. 중간 계산(클램프)에 얹지 말 것 (2026-08-09 사고).
+                'bench':         bench,
                 'min_speed':     min_speed,
                 'odom_topic':    odom_topic,
                 'wheelbase':     float(pp.get('wheelbase', 0.33)),
@@ -551,6 +581,9 @@ def generate_launch_description():
             package='race_stack', executable='gap_follower',
             name='gap_follower', output='screen',
             parameters=[{'max_speed': max_speed, 'min_speed': min_speed,
+                         # ★ bench 는 여기서 끝난다 — 컨트롤러가 발행 직전에 속도를 0 으로
+                         #   못박는다. 중간 계산(클램프)에 얹지 말 것 (2026-08-09 사고).
+                         'bench': bench,
                          # ★ 조향각 → 곡률 → 마찰 예산으로 속도를 제한한다
                          'grip_util': grip_util, 'hard_cap': hard_cap,
                          'mu': veh['mu'], 'pac_d': veh['pac_d'],

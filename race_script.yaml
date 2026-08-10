@@ -826,13 +826,13 @@ curv_probe:
 #   slip/curv_probe 와 완전히 별개 도구.
 # ------------------------------------------------------------
 steer_trim:
-  test_speed: 0.6           # 트림 탐색용 속도 (m/s) — 슬립 없는 저속 유지
-  test_dist:  2.0           # 전진/후진 한 다리 거리 (m)
+  test_speed: 1.0           # 트림 탐색용 속도 (m/s) — 슬립 없는 저속 유지
+  test_dist:  4.0           # 전진/후진 한 다리 거리 (m)
   accel_limit: 0.4          # 가감속 한계 (m/s^2)
   max_trim: 0.15            # trim 안전 클램프 (rad)
   kappa_tol: 0.01           # 수렴 판정 — 최근 전진/후진 |κ| 가 둘 다 이 이하
   correction_damp: 0.85     # 보정 스텝 감쇠 (1.0=이론값 그대로, 낮추면 안정적)
-  max_iters: 20             # 이 안에 수렴 못하면 마지막 trim으로 종료
+  max_iters: 8              # 이 안에 수렴 못하면 마지막 trim으로 종료
   front_safety_m: 0.4       # 전진 중 전방 라이다 최소거리 — 미만이면 비상정지
   rear_safety_m: 0.4        # 후진 중 후방(라이다 FOV 안일 때만 유효)
   auto_write: true          # 수렴 시 vesc.yaml 자동 반영 여부
@@ -867,8 +867,8 @@ joystick:
   axis_speed:        5           # 속도 축 (RT 트리거, F710 X 모드)
   btn_reverse:       5           # 후진 전환 버튼 (RB — 누른 채 RT → 후진)
   btn_toggle:        4           # 수동↔자율 토글 버튼 (LB)
-  steer_invert:      true        # 조향 좌우 반전
-  speed_invert:      true        # 전진/후진 반전 (RT 방향)
+  steer_invert:      false       # 조향 좌우 반전
+  speed_invert:      false       # 전진/후진 반전 (RT 방향)
 
   # ★ 트리거 부호 규약 — 읽는 경로에 따라 반대다!
   #     ROS /joy 토픽        : 안 누름 = +1, 끝까지 = -1   ← 이 노드의 기준

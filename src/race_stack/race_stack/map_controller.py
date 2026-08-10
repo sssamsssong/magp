@@ -163,6 +163,11 @@ class MapController(Node):
         self.declare_parameter('a_lon_acc',   0.0)
         self.declare_parameter('a_lon_brk',   0.0)
 
+        # ★ 박스 위 벤치 모드. true 면 **발행 직전에 속도를 0 으로 못박는다**
+        #   (_publish_cmd). 조향은 살아 있어야 검증이 되므로 건드리지 않는다.
+        self.declare_parameter('bench',       False)
+
+
         # ↓ 폐기됨. 남겨둔 건 옛 설정이 죽지 않게 하려는 것뿐이고, 1.0 이 아니면
         #   경고하고 **무시한다**. 위 grip_util 을 쓸 것.
         self.declare_parameter('speed_scale', 1.0)
@@ -189,6 +194,12 @@ class MapController(Node):
         self.mode = self.get_parameter('mode').value
 
         # ── 웨이포인트 로드 + 사전 계산 ─────────────────────────────────
+        self._bench = bool(self.get_parameter('bench').value)
+        if self._bench:
+            self.get_logger().warn(
+                '★ BENCH 모드 — 속도를 0 으로 강제한다 (바퀴가 돌지 않는다). '
+                '조향은 정상 동작하므로 박스 위에서 확인할 수 있다.')
+
         wp_file = self.get_parameter('waypoint_file').value
         self.wp = self._load_waypoints(wp_file)
         if self.wp is None:
@@ -598,6 +609,14 @@ class MapController(Node):
         RCLError 를 던져 종료가 트레이스백으로 지저분해진다."""
         if not rclpy.ok():
             return
+        # ★★ bench(박스 위) — 여기가 유일한 강제 지점이다. 절대 옮기거나 지우지 말 것.
+        #   2026-08-09: 예전엔 bench 가 max_speed=0 을 주고 컨트롤러의
+        #   clip(v, min_speed, max_speed) 에 기대고 있었다. 속도 개편에서 그 클램프를
+        #   없애자 `./race.sh box` 가 **풀속도로 주행**했다 (start_gate 도 함께 꺼져
+        #   있어 시작 버튼조차 없었다). 안전 기능을 다른 코드가 우연히 하는 일에
+        #   얹으면 안 된다 — 그래서 발행 직전에 못박는다.
+        if self._bench:
+            speed = 0.0
         out = AckermannDriveStamped()
         out.header.stamp = self.get_clock().now().to_msg()
         out.drive.steering_angle = float(steer)
