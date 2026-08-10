@@ -22,6 +22,77 @@ import yaml
 
 HERE = os.path.dirname(os.path.abspath(os.path.realpath(__file__)))
 RACE_SCRIPT = os.path.join(HERE, 'race_script.yaml')
+
+# ── 차량별 키는 race_script.yaml 이 아니라 차량 파일로 간다 ─────────────
+#   race_script.yaml 에 써봐야 config/.vehicle_overlay.yaml 이 덮어써서
+#   **주행에 안 먹는다.** 2026-08-10 에 차량별 설정을 분리하면서 생긴 함정이고,
+#   tune.sh 가 그걸 모른 채 race_script 만 고치고 있었다.
+#   → 대상 파일을 키에 따라 자동으로 고른다. (매핑 원본은 config/apply_vehicle.py)
+VEHICLE_KEYS = {
+    'pure_pursuit.wheelbase': 'geometry.wheelbase',
+    'map.mass':               'geometry.mass',
+    'map.lf':                 'geometry.lf',
+    'map.lr':                 'geometry.lr',
+    'map.mu':                 'tire.mu',
+    'map.pac_b':              'tire.pac_b',
+    'map.pac_c':              'tire.pac_c',
+    'map.pac_d':              'tire.pac_d',
+    'map.pac_e':              'tire.pac_e',
+    'map.l1_min':             'tuning.l1_min',
+    'map.l1_k':               'tuning.l1_k',
+    'map.steer_alpha':        'tuning.steer_alpha',
+    'map.slip_gain':          'tuning.slip_gain',
+    'limits.speed_lag':       'tuning.speed_lag',
+    'limits.a_lon_acc':       'tuning.a_lon_acc',
+    'limits.a_lon_brk':       'tuning.a_lon_brk',
+    'limits.grip_util':       'tuning.grip_util',
+    'network.peers':          'network.peers',
+}
+for _k in ('steer_invert', 'speed_invert', 'trigger_invert', 'device',
+           'axis_steer', 'axis_speed', 'btn_reverse', 'btn_toggle', 'max_speed',
+           'trigger_deadzone', 'trigger_expo', 'steer_deadzone', 'debug'):
+    VEHICLE_KEYS[f'joystick.{_k}'] = f'joystick.{_k}'
+# grip_util.q1 처럼 한 단계 더 들어가는 것도 받는다
+VEHICLE_PREFIX = {'limits.grip_util': 'tuning.grip_util'}
+
+# 계산으로 나오는 값 — 손으로 고치면 안 된다
+DERIVED_KEYS = {
+    'pure_pursuit.max_steer':
+        '서보 매핑에서 자동 계산된다: (servo_min − offset) / (−gain).\n'
+        '  고치려면 config/vehicle_<차>.yaml 의 vesc.servo_min / '
+        'steering_angle_to_servo_offset / _gain 을 고칠 것.\n'
+        '  2026-08-09 에 offset 만 바뀌고 max_steer 가 안 따라와 좌 조향 지령의 '
+        '25.8% 가 조용히 잘려나간 적이 있다.',
+}
+
+
+def _car_name():
+    f = os.path.join(HERE, '.car')
+    if not os.path.exists(f):
+        return None
+    return open(f).read().strip()
+
+
+def target_file(dotted):
+    """이 키를 실제로 고쳐야 하는 파일과 그 안에서의 경로를 돌려준다.
+
+    반환 (경로, 그 파일에서의 키). 차량 파일이 없으면 race_script 로 폴백한다.
+    """
+    vkey = VEHICLE_KEYS.get(dotted)
+    if vkey is None:
+        for pre, vpre in VEHICLE_PREFIX.items():
+            if dotted.startswith(pre + '.'):
+                vkey = vpre + dotted[len(pre):]
+                break
+    if vkey is None:
+        return RACE_SCRIPT, dotted
+    car = _car_name()
+    if car is None:
+        return RACE_SCRIPT, dotted          # .car 가 없으면 옛 동작
+    vpath = os.path.join(HERE, 'config', f'vehicle_{car}.yaml')
+    if not os.path.exists(vpath):
+        return RACE_SCRIPT, dotted
+    return vpath, vkey
 HISTORY = os.path.join(HERE, '.tune_history')
 BACKUP = os.path.join(HERE, '.tune_backup.yaml')
 
@@ -502,8 +573,14 @@ def main(argv):
         return
 
     # ---- 설정 ----
-    with open(RACE_SCRIPT) as f:
-        lines = f.readlines()
+    # ★ 대상 파일이 키마다 다르다. 차량별 값은 config/vehicle_<차>.yaml 로 간다 —
+    #   race_script.yaml 에 써봐야 overlay 가 덮어써서 주행에 안 먹는다.
+    buffers = {}          # 경로 → 줄 목록
+    def buf(path):
+        if path not in buffers:
+            with open(path) as f:
+                buffers[path] = f.readlines()
+        return buffers[path]
 
     pending, entries = [], []
     for a in assigns:
@@ -512,11 +589,23 @@ def main(argv):
             die(f'형식을 알 수 없다: {a}   (예: stanley.gain=1.2)')
         key, op, raw = m.group(1), m.group(2), m.group(3).strip()
 
-        try:
-            old = get_nested(cfg, key)
-        except KeyError:
-            suggest(cfg, key)
-            sys.exit(1)
+        if key in DERIVED_KEYS:
+            die(f'{key} 는 직접 고칠 수 없다.\n  {DERIVED_KEYS[key]}')
+
+        path, fkey = target_file(key)
+        if path == RACE_SCRIPT:
+            try:
+                old = get_nested(cfg, key)
+            except KeyError:
+                suggest(cfg, key)
+                sys.exit(1)
+        else:
+            vcfg = yaml.safe_load(open(path))
+            try:
+                old = get_nested(vcfg, fkey)
+            except KeyError:
+                die(f'{key} 는 차량 파일 소관인데 {os.path.basename(path)} 에 '
+                    f'{fkey} 가 없다 — 그 파일에 먼저 추가할 것')
 
         if op == '=':
             new = parse_scalar(raw)
@@ -536,46 +625,72 @@ def main(argv):
         if not check_guards(key, old, new, force):
             die('중단했다. 의도한 값이면 --force 를 붙일 것.')
 
-        idx, lm = find_line(lines, key)
+        lines = buf(path)
+        idx, lm = find_line(lines, fkey)
         if idx is None:
-            die(f'{key} 의 줄을 찾지 못했다 — 수동으로 확인할 것')
-        pending.append((idx, lm, new))
-        entries.append({'key': key, 'old': old, 'new': new})
+            die(f'{fkey} 의 줄을 {os.path.basename(path)} 에서 찾지 못했다 '
+                f'— 수동으로 확인할 것')
+        pending.append((path, idx, lm, new))
+        entries.append({'key': key, 'old': old, 'new': new,
+                        'file': path, 'fkey': fkey})
 
     if not pending:
         return
 
     shutil.copy2(RACE_SCRIPT, BACKUP)
-    for idx, lm, new in pending:
-        lines[idx] = write_value(lines, idx, lm, new)
+    for path, idx, lm, new in pending:
+        buffers[path][idx] = write_value(buffers[path], idx, lm, new)
 
-    tmp = RACE_SCRIPT + '.tmp'
-    with open(tmp, 'w') as f:
-        f.writelines(lines)
-
-    # 검증: 여전히 유효한 YAML 인가 + 값이 정말 의도대로 들어갔는가
+    # 파일마다 임시 파일에 쓰고 검증한 뒤 한꺼번에 교체한다.
+    # 하나라도 실패하면 전부 원본 유지 — 절반만 적용되는 게 제일 나쁘다.
+    tmps = {}
     try:
-        after = yaml.safe_load(open(tmp))
-    except yaml.YAMLError as e:
-        os.remove(tmp)
-        die(f'수정 결과가 유효한 YAML 이 아니다 — 원본 유지.\n{e}')
+        for path, lines in buffers.items():
+            tmp = path + '.tmp'
+            with open(tmp, 'w') as f:
+                f.writelines(lines)
+            tmps[path] = tmp
+            try:
+                after = yaml.safe_load(open(tmp))
+            except yaml.YAMLError as ex:
+                die(f'{os.path.basename(path)} 수정 결과가 유효한 YAML 이 아니다 '
+                    f'— 원본 유지.\n{ex}')
+            for e in entries:
+                if e['file'] != path:
+                    continue
+                got = get_nested(after, e['fkey'])
+                if isinstance(e['new'], float) and isinstance(got, (int, float)):
+                    ok = abs(float(got) - e['new']) < 1e-9
+                else:
+                    ok = got == e['new']
+                if not ok:
+                    die(f"{e['key']} 가 {e['new']} 로 안 들어갔다 "
+                        f"(읽으니 {got!r}) — 원본 유지")
+    except SystemExit:
+        for t in tmps.values():
+            if os.path.exists(t):
+                os.remove(t)
+        raise
+    for path, tmp in tmps.items():
+        os.replace(tmp, path)
 
-    for e in entries:
-        got = get_nested(after, e['key'])
-        if isinstance(e['new'], float) and isinstance(got, (int, float)):
-            ok = abs(float(got) - e['new']) < 1e-9
-        else:
-            ok = got == e['new']
-        if not ok:
-            os.remove(tmp)
-            die(f"{e['key']} 가 {e['new']} 로 안 들어갔다 (읽으니 {got!r}) — 원본 유지")
+    # 차량 파일을 고쳤으면 vesc.yaml/overlay 를 다시 만들어야 반영된다
+    if any(e['file'] != RACE_SCRIPT for e in entries):
+        subprocess.run([sys.executable,
+                        os.path.join(HERE, 'config', 'apply_vehicle.py'),
+                        '--quiet'], check=False)
 
-    os.replace(tmp, RACE_SCRIPT)
     log_change(entries)
 
     for e in entries:
+        where = ('' if e['file'] == RACE_SCRIPT
+                 else f"  {C['dim']}→ {os.path.basename(e['file'])}"
+                      f" ({e['fkey']}){C['off']}")
         print(f"  {e['key']:28s} {C['dim']}{e['old']}{C['off']} → "
-              f"{C['grn']}{C['bld']}{e['new']}{C['off']}")
+              f"{C['grn']}{C['bld']}{e['new']}{C['off']}{where}")
+    if any(e['file'] != RACE_SCRIPT for e in entries):
+        print(f"\n{C['dim']}  ★ 차량별 값이라 이 차({_car_name()})의 파일에 썼다 —"
+              f" race_script.yaml 에 쓰면 overlay 가 덮어써서 안 먹는다.{C['off']}")
     print(f"\n{C['dim']}  다음 ./race.sh 실행부터 적용된다 (재빌드 불필요){C['off']}")
 
 

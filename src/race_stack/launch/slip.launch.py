@@ -25,6 +25,21 @@ def generate_launch_description():
     cfg_path = os.environ.get('RACE_SCRIPT', os.path.expanduser('~/race_script.yaml'))
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
+
+    # ★ 차량별 값 덮어쓰기 — race.launch.py 와 같은 규약.
+    #   여기서 안 얹으면 pure_pursuit.wheelbase 를 공용값으로 읽어, 휠베이스가
+    #   다른 차에서 반경↔조향각 환산이 틀어진다 (2026-08-10 점검에서 발견).
+    _ovl = os.environ.get('RACE_VEHICLE_OVERLAY', '')
+    if _ovl and os.path.exists(_ovl):
+        def _deep(dst, src):
+            for k, v in src.items():
+                if isinstance(v, dict) and isinstance(dst.get(k), dict):
+                    _deep(dst[k], v)
+                else:
+                    dst[k] = v
+        with open(_ovl) as f:
+            _deep(cfg, yaml.safe_load(f) or {})
+
     sl = cfg.get('slip', {})
     vesc = os.path.join(os.path.dirname(os.path.dirname(share)), 'config', 'vesc.yaml')
 
