@@ -2,6 +2,10 @@
 
 **팀원은 `race_script.yaml` 하나만 수정하면 됩니다. 코드/빌드 건드릴 필요 없음.**
 
+> 📌 **지금 어디까지 왔나** → [docs/STATUS.md](docs/STATUS.md)
+> (확정된 값, 아직 열려 있는 문제, 다음 작업)
+> **무엇이 바뀌었나** → [docs/UPDATES.md](docs/UPDATES.md) (날짜별)
+
 ```
 race_stack_skeleton/
 ├── race.sh              ← 딸깍 스크립트 (이거 하나 실행)

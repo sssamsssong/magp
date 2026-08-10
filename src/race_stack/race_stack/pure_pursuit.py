@@ -35,7 +35,8 @@ from std_msgs.msg import Bool
 from visualization_msgs.msg import Marker, MarkerArray
 from ackermann_msgs.msg import AckermannDriveStamped
 
-from race_stack.stanley_controller import _load_map, _world_to_img, _REPO_ROOT
+from race_stack.stanley_controller import (_load_map, _world_to_img, _REPO_ROOT,
+                                          write_run_config)
 
 
 # ★ /race/enabled 는 mission_manager 가 **래치(TRANSIENT_LOCAL)** 로 발행한다.
@@ -570,13 +571,9 @@ class PurePursuit(Node):
                 for t, x, y, v in self._trail_log:
                     w.writerow([f'{t:.3f}', f'{x:.4f}', f'{y:.4f}', f'{v:.3f}'])
 
-            race_script = os.environ.get('RACE_SCRIPT',
-                                          os.path.expanduser('~/race_script.yaml'))
-            if os.path.exists(race_script):
-                with open(race_script) as f:
-                    cfg_text = f.read()
-                with open(os.path.join(run_dir, 'gains.yaml'), 'w') as f:
-                    f.write(cfg_text)
+            # ★ race_script.yaml + 차량 오버레이를 함께 남긴다.
+            #   오버레이가 빠지면 스냅샷이 조용히 거짓말을 한다 (2026-08-11).
+            write_run_config(run_dir)
 
             self.get_logger().info(
                 f'[run_log] {len(self._trail_log)}점, {run_dir} 에 저장')

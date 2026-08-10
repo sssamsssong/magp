@@ -71,6 +71,45 @@ LATCHED_IN = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 _REPO_ROOT = repo_root()
 
 
+def write_run_config(run_dir):
+    """주행 스냅샷 gains.yaml — race_script.yaml **과 차량 오버레이를 함께** 남긴다.
+
+    ★ 왜 둘 다인가 (2026-08-11)
+      차량별 값 분리(.car / vehicle_<차>.yaml) 이후 mu·grip_util·l1_k 같은
+      **실제로 주행을 결정한 값이 race_script.yaml 에 없다.** 그런데 스냅샷은
+      race_script.yaml 만 복사하고 있었다.
+
+      그 결과 08/10~11 주행 로그를 사후 분석할 때 "이 주행의 mu 가 얼마였나"
+      를 읽을 수 없었다 — gains.yaml 에는 덮이기 **전** 값(0.348)이 찍혀 있고
+      실제로는 0.42 로 돌았다. 스냅샷이 조용히 거짓말을 하고 있었던 셈이라,
+      그냥 없느니만 못하다.
+
+      오버레이는 `# ── 차량 덮어쓰기` 구분선 아래에 덧붙인다. YAML 문서를
+      나누지 않고 한 파일에 이어 붙이므로 나중 키가 이긴다 = 실제 적용값과
+      같은 순서다. 사람이 읽을 때도 무엇이 덮였는지 한눈에 보인다.
+
+    세 컨트롤러가 같은 함수를 쓴다. 따로 구현하면 한쪽만 고쳐진다 —
+    bench(box) 모드에서 이미 겪었다.
+    """
+    race_script = os.environ.get('RACE_SCRIPT',
+                                 os.path.expanduser('~/race_script.yaml'))
+    if not os.path.exists(race_script):
+        return
+    with open(race_script) as f:
+        text = f.read()
+    ovl = os.environ.get('RACE_VEHICLE_OVERLAY', '')
+    if ovl and os.path.exists(ovl):
+        with open(ovl) as f:
+            text += ('\n\n# ── 차량 덮어쓰기 (config/apply_vehicle.py) '
+                     '— 아래 값이 위를 이긴다 ──\n' + f.read())
+    else:
+        text += ('\n\n# ⚠ 차량 오버레이 없음 — RACE_VEHICLE_OVERLAY 가 안 잡혔다.\n'
+                 '#   race.sh 없이 launch 를 직접 띄웠다면 정상. 아니면 위 값이\n'
+                 '#   실제 적용값과 다를 수 있으니 이 로그의 튜닝값을 믿지 말 것.\n')
+    with open(os.path.join(run_dir, 'gains.yaml'), 'w') as f:
+        f.write(text)
+
+
 # ── helpers ────────────────────────────────────────────────────────────────
 
 def _normalize(a: float) -> float:
@@ -993,13 +1032,9 @@ class StanleyController(ObstacleAvoidMixin, Node):
                 for t, x, y, v in self._trail_log:
                     w.writerow([f'{t:.3f}', f'{x:.4f}', f'{y:.4f}', f'{v:.3f}'])
 
-            race_script = os.environ.get('RACE_SCRIPT',
-                                          os.path.expanduser('~/race_script.yaml'))
-            if os.path.exists(race_script):
-                with open(race_script) as f:
-                    cfg_text = f.read()
-                with open(os.path.join(run_dir, 'gains.yaml'), 'w') as f:
-                    f.write(cfg_text)
+            # ★ race_script.yaml + 차량 오버레이를 함께 남긴다.
+            #   오버레이가 빠지면 스냅샷이 조용히 거짓말을 한다 (2026-08-11).
+            write_run_config(run_dir)
 
             self.get_logger().info(
                 f'[run_log] {len(self._trail_log)}점, {run_dir} 에 저장')

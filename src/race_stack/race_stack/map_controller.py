@@ -62,7 +62,7 @@ from std_msgs.msg import Bool, ColorRGBA, Float64
 from race_stack.speed_profile import solve_profile, LaunchLimiter
 from visualization_msgs.msg import Marker
 
-from race_stack.stanley_controller import _REPO_ROOT, _normalize
+from race_stack.stanley_controller import _REPO_ROOT, _normalize, write_run_config
 
 # /race/enabled 는 mission_manager 가 래치(TRANSIENT_LOCAL)로 발행한다.
 # 기본 QoS 로 구독하면 컨트롤러가 8초 뒤에 뜨는 사이 나간 값을 놓쳐서,
@@ -931,13 +931,9 @@ class MapController(Node):
                                 f'{r[3]:.3f}', f'{r[4]:.4f}', f'{r[5]:.3f}',
                                 f'{r[6]:.4f}', r[7]])
 
-            race_script = os.environ.get('RACE_SCRIPT',
-                                         os.path.expanduser('~/race_script.yaml'))
-            if os.path.exists(race_script):
-                with open(race_script) as f:
-                    cfg_text = f.read()
-                with open(os.path.join(run_dir, 'gains.yaml'), 'w') as f:
-                    f.write(cfg_text)
+            # ★ race_script.yaml + 차량 오버레이를 함께 남긴다.
+            #   오버레이가 빠지면 스냅샷이 조용히 거짓말을 한다 (2026-08-11).
+            write_run_config(run_dir)
 
             self.get_logger().info(
                 f'[run_log] {len(self._trail_log)}점, {run_dir} 에 저장')
