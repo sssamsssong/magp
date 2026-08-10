@@ -146,6 +146,33 @@ def extract_reftrack(map_name: str, safety_m: float, n_cl: int = 300,
     cx_s, cy_s = splev(u, tck)
     cl = np.column_stack([cx_s, cy_s])
 
+    # ── 중심선 재중심화 (2026-08-10) ──────────────────────────────────
+    # 위 중심선은 "바깥 점마다 가장 가까운 안쪽 점과의 중점" 이다. 두 경계가
+    # 나란하면 맞지만, 코너에서 안쪽 경계가 휘어 달아나면 중점이 바깥벽 쪽으로
+    # 밀린다. fun_clean 실측: s=2.7m 에서 우 0.159m / 좌 0.903m (치우침 70%).
+    # 전체 폭은 1.06m 로 넉넉한데 중심선이 벽에서 0.159m 라, 차 반폭(0.155)을
+    # 빼면 어떤 라인을 그려도 그 근처는 여유가 2cm 다 → QP 가 해를 못 찾는다.
+    #
+    # 각 점을 법선 방향으로 (d_inner − d_outer)/2 만큼 밀어 양쪽 거리를 맞춘다.
+    # 몇 번 반복하면 수렴한다 (medial axis 로 가는 고정점 반복).
+    for _ in range(12):
+        do_, _ = tree_outer.query(cl)
+        di_, _ = tree_inner.query(cl)
+        shift = (di_ - do_) * 0.5
+        if np.max(np.abs(shift)) < 1e-3:
+            break
+        # 접선 → 법선 (왼쪽). 닫힌 경로라 roll 로 중심차분
+        tx = np.roll(cl[:, 0], -1) - np.roll(cl[:, 0], 1)
+        ty = np.roll(cl[:, 1], -1) - np.roll(cl[:, 1], 1)
+        tn = np.maximum(np.hypot(tx, ty), 1e-9)
+        nx, ny = -ty / tn, tx / tn          # 왼쪽 = inner 쪽(CCW)
+        cl = cl + np.column_stack([nx, ny]) * shift[:, None]
+        # 매 스텝 가볍게 다듬어 지그재그를 막는다
+        k = np.ones(5) / 5
+        for c in (0, 1):
+            ext = np.r_[cl[-2:, c], cl[:, c], cl[:2, c]]
+            cl[:, c] = np.convolve(ext, k, 'valid')
+
     # 트랙 폭 계산 (중심선 → outer/inner 거리)
     d_o, _ = tree_outer.query(cl)
     d_i, _ = tree_inner.query(cl)
