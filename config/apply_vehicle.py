@@ -81,6 +81,9 @@ OVERLAY_MAP = [
     # ★ ROS_DOMAIN_ID. 두 차를 같은 공유기에서 동시에 돌릴 때 DDS 레벨 격리.
     #   race.sh 가 dds_env.sh 를 통해 export 한다.
     ('network.domain_id',  'network.domain_id'),
+    # ★ /odom 병진 속도 부호. 모터 결선이 차마다 달라(2호차는 반대) 필요하다.
+    #   imu_odom 이 이 값으로 위치를 적분해 odom→base_link TF 를 낸다 = SLAM 입력.
+    ('localization.speed_sign', 'localization.speed_sign'),
 ]
 # joystick 은 키 이름이 같으므로 통째로 옮긴다
 OVERLAY_PASSTHROUGH = ['joystick']
