@@ -655,10 +655,15 @@ class ObstacleAvoidMixin:
     #   도달까지 0.75s 인데, 상대가 3㎧ 로 달리면 그동안 2.25m 를 간다 —
     #   **현재 위치를 피하는 것은 거의 의미가 없다.**
     #
-    #   그래서 검출점을 클러스터로 묶어 프레임 간 대응시키고, 속도를 추정해
-    #   도달 시각까지 **쓸고 지나갈 자리 전체**를 장애물로 넘긴다.
-    #   (칼만 필터를 쓰지 않는 이유: 상대차는 트랙을 따라 달리므로 등속 가정이
-    #    0.5~1s 구간에서는 충분히 맞고, 상태를 늘리면 튜닝할 것만 늘어난다.)
+    #   검출점을 클러스터로 묶어 프레임 간 대응시키고, 도달 시각까지
+    #   **쓸고 지나갈 자리 전체**를 장애물로 넘긴다.
+    #
+    #   ★ 예측은 유클리드 등속(p+v t)이 아니라 **레이싱라인 s** 다.
+    #     접선으로 밀면 현(chord)이라 곡률 구간에서 라인(과 벽) 밖으로 나간다.
+    #     우리 차 진로는 이미 `_predicted_track_path` 가 라인+횡오차로 코너를
+    #     따라가는데, 상대만 직선이면 Frenet 이 가짜 점을 피해 안쪽으로 들어간다.
+    #     같은 기하를 상대에 쓴다: ṡ 로 라인을 따라 옮기고 d 는 유지.
+    #     웨이포인트가 없으면 예전 유클리드로 폴백한다.
     opp_track     = True    # 동적 예측 사용
     opp_eps       = 0.30    # 클러스터 묶는 거리 [m]
     opp_gate      = 0.80    # 프레임 간 대응 게이트 [m]
@@ -701,11 +706,66 @@ class ObstacleAvoidMixin:
             nxt += 1
         return lab, nxt
 
+    def _s_lut(self):
+        """닫힌 레이싱라인의 s·법선. wps 가 그대로면 캐시."""
+        wps = getattr(self, 'wps', None)
+        cached = getattr(self, '_s_lut_cache', None)
+        if wps is None or len(wps) < 3:
+            return None
+        if cached is not None and cached[0] is wps:
+            return cached[1]
+        xy = np.asarray(wps[:, :2], float)
+        n = len(xy)
+        ds = np.hypot(np.roll(xy[:, 0], -1) - xy[:, 0],
+                      np.roll(xy[:, 1], -1) - xy[:, 1])
+        ds = np.maximum(ds, 1e-6)
+        s = np.concatenate(([0.0], np.cumsum(ds[:-1])))
+        fwd = np.roll(xy, -1, axis=0) - xy
+        tn = np.maximum(np.hypot(fwd[:, 0], fwd[:, 1]), 1e-9)
+        tang = fwd / tn[:, None]
+        left = np.stack([-tang[:, 1], tang[:, 0]], axis=1)
+        lut = dict(xy=xy, ds=ds, s=s, L=float(ds.sum()), left=left, n=n)
+        self._s_lut_cache = (wps, lut)
+        return lut
+
+    @staticmethod
+    def _wrap_ds(ds, L):
+        """(-L/2, L/2] 로 접은 종방향 변위."""
+        L = max(float(L), 1e-6)
+        ds = (float(ds) + 0.5 * L) % L - 0.5 * L
+        return ds
+
+    def _project_sd(self, p, lut):
+        """맵 좌표 → (s, d_lat). s 는 라인 원점부터의 호장 [m], d 좌측 +."""
+        xy = lut['xy']
+        i = int(np.argmin((xy[:, 0] - p[0]) ** 2 + (xy[:, 1] - p[1]) ** 2))
+        rel = np.asarray(p, float) - xy[i]
+        j = (i + 1) % lut['n']
+        fwd = xy[j] - xy[i]
+        u2 = float(fwd @ fwd)
+        t = float(rel @ fwd) / u2 if u2 > 1e-12 else 0.0
+        t = float(np.clip(t, 0.0, 1.0))
+        s = float(lut['s'][i] + t * lut['ds'][i])
+        d_lat = float(rel @ lut['left'][i])
+        return s, d_lat
+
+    def _pose_at_s(self, s, d_lat, lut):
+        """라인 위 s 에서 법선으로 d_lat 만큼 민 맵 좌표."""
+        L = lut['L']
+        s = float(s) % L
+        i = int(np.searchsorted(lut['s'], s, side='right') - 1)
+        i = int(np.clip(i, 0, lut['n'] - 1))
+        t = (s - lut['s'][i]) / lut['ds'][i]
+        t = float(np.clip(t, 0.0, 1.0))
+        j = (i + 1) % lut['n']
+        p = lut['xy'][i] + t * (lut['xy'][j] - lut['xy'][i])
+        return p + lut['left'][i] * float(d_lat)
+
     def _predict_obstacles(self, pts, msg):
         """검출점 + **도달 시각까지 상대가 쓸고 갈 자리**를 함께 돌려준다.
 
         정적 장애물(속도 < opp_min_speed)이면 원래 점을 그대로 낸다 — q2 의
-        동작이 바뀌지 않는다.
+        동작이 바뀌지 않는다. 움직이는 점은 레이싱라인 s 를 따라 옮긴다.
         """
         if not self.opp_track or len(pts) == 0:
             if len(pts) == 0:
@@ -716,6 +776,7 @@ class ObstacleAvoidMixin:
             return pts
         lab, n = self._cluster_pts(pts, self.opp_eps)
         cents = [pts[lab == i].mean(axis=0) for i in range(n)]
+        lut = self._s_lut()
 
         old = getattr(self, '_opp_tracks', [])
         old = [tr for tr in old if t - tr['t'] < self.opp_lost_sec]
@@ -728,32 +789,57 @@ class ObstacleAvoidMixin:
                 dd = float(np.hypot(*(c - tr['p'])))
                 if dd < bd:
                     bd, best = dd, k
+            s_now = d_lat = s_dot = 0.0
+            if lut is not None:
+                s_now, d_lat = self._project_sd(c, lut)
             if best is None:
-                new.append(dict(p=c, v=np.zeros(2), t=t, n=1, ci=ci))
+                new.append(dict(p=c, v=np.zeros(2), t=t, n=1, ci=ci,
+                                s=s_now, s_dot=0.0, d_lat=d_lat))
                 continue
             tr = old[best]; used.add(best)
             dt = t - tr['t']
             v = tr['v'] if dt <= 1e-3 else (
                 self.opp_alpha * tr['v'] + (1.0 - self.opp_alpha) * (c - tr['p']) / dt)
-            new.append(dict(p=c, v=v, t=t, n=tr['n'] + 1, ci=ci))
+            if lut is not None and dt > 1e-3:
+                ds = self._wrap_ds(s_now - tr['s'], lut['L'])
+                s_dot = (self.opp_alpha * tr.get('s_dot', 0.0)
+                         + (1.0 - self.opp_alpha) * (ds / dt))
+            else:
+                s_dot = float(tr.get('s_dot', 0.0))
+            new.append(dict(p=c, v=v, t=t, n=tr['n'] + 1, ci=ci,
+                            s=s_now, s_dot=s_dot, d_lat=d_lat))
         self._opp_tracks = new
 
         out = [pts]
         self._opp_moving = 0
+        s_ego = None
+        if lut is not None and getattr(self, 'pos', None) is not None:
+            s_ego, _ = self._project_sd(np.asarray(self.pos, float)[:2], lut)
         for tr in new:
-            sp = float(np.hypot(*tr['v']))
+            sp = (abs(float(tr.get('s_dot', 0.0))) if lut is not None
+                  else float(np.hypot(*tr['v'])))
             if tr['n'] < self.opp_min_obs or sp < self.opp_min_speed:
                 continue                       # 정적 — 원래 점으로 충분하다
             self._opp_moving += 1
-            # 내가 거기 도달하기까지 걸리는 시간. 접근속도가 0 이하면 멀어지는
-            # 중이므로 예측할 것이 없다.
-            rel = tr['p'] - self.pos
-            d = float(np.hypot(*rel))
-            closing = max(abs(self.speed) - float(rel @ tr['v']) / max(d, 1e-3), 0.5)
-            tau = float(np.clip(d / closing, 0.0, self.opp_pred_max))
             mem = pts[lab == tr['ci']]
+            tau = 0.0
+            if lut is None or s_ego is None:
+                rel = tr['p'] - self.pos
+                d = float(np.hypot(*rel))
+                closing = max(abs(self.speed) - float(rel @ tr['v']) / max(d, 1e-3), 0.5)
+                tau = float(np.clip(d / closing, 0.0, self.opp_pred_max))
+                for f in (0.35, 0.7, 1.0):
+                    out.append(mem + tr['v'] * (tau * f))
+                continue
+            gap = (tr['s'] - s_ego) % lut['L']
+            if gap > 0.5 * lut['L']:
+                continue                       # 뒤쪽 — 전방 쓸기를 만들지 않는다
+            closing = max(abs(self.speed) - float(tr['s_dot']), 0.5)
+            tau = float(np.clip(gap / closing, 0.0, self.opp_pred_max))
             for f in (0.35, 0.7, 1.0):
-                out.append(mem + tr['v'] * (tau * f))
+                xy_f = self._pose_at_s(tr['s'] + tr['s_dot'] * tau * f,
+                                       tr['d_lat'], lut)
+                out.append(mem + (xy_f - tr['p']))
         return np.vstack(out)
 
     def _obs_horizon(self) -> float:
