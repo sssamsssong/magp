@@ -211,7 +211,7 @@ def run_gui(img, res, ox, oy, H, W, wps, cur, map_name, out, auto_write):
             state['pos'] = (ev.xdata, ev.ydata)
             state['artists'] += ax.plot([ev.xdata], [ev.ydata], 'o', ms=9,
                                         color='lime', mec='black', zorder=7)
-            print(f'위치: x={ev.xdata:.3f} y={ev.ydata:.3f}  → 이제 바라볼 방향을 클릭')
+            print(f'pos: x={ev.xdata:.3f} y={ev.ydata:.3f}  → now click the heading')
         else:
             x, y = state['pos']
             state['yaw'] = math.atan2(ev.ydata - y, ev.xdata - x)
@@ -221,19 +221,19 @@ def run_gui(img, res, ox, oy, H, W, wps, cur, map_name, out, auto_write):
                               arrowprops=dict(arrowstyle='-|>', color='lime', lw=2.5))
             state['artists'].append(ann)
             print(f'yaw = {state["yaw"]:.4f} rad ({math.degrees(state["yaw"]):.1f}°)'
-                  f'   → w 키로 race_script.yaml 에 저장')
+                  f'   → press w to write race_script.yaml')
             if auto_write:
                 apply_pose(x, y, state['yaw'], img, res, ox, oy, H, W, True, {})
         fig.canvas.draw_idle()
 
     def on_key(ev):
         if ev.key == 'r':
-            clear(); print('취소 — 다시 클릭하세요')
+            clear(); print('reset — click again')
         elif ev.key == 'q':
             plt.close(fig)
         elif ev.key == 'w':
             if state['pos'] is None or state['yaw'] is None:
-                print('아직 위치/방향이 다 안 찍혔습니다')
+                print('position and heading are not both set yet')
                 return
             x, y = state['pos']
             apply_pose(x, y, state['yaw'], img, res, ox, oy, H, W, True, {})

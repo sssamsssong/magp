@@ -769,10 +769,10 @@ def gui_draw_raceline(map_name: str, args) -> tuple | None:
               cmap='gray', alpha=0.75)
     ax.set_aspect('equal')
 
-    ax.plot(bnd_r[:, 0], bnd_r[:, 1], color='orange', lw=1.2, alpha=0.7, label='우측 한계')
-    ax.plot(bnd_l[:, 0], bnd_l[:, 1], color='cyan',   lw=1.2, alpha=0.7, label='좌측 한계')
+    ax.plot(bnd_r[:, 0], bnd_r[:, 1], color='orange', lw=1.2, alpha=0.7, label='right bound')
+    ax.plot(bnd_l[:, 0], bnd_l[:, 1], color='cyan',   lw=1.2, alpha=0.7, label='left bound')
     cl_cl = np.vstack([cl, cl[0]])
-    ax.plot(cl_cl[:, 0], cl_cl[:, 1], 'b--', lw=0.8, alpha=0.35, label='중심선')
+    ax.plot(cl_cl[:, 0], cl_cl[:, 1], 'b--', lw=0.8, alpha=0.35, label='centerline')
 
     pal = ['red', 'lime', 'magenta', 'yellow', 'deepskyblue']
     for i, (cname, cpts) in enumerate(candidates.items()):
@@ -782,8 +782,8 @@ def gui_draw_raceline(map_name: str, args) -> tuple | None:
 
     ax.legend(loc='upper right', fontsize=7, framealpha=0.6)
     ax.set_title(
-        f'{map_name}  ─  좌클릭: 점 추가  |  우클릭/u: 언두  |  '
-        f'd: 초기화  |  Enter: 확정  |  q: 취소',
+        f'{map_name}  —  L-click: add  |  R-click/u: undo  |  '
+        f'd: clear  |  Enter: confirm  |  q: cancel',
         fontsize=9)
 
     # 현재 그린 경로 표시
@@ -842,7 +842,7 @@ def gui_draw_raceline(map_name: str, args) -> tuple | None:
 
     pts = state['pts']
     if len(pts) < 4:
-        print('  점이 부족합니다 (최소 4개 필요). 취소됨.')
+        print('  not enough points (need at least 4). cancelled.')
         return None
 
     # ── 스플라인 피팅 ──

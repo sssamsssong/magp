@@ -217,14 +217,14 @@ class MapCleaner:
         self.fig.canvas.draw_idle()
 
     def _update_title(self):
-        mode_str = '외부(빨강)' if self.mode == 1 else '내부(파랑)'
+        mode_str = 'OUTER (red)' if self.mode == 1 else 'INNER (blue)'
         ci = self.CLOSE_CYCLE[self.ci_idx]
         n1 = len(self.polys[1])
         n2 = len(self.polys[2])
         self.ax.set_title(
-            f'모드: {mode_str} 폴리곤  |  '
-            f'외부={n1}pt  내부={n2}pt  closing={ci}회  |  '
-            f'1=외부모드  2=내부모드  Enter=적용  s=저장  r=리셋  q=종료',
+            f'{mode_str}  |  outer={n1}pt  inner={n2}pt  closing={ci}  |  '
+            f'1=outer  2=inner  L-click=add  R-click/z=undo  '
+            f'Enter=apply  s=save  r=reset  q=quit',
             fontsize=9)
         self.fig.canvas.draw_idle()
 
@@ -248,12 +248,12 @@ class MapCleaner:
 
         if k == '1':
             self.mode = 1
-            print('모드: 외부 폴리곤 (빨강)')
+            print('mode: OUTER polygon (red)')
             self._update_title()
 
         elif k == '2':
             self.mode = 2
-            print('모드: 내부 폴리곤 (파랑)')
+            print('mode: INNER polygon (blue)')
             self._update_title()
 
         elif k == 'z' and self.polys[self.mode]:
@@ -267,7 +267,7 @@ class MapCleaner:
         elif k == 'c':
             self.ci_idx = (self.ci_idx + 1) % len(self.CLOSE_CYCLE)
             ci = self.CLOSE_CYCLE[self.ci_idx]
-            print(f'closing={ci}회')
+            print(f'closing={ci}')
             self._update_title()
             if self.result is not None:
                 self._apply(silent=True)
@@ -278,7 +278,7 @@ class MapCleaner:
             self.im.set_data(self.orig)
             self._redraw()
             self._update_title()
-            print('리셋')
+            print('reset')
 
         elif k == 's':
             self._save()
@@ -289,8 +289,8 @@ class MapCleaner:
     def _apply(self, silent=False):
         ci = self.CLOSE_CYCLE[self.ci_idx]
         if not silent:
-            print(f'마스크 적용 (외부={len(self.polys[1])}pt '
-                  f'내부={len(self.polys[2])}pt closing={ci})')
+            print(f'apply mask (outer={len(self.polys[1])}pt '
+                  f'inner={len(self.polys[2])}pt closing={ci})')
         self.result = apply_mask(self.orig,
                                   self.polys[1], self.polys[2], ci)
         disp = np.where(self.result == VAL_FREE, 255, 0).astype(np.uint8)
@@ -299,18 +299,18 @@ class MapCleaner:
 
     def _save(self):
         if self.result is None:
-            print('먼저 Enter로 마스크를 적용하세요')
+            print('Press Enter first to apply the mask')
             return
         out_pgm = self.out_base + '.pgm'
         Image.fromarray(self.result, mode='L').save(out_pgm)
-        print(f'PGM 저장: {out_pgm}')
+        print(f'saved PGM: {out_pgm}')
 
         cfg_out = dict(self.cfg)
         cfg_out['image'] = os.path.basename(self.out_base) + '.pgm'
         with open(self.out_base + '.yaml', 'w') as f:
             yaml.dump(cfg_out, f, default_flow_style=False)
-        print(f'YAML 저장: {self.out_base}.yaml')
-        print('완료!')
+        print(f'saved YAML: {self.out_base}.yaml')
+        print('done')
 
 
 def main():
@@ -335,12 +335,12 @@ def main():
     else:
         out_base = map_base + '_clean'
 
-    print(f'\n  입력: {map_base}')
-    print(f'  출력: {out_base}')
-    print('\n  1 = 외부 바운더리 폴리곤 (빨강) 모드')
-    print('  2 = 내부 바운더리 폴리곤 (파랑) 모드')
-    print('  LClick: 꼭짓점 추가  RClick/z: 취소')
-    print('  Enter: 적용  c: closing 토글  s: 저장  r: 리셋  q: 종료\n')
+    print(f'\n  input:  {map_base}')
+    print(f'  output: {out_base}')
+    print('\n  1 = OUTER boundary polygon (red)')
+    print('  2 = INNER boundary polygon (blue)')
+    print('  L-click: add vertex   R-click/z: undo')
+    print('  Enter: apply  c: closing toggle  s: save  r: reset  q: quit\n')
 
     arr = load_map(map_base)
     cfg = load_yaml(map_base)
