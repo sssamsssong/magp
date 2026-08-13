@@ -703,12 +703,12 @@ wall_avoid:
 localization:
   # ★ 2026-08-13 (2호차) map_0813_clean 기준. 1호차 fun_clean 값은 (0.0005, -0.0684, 0.0968)
   #   이었다 — 트랙 설정은 아직 차량별로 안 나뉘어 있으니 상대 차가 쓸 때 되돌릴 것.
-  init_x: -1.57         # 시작 위치 초기 추정 (map 좌표)
-  init_y: 2.96
+  init_x: 11.7669       # 시작 위치 초기 추정 (map 좌표)
+  init_y: -1.236
   #   ⚠ yaw 는 아직 옛 값이다. 위치만 맞고 방향이 틀리면 AMCL 이 수렴을 못 하거나
   #     엉뚱한 곳으로 붙는다. ./race.sh box 로 띄우고 RViz 2D Pose Estimate 로
   #     맞춘 뒤 ./race.sh savepose 하면 x·y·yaw 가 한 번에 저장된다.
-  init_yaw: 0.0968       # 라디안
+  init_yaw: -0.009       # 라디안
 
   # ── IMU yaw 융합 — odom 의 각속도를 VESC 자이로 실측으로 교체 ──
   #    상세: 개발현황.md 08/03
@@ -788,8 +788,16 @@ localization:
 mission:
   laps: 4                   # 이 바퀴수 완주하면 자동 정지 (0 = 무제한)
   time_limit_sec: 0         # 제한시간 초과 시 자동 정지 (0 = 무제한, q3는 120 권장)
-  start_x: 2.0              # 출발선 x (map 좌표, RViz에서 확인)
-  start_y: -0.96              # 출발선 y
+  # ★ 2026-08-14 신설. true 면 출발선을 localization.init_x/init_y 에 **자동으로**
+  #   맞춘다 (아래 start_x/start_y 는 무시된다).
+  #   차를 세워둔 자리가 곧 출발선이라야 laps 가 딱 그 바퀴수가 된다. 어긋나면
+  #   첫 랩만 부분 주행이라 실제로는 laps + (어긋난 만큼) 을 돈다 — 08-14 에
+  #   출발선이 웨이포인트 71, 출발 지점이 185 라 3/4 바퀴를 더 돌게 돼 있었다.
+  #   ./race.sh savepose 로 init 을 갱신하면 출발선도 같이 따라온다.
+  #   ※ 대회 규정 출발선처럼 따로 둬야 하면 false 로 끄고 아래 값을 직접 적는다.
+  start_at_init: true
+  start_x: 2.0              # 출발선 x — start_at_init:false 일 때만 쓰인다
+  start_y: -0.96            # 출발선 y
   start_radius: 1.5         # 출발선 통과 판정 반경 (m)
 
   # ── 출발 게이트 — 스택을 미리 띄우고 신호에 맞춰 출발 ────────

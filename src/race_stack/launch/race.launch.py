@@ -323,6 +323,24 @@ def generate_launch_description():
         # 자동 정지 없음 — bench 는 사람이 Ctrl+C 로 끝낸다.
         laps = 0
         time_limit = 0
+
+    # ── 출발선 = 출발 지점 ────────────────────────────────────────────
+    #   기본은 출발선을 init_pose 에 둔다. 차를 세워둔 자리가 곧 출발선이라야
+    #   `laps` 가 **딱 그 바퀴수**가 된다. 둘이 어긋나면 첫 랩만 부분 주행이
+    #   되어 실제로는 laps + (어긋난 만큼) 을 돈다 — 2026-08-14 에 출발선이
+    #   웨이포인트 71, 출발 지점이 185 라서 3/4 바퀴를 더 돌게 돼 있었다.
+    #   ※ 출발선을 따로 두고 싶으면(예: 대회 규정 출발선) start_at_init: false
+    #     로 끄고 start_x/start_y 를 직접 적는다.
+    _loc_m = cfg.get('localization', {})
+    if bool(m.get('start_at_init', True)):
+        _start_x = float(_loc_m.get('init_x', m.get('start_x', 0.0)))
+        _start_y = float(_loc_m.get('init_y', m.get('start_y', 0.0)))
+        print(f'[race.launch] 출발선 = 출발 지점 ({_start_x:.3f}, {_start_y:.3f})')
+    else:
+        _start_x = float(m.get('start_x', 0.0))
+        _start_y = float(m.get('start_y', 0.0))
+        print(f'[race.launch] 출발선 수동 지정 ({_start_x:.3f}, {_start_y:.3f})')
+
     nodes.append(Node(
         package='race_stack', executable='mission_manager',
         name='mission_manager', output='screen',
@@ -336,8 +354,8 @@ def generate_launch_description():
                      'start_gate':   bool(m.get('start_gate',   False)),
                      'start_button': int( m.get('start_button', 1)),
                      'start_key':    bool(m.get('start_key',    True)),
-                     'start_x': float(m.get('start_x', 0.0)),
-                     'start_y': float(m.get('start_y', 0.0)),
+                     'start_x': _start_x,
+                     'start_y': _start_y,
                      'start_radius': float(m.get('start_radius', 1.5))}]))
 
     # ---------- 4. 안전장치 (AEB) ----------
