@@ -1,7 +1,7 @@
 # 젯슨 실행 명령어 총정리
 
 저장소: `main` — https://github.com/lloes098/26-jetson-f1tenth
-젯슨 내 경로: `~/yax` (git repo가 유일 소스. `~/f1tenth_ws/src/`의 race_stack 등 3개 패키지는 여기로 심링크됨)
+젯슨 내 경로: `~/yax` (git repo가 유일 소스. `~/f1tenth_ws/src/race_stack`은 여기로 심링크됨)
 
 ---
 
@@ -217,7 +217,7 @@ chmod +x install_on_jetson.sh race.sh
 ```
 
 > `~/f1tenth_ws`가 이미 있고 `f1tenth_stack`이 빌드된 상태여야 합니다.
-> 이 스크립트는 `~/yax/src/`의 패키지 3개(race_stack, q2_gap_follow, roboracer_1v1)를
+> 이 스크립트는 `~/yax/src/race_stack`을
 > `~/f1tenth_ws/src/`에 **심링크**로 연결(복사 아님)하고 colcon build 합니다.
 > 이후 repo에서 파이썬 코드를 수정하면 재빌드 없이 즉시 반영됩니다(`--symlink-install`).
 
@@ -445,7 +445,7 @@ ros2 topic echo /race/enabled  # 미션 매니저 상태
 # 빌드 다시 — 파이썬 코드만 고쳤으면 불필요 (--symlink-install 이라 즉시 반영).
 # 새 파일 추가 / setup.py·package.xml 변경 / launch·config 추가 때만 실행:
 cd ~/f1tenth_ws
-colcon build --packages-select race_stack q2_gap_follow roboracer_1v1 --symlink-install
+colcon build --packages-select race_stack --symlink-install
 source install/setup.bash
 ```
 
@@ -657,7 +657,7 @@ cd ~/yax   # race.sh 있는 경로
 
 > **git pull 후**: 패키지가 `~/f1tenth_ws/src/`에 **심링크**로 연결돼 있어 pull만 하면 즉시 반영됨
 > (`race.sh`, `race_script.yaml` 포함). 재빌드가 필요한 경우는 새 파일 추가·setup.py 변경 등뿐 —
-> 그때만 `cd ~/f1tenth_ws && colcon build --packages-select race_stack q2_gap_follow roboracer_1v1 --symlink-install`.
+> 그때만 `cd ~/f1tenth_ws && colcon build --packages-select race_stack --symlink-install`.
 > `./install_on_jetson.sh` 재실행은 새 의존 패키지가 추가됐을 때만 필요.
 
 ---

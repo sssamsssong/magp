@@ -37,9 +37,10 @@ echo "[2/4] 패키지 심링크 → $WS/src/  (복사 아님: 이 git repo가 �
 # 실행 WS 쪽에서 고쳐도 그게 곧 git repo 라 커밋/푸시로 보존된다.
 mkdir -p "$WS/src"
 ln -sfn "$SCRIPT_DIR/src/race_stack"    "$WS/src/race_stack"
-ln -sfn "$SCRIPT_DIR/src/q2_gap_follow" "$WS/src/q2_gap_follow"
-ln -sfn "$SCRIPT_DIR/src/roboracer_1v1" "$WS/src/roboracer_1v1"
 ln -sfn "$SCRIPT_DIR/race.sh"           "$WS/race.sh"   # jetson.sh 가 WS 에서 ./race.sh 호출
+# 예전에 심링크만 하고 런치에 안 붙였던 패키지. pull 후에도 워크스페이스에
+# 깨진 링크가 남지 않게 지운다.
+rm -f "$WS/src/q2_gap_follow" "$WS/src/roboracer_1v1"
 
 # vesc.yaml (조향/모터 캘리브레이션)도 repo 를 원본으로 심링크.
 # f1tenth_stack 은 이 repo 밖 패키지지만, 캘리브레이션 값은 git 으로
@@ -65,7 +66,7 @@ echo "[3/4] colcon build"
 source /opt/ros/humble/setup.bash
 cd "$WS"
 colcon build \
-    --packages-select race_stack q2_gap_follow roboracer_1v1 \
+    --packages-select race_stack \
     --symlink-install
 
 echo "[4/4] udev rule 설치 (VESC 자동 심링크)"
