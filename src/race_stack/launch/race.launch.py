@@ -638,6 +638,9 @@ def generate_launch_description():
                     # 컨트롤러의 램프 속도와 같아야 한다 — 플래너가 "지금 어디에
                     # 있는지" 를 이걸로 안다 (히스테리시스·좌우 유지)
                     'shift_rate':       float(fr.get('shift_rate', 2.0)),
+                    # 후보 경로 곡률이 조향 한계를 넘으면 탈락 (안쪽 오프셋)
+                    'wheelbase':        float(pp.get('wheelbase', 0.33)),
+                    'max_steer':        float(pp.get('max_steer', 0.36)),
                     'debug':            bool( fr.get('debug',     True)),
                     # 레이캐스팅은 [stanley] 값을 재사용한다 — 같은 트랙·같은 차다
                     'raycast_obs':      bool( st.get('raycast_obs',      True)),

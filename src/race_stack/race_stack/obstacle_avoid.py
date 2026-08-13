@@ -265,6 +265,30 @@ class ObstacleAvoidMixin:
         d = self.fr_grid
         feasible = (wall_room >= self.fr_min_room) & (obs_room >= self.fr_clear)
 
+        # ── 곡률 실행가능 ─────────────────────────────────────────────
+        # 법선 오프셋 d 의 평행곡선: κ' = κ / (1 − d·κ)  (좌회전 +, d 좌측 +).
+        # 안쪽으로 밀면 반경이 차 R_min = L/tan(max_steer) 아래로 떨어질 수 있다.
+        # 한계는 차량 기하에서 온다. d=0 은 항상 살린다 — 라인 자체가 κ_max 에
+        # 붙어 있어도 회피가 라인에서 쫓겨나면 안 된다.
+        wb = float(getattr(self, 'wheelbase', 0.33) or 0.33)
+        ms = float(getattr(self, 'max_steer', 0.36) or 0.36)
+        kappa_max = math.tan(ms) / max(wb, 1e-6)
+        dx, dy = np.gradient(seg[:, 0]), np.gradient(seg[:, 1])
+        ddx, ddy = np.gradient(dx), np.gradient(dy)
+        kap = (dx * ddy - dy * ddx) / np.maximum((dx * dx + dy * dy) ** 1.5, 1e-9)
+        kappa_ok = np.ones(N, dtype=bool)
+        for i, di in enumerate(d):
+            denom = 1.0 - float(di) * kap
+            if np.any(denom <= 0.05):
+                kappa_ok[i] = False          # 곡률 중심을 지나감
+                continue
+            if float(np.max(np.abs(kap / denom))) > kappa_max * 1.05:
+                kappa_ok[i] = False
+        zero_i = int(np.argmin(np.abs(d)))
+        kappa_ok[zero_i] = True
+        feasible_wo = feasible.copy()
+        feasible = feasible & kappa_ok
+
         cost = (self.fr_w_off * np.abs(d)
                 + self.fr_w_chg * np.abs(d - self._shift_cur)
                 - self.fr_w_clr * np.minimum(room, self.fr_clr_cap))
@@ -288,9 +312,13 @@ class ObstacleAvoidMixin:
             self._fr_gap_room = scores[pick]
             self._fr_status = 0.0 if abs(float(d[best])) < 1e-3 else 1.0
         else:
-            # 전부 막혔다 — 그나마 가장 넓은 쪽으로. 여기까지 오면 속도를
-            # 줄이는 게 정답이지만 그건 AEB/감속의 영역이고, 조향은 최선을 다한다.
-            best = int(np.argmax(room))
+            # 전부 막혔다. 벽·장애물로는 되는 후보가 곡률만 안 되면 라인(d=0)
+            # — 안쪽으로 더 파고들면 조향이 안 따라간다. 둘 다 막혔으면 예전처럼
+            # 제일 넓은 쪽 (그건 AEB/감속의 영역이고, 조향은 최선을 다한다).
+            if np.any(feasible_wo):
+                best = zero_i
+            else:
+                best = int(np.argmax(room))
             self._fr_gap_room = float(room[best])
             self._fr_status = 2.0
             self.get_logger().warn(

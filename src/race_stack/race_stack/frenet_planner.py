@@ -99,6 +99,9 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         d('frenet_min_room',  0.22)
         # 다른 쪽 통로가 이만큼 더 넓어야 갈아탄다 [m]. 좌우 진동 방지.
         d('frenet_gap_hyst',  0.10)
+        # 후보 경로가 조향 한계를 넘는 곡률이면 탈락시킨다 (안쪽 헤어핀).
+        d('wheelbase',        0.33)
+        d('max_steer',        0.36)
         # ── 1대1(race) — 동적 장애물 ──────────────────────────────────
         d('opp_track',      True)   # 상대차 속도 추정 + 도달시각 예측
         d('opp_eps',        0.30)   # 클러스터 거리 [m]
@@ -157,6 +160,8 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.fr_bounds = bool(p('frenet_bounds'))
         self.fr_min_room = float(p('frenet_min_room'))
         self.fr_gap_hyst = float(p('frenet_gap_hyst'))
+        self.wheelbase   = float(p('wheelbase'))
+        self.max_steer   = float(p('max_steer'))
         self.opp_track     = bool( p('opp_track'))
         self.opp_eps       = float(p('opp_eps'))
         self.opp_gate      = float(p('opp_gate'))
@@ -250,8 +255,7 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
 
         # ── 속도 스케일 ──────────────────────────────────────────────
         #   "넓은 쪽으로 더 빠르게" 를 **프로파일 위로 올리는 방식으로는 하지
-        #   않는다.** 그건 마찰원을 넘는 것이고, 08/13 로그에서 이미 지령
-        #   2.86㎧ 에 실측 3.45㎧ 로 넘고 있다. 넓으면 **안 줄이는** 것이
+        #   않는다.** 그건 마찰원을 넘는 것이다. 넓으면 **안 줄이는** 것이
         #   빠른 것이다.
         #   고른 통로의 여유가 room_ref 이상이면 1.0, 좁아질수록 min_scale 까지
         #   선형으로 내린다. 통로가 없으면(status 2) 곧장 min_scale.
