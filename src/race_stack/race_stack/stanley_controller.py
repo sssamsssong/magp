@@ -275,8 +275,8 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self.declare_parameter('raycast_obs',       True)
         self.declare_parameter('raycast_pose_unc',  0.25)   # 위치추정 불확실성(m)
         self.declare_parameter('raycast_deficit',   0.30)   # 기대보다 이만큼 짧아야 장애물
-        self.declare_parameter('raycast_fov_deg',   100.0)  # 전방 감시 화각(±)
-        self.declare_parameter('raycast_beam_deg',  1.0)    # 빔 샘플 간격
+        self.declare_parameter('raycast_fov_deg',   140.0)  # 전방 감시 총화각 (코드는 ±fov/2)
+        self.declare_parameter('raycast_beam_deg',  0.25)   # 빔 샘플 간격. 1°면 얇은 콘을 건너뛴다
         # 검사 (B) — 빔 끝점이 벽에서 이만큼 떨어지면 장애물 (0 = 끔).
         # 좁은 통로 한가운데 장애물의 원거리 검출률을 3~10배로 올린다.
         # 근거는 obstacle_avoid._raycast_obstacle_pts 주석 참고.
@@ -427,7 +427,7 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self.inner_bound    = None
         self.outer_bound    = None
 
-        if self.mode == 'q2':
+        if self._avoid_active:
             map_yaml  = p('map_yaml')
             bound_dir = p('bound_dir') or (
                 os.path.join(os.path.dirname(map_yaml),
@@ -466,7 +466,7 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self.create_subscription(Odometry,
             p('odom_topic'), self._odom_cb, 10)
         # Q2 는 장애물 격자 판정에, 그 외 모드는 벽 회피에 스캔이 필요하다.
-        if self.mode == 'q2' or self.wa_on:
+        if self._avoid_active or self.wa_on:
             self.create_subscription(LaserScan,
                 '/scan', self._scan_cb, 10)
 
@@ -668,7 +668,7 @@ class StanleyController(ObstacleAvoidMixin, Node):
         target = np.array([xs[i_best], ys[i_best]])
 
         # ── Q2: shift target laterally away from obstacle ──────────────
-        if self.mode == 'q2':
+        if self._avoid_active:
             target = self._obstacle_shift(target, px, py, yaw)
 
         # ── Stanley steering ───────────────────────────────────────────
@@ -678,7 +678,7 @@ class StanleyController(ObstacleAvoidMixin, Node):
         #   회피 중 우리가 추종하는 경로는 "라인을 옆으로 민 것" 이므로
         #   기준선도 같이 밀어야 Stanley 가 저항 없이 그 쪽으로 조향한다.
         closest = wps[nearest, :2]
-        if self.mode == 'q2' and getattr(self, '_shift_vec', None) is not None:
+        if self._avoid_active and getattr(self, '_shift_vec', None) is not None:
             closest = closest + self._shift_vec
 
         # path_yaw = 경로의 "국소 접선" 방향 (교과서 Stanley).
@@ -693,7 +693,7 @@ class StanleyController(ObstacleAvoidMixin, Node):
                               wps[j_f, 0] - wps[j_b, 0])
 
         # Q2 회피 중에는 시프트된 목표점을 향해 조향 (회피 기동 유지)
-        if self.mode == 'q2' and not self.lane_free:
+        if self._avoid_active and not self.lane_free:
             path_yaw = math.atan2(target[1] - py, target[0] - px)
         cte_size = float(np.hypot(px - closest[0], py - closest[1]))
         cte_sign = float(np.sign(np.cross(
@@ -731,7 +731,7 @@ class StanleyController(ObstacleAvoidMixin, Node):
         # ── target speed from CSV ──────────────────────────────────────
         # ★ 마찰원 프로파일에서 읽는다 (CSV×배수 + clip 아님 — 위 grip_util 주석)
         cmd_v = float(self._v_profile[nearest])
-        if self.mode == 'q2' and not self.lane_free:
+        if self._avoid_active and not self.lane_free:
             cmd_v *= self.obs_decel
         cmd_v = max(cmd_v, self.min_speed)
 

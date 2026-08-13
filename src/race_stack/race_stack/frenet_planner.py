@@ -107,8 +107,8 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         #   기본값은 stanley_controller 와 동일하게 맞췄다. 갈라지면 같은 코드가
         #   컨트롤러에 따라 다르게 동작한다.
         d('raycast_obs',      True)
-        d('raycast_fov_deg',  100.0)
-        d('raycast_beam_deg', 1.0)
+        d('raycast_fov_deg',  140.0)
+        d('raycast_beam_deg', 0.25)
         d('raycast_deficit',  0.30)
         d('raycast_pose_unc', 0.25)
         # 검사 (B): 빔 끝점이 벽에서 이만큼 떨어지면 장애물. 0 = 끔.

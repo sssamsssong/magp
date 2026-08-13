@@ -502,8 +502,8 @@ def generate_launch_description():
                 'raycast_obs':      bool( sc.get('raycast_obs',      True)),
                 'raycast_pose_unc': float(sc.get('raycast_pose_unc', 0.25)),
                 'raycast_deficit':  float(sc.get('raycast_deficit',  0.30)),
-                'raycast_fov_deg':  float(sc.get('raycast_fov_deg',  100.0)),
-                'raycast_beam_deg': float(sc.get('raycast_beam_deg', 1.0)),
+                'raycast_fov_deg':  float(sc.get('raycast_fov_deg',  140.0)),
+                'raycast_beam_deg': float(sc.get('raycast_beam_deg', 0.25)),
                 # 검사 (B) — 좁은 통로 한가운데 장애물. frenet_planner 와 같은 값
                 'raycast_free_gap': float(sc.get('raycast_free_gap', 0.30)),
             }])
@@ -619,8 +619,8 @@ def generate_launch_description():
                     'debug':            bool( fr.get('debug',     True)),
                     # 레이캐스팅은 [stanley] 값을 재사용한다 — 같은 트랙·같은 차다
                     'raycast_obs':      bool( st.get('raycast_obs',      True)),
-                    'raycast_fov_deg':  float(st.get('raycast_fov_deg',  100.0)),
-                    'raycast_beam_deg': float(st.get('raycast_beam_deg', 1.0)),
+                    'raycast_fov_deg':  float(st.get('raycast_fov_deg',  140.0)),
+                    'raycast_beam_deg': float(st.get('raycast_beam_deg', 0.25)),
                     'raycast_deficit':  float(st.get('raycast_deficit',  0.30)),
                     'raycast_pose_unc': float(st.get('raycast_pose_unc', 0.25)),
                     # 검사 (B) — 빔 끝점이 벽에서 이만큼 떨어지면 장애물.

@@ -496,6 +496,11 @@ class ObstacleAvoidMixin:
         n = len(msg.ranges)
         stride = max(1, int(round(bstep / max(msg.angle_increment, 1e-6))))
         idx = np.arange(0, n, stride)
+        # ★ 낮은/얇은 물체(콘, 상대 차 옆면)는 각폭이 1° 보다 작다.
+        #   옛 기본값 beam_deg=1.0 은 UST-10LX(0.25°) 를 4개에 하나 건너뛰어
+        #   2~4m 앞 10cm 콘을 통째로 놓쳤다. 높은 박스·차는 각폭이 커서 살아남고
+        #   낮은 콘만 안 보이던 증상의 소프트웨어 쪽 원인. (스캔 평면 11cm 보다
+        #   완전히 낮은 물체는 하드웨어로도 안 보인다.)
         a_car = msg.angle_min + idx * msg.angle_increment       # 차량 기준 빔각
         keep = np.abs(a_car) <= fov * 0.5
         idx, a_car = idx[keep], a_car[keep]
@@ -625,6 +630,24 @@ class ObstacleAvoidMixin:
         """
         return float(np.clip(self.obs_h_min + self.obs_h_sec * abs(self.speed),
                              self.obs_h_min, self.obs_h_max))
+
+    @property
+    def _avoid_active(self) -> bool:
+        """Q2 정적 장애물과 race 1v1 상대 모두 같은 검출기를 쓴다."""
+        return self.mode in ('q2', 'race')
+
+    def _update_lane_free(self):
+        """차단 투표 창이 과반이면 회피 유지 (통로를 넓혀 놓치지 않음).
+
+        ★ frenet_planner 는 예전엔 이 값을 영원히 True 로 뒀다. 회피를
+          시작하는 순간 장애물이 좁은 통로 밖으로 나가 감지가 풀렸다.
+        """
+        ml = self.free_votes.maxlen or len(self.free_votes)
+        if not ml:
+            self.lane_free = True
+            return
+        self.lane_free = sum(self.free_votes) * 2 >= ml
+
     def _scan_cb(self, msg: LaserScan):
         # 벽 회피는 pose 없이도 (차량 좌표계만으로) 동작해야 한다 —
         # AMCL 수렴 전에도 벽에 스치는 건 막아야 하므로 pose 검사보다 먼저 저장.
@@ -632,8 +655,8 @@ class ObstacleAvoidMixin:
 
         if self.pos is None:
             return
-        if self.mode != 'q2':
-            return          # 아래 격자 판정은 Q2 전용
+        if not self._avoid_active:
+            return          # q1/q3 는 빈 트랙. q2·race 만 검출한다.
 
         p = self.get_parameter
 
@@ -647,6 +670,7 @@ class ObstacleAvoidMixin:
                 self.on_track_pts = np.zeros((0, 2))
                 self.blocking_pts = []
                 self.free_votes.append(True)
+                self._update_lane_free()
                 return
             # 마스크를 다시 걸지 않는다 — 이미 "맵으로 설명되지 않는 점" 만 남았다.
             self._classify_obstacles(pts_world, 0.0, masked=False)
@@ -687,6 +711,7 @@ class ObstacleAvoidMixin:
         if len(gxf) == 0:
             self.blocking_pts = []
             self.free_votes.append(True)
+            self._update_lane_free()
             return
 
         # rotate + translate to world frame
@@ -720,6 +745,7 @@ class ObstacleAvoidMixin:
         if not on_track:
             self.blocking_pts = []
             self.free_votes.append(True)
+            self._update_lane_free()
             return
 
         #   그리고 "막고 있는 점"만 남겨 회피 방향·마커에 쓴다 — 예전엔 트랙 안의
@@ -735,6 +761,7 @@ class ObstacleAvoidMixin:
 
         self.blocking_pts = blocking
         self.free_votes.append(not blocking)
+        self._update_lane_free()
         if blocking:
             self._pub_obstacle_markers(blocking)
 
