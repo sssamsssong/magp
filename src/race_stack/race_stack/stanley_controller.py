@@ -224,6 +224,10 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self.declare_parameter('frenet_w_clear',    0.5)    # 여유거리 보상 가중
         self.declare_parameter('frenet_clear_cap',  0.35)   # 이 이상 여유는 더 안 쳐준다
         self.declare_parameter('frenet_bounds',     True)   # 트랙 경계 이탈 후보 배제
+        # 통과 여유 하한 [m] — 차 반폭 + 안전여유. 옛 마스크 all() 판정이
+        # 레이싱라인 자신을 27% 프레임에서 탈락시켰다 (2026-08-11 재작성).
+        self.declare_parameter('frenet_min_room',   0.22)
+        self.declare_parameter('frenet_gap_hyst',   0.10)   # 좌우 갈아타기 우세폭
         self.declare_parameter('frenet_debug',      True)   # /frenet_candidates 마커
         # 라이다 장착 오프셋 (base_link → laser). 격자 점유 판정에 필수.
         # ★ f1tenth_stack/launch/bringup_launch.py 의 static_baselink_to_laser
@@ -273,6 +277,10 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self.declare_parameter('raycast_deficit',   0.30)   # 기대보다 이만큼 짧아야 장애물
         self.declare_parameter('raycast_fov_deg',   100.0)  # 전방 감시 화각(±)
         self.declare_parameter('raycast_beam_deg',  1.0)    # 빔 샘플 간격
+        # 검사 (B) — 빔 끝점이 벽에서 이만큼 떨어지면 장애물 (0 = 끔).
+        # 좁은 통로 한가운데 장애물의 원거리 검출률을 3~10배로 올린다.
+        # 근거는 obstacle_avoid._raycast_obstacle_pts 주석 참고.
+        self.declare_parameter('raycast_free_gap',  0.30)
 
         def p(n): return self.get_parameter(n).value
 
@@ -311,6 +319,8 @@ class StanleyController(ObstacleAvoidMixin, Node):
                 f'obs_corridor_half_width({self.obs_corr_hw:.2f}) — '
                 f'검출 기준에 맞춰 {self.obs_corr_hw:.2f} 로 올립니다')
             self.fr_clear = self.obs_corr_hw
+        self.fr_min_room = float(p('frenet_min_room'))
+        self.fr_gap_hyst = float(p('frenet_gap_hyst'))
         self.fr_w_off   = float(p('frenet_w_offset'))
         self.fr_w_chg   = float(p('frenet_w_change'))
         self.fr_w_clr   = float(p('frenet_w_clear'))
