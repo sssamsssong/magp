@@ -89,19 +89,38 @@ def ask_diameter(label):
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--params', default=VESC_YAML,
+                    help='드라이버에 넘길 params 파일. 소프트리밋 밖을 재려면 '
+                         'config/vesc_steer_test.yaml (0.02~0.98) 을 쓴다')
+    ap.add_argument('--servo', type=float, nargs=2, default=None,
+                    metavar=('S1', 'S2'),
+                    help='시험할 두 서보값 (기본: params 의 servo_min/max). '
+                         '스토퍼 근처를 재려면 예: --servo 0.05 0.95')
+    args = ap.parse_args()
+    global VESC_YAML_USED
+    VESC_YAML_USED = args.params
+    if not os.path.exists(args.params):
+        sys.exit(f'✗ {args.params} 이 없습니다.')
     if not os.path.exists(VESC_YAML):
         sys.exit(f'✗ {VESC_YAML} 이 없습니다.\n'
                  f'  python3 config/apply_vehicle.py 를 먼저 돌리세요.')
+    # 게인·중립은 항상 실제 설정(vesc.yaml)에서 읽는다 — 비교 기준이므로.
     p = read_vesc()
-    smin, smax = float(p['servo_min']), float(p['servo_max'])
+    pd = yaml.safe_load(open(args.params))['/**']['ros__parameters']
+    if args.servo:
+        smin, smax = sorted(args.servo)
+    else:
+        smin, smax = float(pd['servo_min']), float(pd['servo_max'])
     wb = float(p.get('wheelbase', 0.33))
     cur_gain = float(p['steering_angle_to_servo_gain'])
     cur_off = float(p['steering_angle_to_servo_offset'])
 
     print(__doc__.split('사용법')[0])
     print('=' * 62)
-    print(f'현재 설정  gain {cur_gain:+.4f}   offset {cur_off:.4f}   '
-          f'servo {smin}~{smax}   wheelbase {wb}m')
+    print(f'현재 설정  gain {cur_gain:+.4f}   offset {cur_off:.4f}   wheelbase {wb}m')
+    print(f'시험 서보  {smin} / {smax}   (params: {os.path.basename(args.params)})')
     print(f'현재 값이 맞다면 예상 지름:')
     for s in (smin, smax):
         d = (s - cur_off) / cur_gain
@@ -113,7 +132,7 @@ def main():
     print('\nVESC 드라이버를 띄웁니다...')
     drv = subprocess.Popen(
         ['ros2', 'run', 'vesc_driver', 'vesc_driver_node',
-         '--ros-args', '--params-file', VESC_YAML],
+         '--ros-args', '--params-file', args.params],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     time.sleep(5)
     if drv.poll() is not None:
