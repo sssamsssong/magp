@@ -621,6 +621,113 @@ class ObstacleAvoidMixin:
             path_in[ahead] = dmin < hw
 
         return arc_in | path_in
+    # ── 동적 장애물(상대차) 추적 ────────────────────────────────────────
+    #   1대1 에서는 장애물이 **움직인다.** 지금 자리를 피하면, 내가 거기 도달할
+    #   때쯤 상대는 이미 다른 곳에 있다. 4㎧ 로 3m 앞의 상대에게 다가가면
+    #   도달까지 0.75s 인데, 상대가 3㎧ 로 달리면 그동안 2.25m 를 간다 —
+    #   **현재 위치를 피하는 것은 거의 의미가 없다.**
+    #
+    #   그래서 검출점을 클러스터로 묶어 프레임 간 대응시키고, 속도를 추정해
+    #   도달 시각까지 **쓸고 지나갈 자리 전체**를 장애물로 넘긴다.
+    #   (칼만 필터를 쓰지 않는 이유: 상대차는 트랙을 따라 달리므로 등속 가정이
+    #    0.5~1s 구간에서는 충분히 맞고, 상태를 늘리면 튜닝할 것만 늘어난다.)
+    opp_track     = True    # 동적 예측 사용
+    opp_eps       = 0.30    # 클러스터 묶는 거리 [m]
+    opp_gate      = 0.80    # 프레임 간 대응 게이트 [m]
+    opp_alpha     = 0.6     # 속도 저역통과 (0=즉답, 1=안 움직임)
+    opp_min_obs   = 3       # 이만큼 연속 관측돼야 속도를 믿는다
+    opp_min_speed = 0.5     # 이보다 느리면 정적 장애물로 본다 [m/s]
+    opp_pred_max  = 1.2     # 예측 시간 상한 [s]
+    opp_lost_sec  = 0.5     # 이만큼 못 보면 트랙 폐기
+
+    def _cluster_pts(self, pts, eps):
+        """격자 해싱 클러스터링. 이웃 격자까지 합쳐 경계에서 갈라지지 않게 한다.
+
+        DBSCAN 을 안 쓰는 이유는 40Hz 안에 끝나야 하기 때문이다 — 점이
+        수백 개라 O(n log n) 라이브러리 호출보다 이쪽이 빠르고 의존성도 없다.
+        """
+        key = np.floor(pts / eps).astype(np.int64)
+        lab = -np.ones(len(pts), np.int64)
+        table = {}
+        for i, k in enumerate(map(tuple, key)):
+            table.setdefault(k, []).append(i)
+        nxt = 0
+        for k, idxs in table.items():
+            if lab[idxs[0]] >= 0:
+                continue
+            # 이웃 격자를 너비우선으로 합친다
+            stack, comp = [k], []
+            seen = {k}
+            while stack:
+                c = stack.pop()
+                if c not in table:
+                    continue
+                comp.extend(table[c])
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        n = (c[0] + dx, c[1] + dy)
+                        if n not in seen and n in table:
+                            seen.add(n); stack.append(n)
+            for i in comp:
+                lab[i] = nxt
+            nxt += 1
+        return lab, nxt
+
+    def _predict_obstacles(self, pts, msg):
+        """검출점 + **도달 시각까지 상대가 쓸고 갈 자리**를 함께 돌려준다.
+
+        정적 장애물(속도 < opp_min_speed)이면 원래 점을 그대로 낸다 — q2 의
+        동작이 바뀌지 않는다.
+        """
+        if not self.opp_track or len(pts) == 0:
+            if len(pts) == 0:
+                self._opp_tracks = []
+            return pts
+        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if t <= 0.0:
+            return pts
+        lab, n = self._cluster_pts(pts, self.opp_eps)
+        cents = [pts[lab == i].mean(axis=0) for i in range(n)]
+
+        old = getattr(self, '_opp_tracks', [])
+        old = [tr for tr in old if t - tr['t'] < self.opp_lost_sec]
+        used, new = set(), []
+        for ci, c in enumerate(cents):
+            best, bd = None, self.opp_gate
+            for k, tr in enumerate(old):
+                if k in used:
+                    continue
+                dd = float(np.hypot(*(c - tr['p'])))
+                if dd < bd:
+                    bd, best = dd, k
+            if best is None:
+                new.append(dict(p=c, v=np.zeros(2), t=t, n=1, ci=ci))
+                continue
+            tr = old[best]; used.add(best)
+            dt = t - tr['t']
+            v = tr['v'] if dt <= 1e-3 else (
+                self.opp_alpha * tr['v'] + (1.0 - self.opp_alpha) * (c - tr['p']) / dt)
+            new.append(dict(p=c, v=v, t=t, n=tr['n'] + 1, ci=ci))
+        self._opp_tracks = new
+
+        out = [pts]
+        self._opp_moving = 0
+        for tr in new:
+            sp = float(np.hypot(*tr['v']))
+            if tr['n'] < self.opp_min_obs or sp < self.opp_min_speed:
+                continue                       # 정적 — 원래 점으로 충분하다
+            self._opp_moving += 1
+            # 내가 거기 도달하기까지 걸리는 시간. 접근속도가 0 이하면 멀어지는
+            # 중이므로 예측할 것이 없다.
+            rel = tr['p'] - self.pos
+            d = float(np.hypot(*rel))
+            closing = max(abs(self.speed) - float(rel @ tr['v']) / max(d, 1e-3), 0.5)
+            tau = float(np.clip(d / closing, 0.0, self.opp_pred_max))
+            mem = pts[lab == tr['ci']]
+            for f in (0.35, 0.7, 1.0):
+                out.append(mem + tr['v'] * (tau * f))
+        return np.vstack(out)
+
     def _obs_horizon(self) -> float:
         """속도에 비례하는 전방 감시 거리(m).
 
@@ -655,6 +762,10 @@ class ObstacleAvoidMixin:
 
         if self.pos is None:
             return
+        # ★ 2026-08-13 이전에는 `mode != 'q2'` 라 **race 에서 검출이 통째로 꺼져
+        #   있었다.** frenet_planner 는 q2·race 둘 다 뜨므로(race.launch.py) 노드는
+        #   살아서 d=0 만 계속 발행한다 — 로그로는 완전히 정상으로 보이는,
+        #   조용히 아무 일도 안 하는 종류의 버그였다.
         if not self._avoid_active:
             return          # q1/q3 는 빈 트랙. q2·race 만 검출한다.
 
@@ -673,6 +784,9 @@ class ObstacleAvoidMixin:
                 self._update_lane_free()
                 return
             # 마스크를 다시 걸지 않는다 — 이미 "맵으로 설명되지 않는 점" 만 남았다.
+            # ★ 상대차는 움직인다 — 지금 자리가 아니라 **내가 도달할 때 있을 자리**를
+            #   피해야 한다 (_predict_obstacles).
+            pts_world = self._predict_obstacles(pts_world, msg)
             self._classify_obstacles(pts_world, 0.0, masked=False)
             return
 

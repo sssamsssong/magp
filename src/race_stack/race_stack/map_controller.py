@@ -320,9 +320,16 @@ class MapController(Node):
         self._fr_rx_t   = None    # 마지막 수신 시각 (타임아웃 판정)
         self._fr_shift  = 0.0     # 실제로 적용 중인 값 (램프됨)
         self._fr_warned = False
+        self._fr_spd    = 1.0     # 속도 스케일 (1대1). 타임아웃이면 1.0 으로 복귀
+        self._fr_spd_t  = None
         if bool(self.p('frenet_enabled')):
             self.create_subscription(Float64, '/frenet/offset',
                                      self._frenet_cb, 10)
+            # ★ 1대1 — 통로가 좁으면 줄이고 넓으면 안 줄인다. 프로파일 **위로는
+            #   절대 안 올린다** (그건 마찰원을 넘는 것이다). 발행이 끊기면
+            #   1.0 으로 돌아간다 — 오프셋과 같은 타임아웃 폴백 규약.
+            self.create_subscription(Float64, '/frenet/speed_scale',
+                                     self._frenet_spd_cb, 10)
 
         # 제어·발행을 50Hz 로 고정한다. AMCL 콜백에 걸어두면 주기가 들쭉날쭉하고
         # (2.5cm 이동마다) 정지 상태에서는 아예 돌지 않는다.
@@ -501,6 +508,18 @@ class MapController(Node):
         return float(np.interp(clamped, self._pac_Fy_lut, self._pac_alpha_lut))
 
     # ── MAP 조향각 ─────────────────────────────────────────────────────
+    def _frenet_spd_cb(self, msg: Float64):
+        self._fr_spd = float(np.clip(msg.data, 0.2, 1.0))
+        self._fr_spd_t = self.get_clock().now().nanoseconds * 1e-9
+
+    def _frenet_speed_scale(self) -> float:
+        if not bool(self.p('frenet_enabled')) or self._fr_spd_t is None:
+            return 1.0
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if now - self._fr_spd_t > float(self.p('frenet_timeout')):
+            return 1.0
+        return self._fr_spd
+
     def _frenet_cb(self, msg: Float64):
         self._fr_d_cmd = float(msg.data)
         self._fr_rx_t = self.get_clock().now().nanoseconds * 1e-9
@@ -806,6 +825,10 @@ class MapController(Node):
         # 프로파일이 이미 물리(마찰원)와 min_speed·hard_cap 을 다 반영했다.
         # 여기서 다시 max_speed 로 자르면 상한이 부활해 등속 주행이 된다.
         speed = self._profile_speed(near, v)
+        # 1대1 회피 감속 (막히면 줄이고 넓으면 그대로). 출발제한보다 **먼저**
+        # 걸어야 한다 — 뒤에 걸면 출발제한의 적분 상태(_cmd_prev)가 스케일된
+        # 값을 못 보고 다음 틱에서 다시 튄다.
+        speed *= self._frenet_speed_scale()
         speed = self._launch_limit(speed, 0.02)   # 타이머 주기 50Hz
 
         self.get_logger().info(

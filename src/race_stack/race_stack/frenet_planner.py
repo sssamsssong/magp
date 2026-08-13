@@ -99,6 +99,20 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         d('frenet_min_room',  0.22)
         # 다른 쪽 통로가 이만큼 더 넓어야 갈아탄다 [m]. 좌우 진동 방지.
         d('frenet_gap_hyst',  0.10)
+        # ── 1대1(race) — 동적 장애물 ──────────────────────────────────
+        d('opp_track',      True)   # 상대차 속도 추정 + 도달시각 예측
+        d('opp_eps',        0.30)   # 클러스터 거리 [m]
+        d('opp_gate',       0.80)   # 프레임 간 대응 게이트 [m]
+        d('opp_alpha',      0.6)    # 속도 저역통과
+        d('opp_min_obs',    3)      # 이만큼 봐야 속도를 믿는다
+        d('opp_min_speed',  0.5)    # 이보다 느리면 정적 취급 [m/s]
+        d('opp_pred_max',   1.2)    # 예측 시간 상한 [s]
+        # ── 속도 스케일 (컨트롤러가 /frenet/speed_scale 로 받는다) ────
+        #   "여백이 넓은 곳으로 더 빠르게" 의 구현. 마찰 프로파일 **위로는
+        #   절대 안 올린다** — 그건 물리를 넘는 것이라 미끄러진다. 대신
+        #   막혔을 때 줄이고, 통로가 넓으면 안 줄인다.
+        d('speed_min_scale', 0.45)  # 완전히 막혔을 때 [배]
+        d('speed_room_ref',  0.45)  # 이 여유면 감속 없음 [m]
         # 컨트롤러의 기준선 램프 속도 [m/s]. 같아야 플래너가 보는 "현재 위치"가
         # 실제와 맞는다 (race_script.yaml frenet.shift_rate 와 동일 값).
         d('shift_rate',       2.0)
@@ -143,6 +157,17 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.fr_bounds = bool(p('frenet_bounds'))
         self.fr_min_room = float(p('frenet_min_room'))
         self.fr_gap_hyst = float(p('frenet_gap_hyst'))
+        self.opp_track     = bool( p('opp_track'))
+        self.opp_eps       = float(p('opp_eps'))
+        self.opp_gate      = float(p('opp_gate'))
+        self.opp_alpha     = float(p('opp_alpha'))
+        self.opp_min_obs   = int(  p('opp_min_obs'))
+        self.opp_min_speed = float(p('opp_min_speed'))
+        self.opp_pred_max  = float(p('opp_pred_max'))
+        self._opp_tracks = []
+        self._opp_moving = 0
+        self.sp_min_scale = float(p('speed_min_scale'))
+        self.sp_room_ref  = max(float(p('speed_room_ref')), 1e-3)
         self._fr_costs = deque(maxlen=max(int(p('frenet_votes')), 1))
         self._fr_best_d = 0.0
         self._fr_gap_room = 0.0
@@ -185,6 +210,7 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
 
         # ── ROS ───────────────────────────────────────────────────────
         self.off_pub = self.create_publisher(Float64, '/frenet/offset', 10)
+        self.spd_pub = self.create_publisher(Float64, '/frenet/speed_scale', 10)
         self.st_pub  = self.create_publisher(Float64, '/frenet/status', 10)
         self.fr_pub  = (self.create_publisher(MarkerArray, '/frenet_candidates', 1)
                         if bool(p('debug')) else None)
@@ -222,6 +248,20 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         m = Float64();  m.data = float(d);  self.off_pub.publish(m)
         s = Float64();  s.data = float(self._fr_status);  self.st_pub.publish(s)
 
+        # ── 속도 스케일 ──────────────────────────────────────────────
+        #   "넓은 쪽으로 더 빠르게" 를 **프로파일 위로 올리는 방식으로는 하지
+        #   않는다.** 그건 마찰원을 넘는 것이고, 08/13 로그에서 이미 지령
+        #   2.86㎧ 에 실측 3.45㎧ 로 넘고 있다. 넓으면 **안 줄이는** 것이
+        #   빠른 것이다.
+        #   고른 통로의 여유가 room_ref 이상이면 1.0, 좁아질수록 min_scale 까지
+        #   선형으로 내린다. 통로가 없으면(status 2) 곧장 min_scale.
+        if self._fr_status >= 2.0:
+            scale = self.sp_min_scale
+        else:
+            r = float(np.clip(self._fr_gap_room / self.sp_room_ref, 0.0, 1.0))
+            scale = self.sp_min_scale + (1.0 - self.sp_min_scale) * r
+        sc = Float64();  sc.data = float(scale);  self.spd_pub.publish(sc)
+
         # ★ 컨트롤러가 실제로 옮기고 있는 위치를 여기서도 따라간다.
         #   예전엔 _shift_cur 이 **영원히 0** 이었다. 그러면
         #     · 비용의 w_change·|d − 현재| 가 w_offset·|d| 와 똑같아져
@@ -233,7 +273,9 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
 
         if self._fr_status > 0.0:
             self.get_logger().info(
-                f'[frenet] d={d:+.2f}m  통로 여유 {self._fr_gap_room:.2f}m'
+                f'[frenet] d={d:+.2f}m  통로 여유 {self._fr_gap_room:.2f}m  '
+                f'속도×{scale:.2f}'
+                + (f'  동적 {self._opp_moving}개' if self._opp_moving else '')
                 + ('  ★막힘' if self._fr_status >= 2.0 else ''),
                 throttle_duration_sec=0.5)
 

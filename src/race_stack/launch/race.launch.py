@@ -18,8 +18,12 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
+# ★ race 는 2026-08-13 부터 map 이다. gap_follower 는 레이싱라인을 **아예 안 쓰고**
+#   매 프레임 가장 넓은 갭으로만 달리므로 1대1 에서 상대차를 피할 수는 있어도
+#   빠르지 않고, 회피 후 최적경로로 돌아오지도 않는다. 1대1 은
+#   "레이싱라인 + 동적 회피" 여야 하므로 map + frenet_planner 조합을 쓴다.
 DEFAULT_CONTROLLER = {'q1': 'pure_pursuit', 'q2': 'gap_follower',
-                      'q3': 'pure_pursuit', 'race': 'gap_follower'}
+                      'q3': 'pure_pursuit', 'race': 'map'}
 
 # 'map' = MAP(Model-based Adaptive Pure pursuit) 컨트롤러. 트랙 맵(map_name)과
 # 무관한 알고리즘 이름이다 — race_script.yaml 의 [map] 절 참조.
@@ -516,7 +520,13 @@ def generate_launch_description():
         pp = cfg.get('pure_pursuit', {})
         mp = cfg.get('map', {})
         fr = cfg.get('frenet', {})
-        frc = fr.get('per_controller', {}).get('map', {})
+        # ★ per_controller 는 컨트롤러 이름으로 찾되, **모드 키가 있으면 그게
+        #   이긴다.** 1대1(race)은 같은 map 컨트롤러를 쓰지만 상대가 마주 달려
+        #   와 접근속도가 두 배라 호라이즌이 더 필요하다 (2026-08-13).
+        #   예전엔 'map' 으로 하드코딩돼 있어 race 전용 값을 넣어도 안 읽혔다.
+        _pc = fr.get('per_controller', {})
+        frc = dict(_pc.get('map', {}))
+        frc.update(_pc.get(mode, {}))
         st = cfg.get('stanley', {})
         ctrl = Node(
             package='race_stack', executable='map_controller',
@@ -613,6 +623,16 @@ def generate_launch_description():
                     # 레이싱라인 자신을 27% 프레임에서 탈락시켰다 (2026-08-11)
                     'frenet_min_room':  float(fr.get('min_room',  0.22)),
                     'frenet_gap_hyst':  float(fr.get('gap_hyst',  0.10)),
+                    # ── 1대1(race) 동적 장애물 ──
+                    'opp_track':      bool( fr.get('opp_track',     mode == 'race')),
+                    'opp_eps':        float(fr.get('opp_eps',       0.30)),
+                    'opp_gate':       float(fr.get('opp_gate',      0.80)),
+                    'opp_alpha':      float(fr.get('opp_alpha',     0.6)),
+                    'opp_min_obs':    int(  fr.get('opp_min_obs',   3)),
+                    'opp_min_speed':  float(fr.get('opp_min_speed', 0.5)),
+                    'opp_pred_max':   float(fr.get('opp_pred_max',  1.2)),
+                    'speed_min_scale':float(fr.get('speed_min_scale', 0.45)),
+                    'speed_room_ref': float(fr.get('speed_room_ref',  0.45)),
                     # 컨트롤러의 램프 속도와 같아야 한다 — 플래너가 "지금 어디에
                     # 있는지" 를 이걸로 안다 (히스테리시스·좌우 유지)
                     'shift_rate':       float(fr.get('shift_rate', 2.0)),
