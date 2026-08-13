@@ -18,7 +18,7 @@
 #                              logs/bags/<시각>_<모드>_<컨트롤러>/ 에 쌓인다
 #    ./race.sh check           토픽이 실제로 발행 중인지 표로 확인 (주행 중 별도 터미널)
 #    ./race.sh stop            돌고 있는 스택 전부 정리
-#    ./race.sh savemap <이름>  맵핑 끝난 뒤 맵 저장
+#    ./race.sh savemap <이름>  맵핑 끝난 뒤 맵 저장 (맵핑 창을 끄기 전에)
 #    ./race.sh teleop          키보드 텔레옵만 단독 실행
 #    ./race.sh joy             조이스틱 수동 조종 (브링업 포함)
 #    ./race.sh log <이름>      웨이포인트 기록 (수동주행하며 레이싱라인 녹화)
@@ -29,9 +29,9 @@
 #                              → <맵>_wp_tumftm.csv 로 따로 저장, 랩타임 비교용
 #    ./race.sh curvprobe       곡률-속도 캘리브레이션 리그 (slip과 별개 도구)
 #    ./race.sh steertrim       조향 중립값 자동 캘리브레이션 (IMU 기반, 전/후진 반복)
-#    ./race.sh savepose        ★ 지금 AMCL 위치를 초기 추정으로 저장
-#                              RViz "2D Pose Estimate" 로 맵과 스캔을 맞춘 뒤 실행하면
-#                              다음 실행부터 그 위치에서 시작 (맵-스캔 어긋남 해소)
+#    ./race.sh savepose        ★ AMCL 위치를 localization.init_* 로 저장
+#                              맵핑 중이 아니라 ./race.sh box (주행 스택) 위에서.
+#                              새 맵이면 RViz 2D Pose Estimate 로 맞춘 뒤 1회.
 #
 #  게인 튜닝은 ./tune.sh — race_script.yaml 을 열지 않고 값만 바꾼다.
 #    ./tune.sh                       현재 값 보기
@@ -194,6 +194,29 @@ kill_stack () {
     echo "[race.sh] 정리 완료"
 }
 
+print_mapping_howto () {
+    # mapping / mapping-joy 기동 시 터미널에 띄우는 순서. 자세한 설명은
+    # JETSON_COMMANDS.md 「권장 절차」. savemap 은 출발 자세를 안 남긴다.
+    local how=$1
+    echo ""
+    echo ">>> $how로 천천히 트랙 1~2바퀴. 가능하면 출발선에서 SLAM 을 시작하세요."
+    echo ">>>   (맵 원점 = 지금 차 자리. 다음에 차를 여기 놓을 필요는 없습니다)"
+    echo ">>>"
+    echo ">>> 순서 — 이 창은 끄지 말 것 (먼저 Ctrl+C 하면 /map 이 사라져 저장 실패)"
+    echo ">>>   1) 이 창: 주행"
+    echo ">>>   2) 다른 터미널:  ./race.sh savemap <새이름>"
+    echo ">>>   3) 저장 확인 후 이 창에서 Ctrl+C"
+    echo ">>>   4) race_script.yaml 의 map_name / waypoints 를 새 이름으로"
+    echo ">>>   5) ./race.sh waypoints-kappa          ← 라인 생성"
+    echo ">>>   6) 차를 출발 위치에 두고  ./race.sh box"
+    echo ">>>      새 맵이면 노트북 RViz 에서 2D Pose Estimate 로 스캔을 벽에 맞춘 뒤"
+    echo ">>>      ./race.sh savepose                 ← init_x/y/yaw 저장"
+    echo ">>>      (한 번 저장하면 다음부터는 같은 자리에 차만 놓으면 됩니다)"
+    echo ">>>"
+    echo ">>> ★ savepose 는 지금(맵핑 중)이 아닙니다. AMCL 이 있는 주행 스택 위에서 합니다."
+    echo ""
+}
+
 # ★ box(bench) 전용 — bringup 의 joy_node/joy_teleop 을 죽인다.
 #   각 컨트롤러가 발행 직전에 속도를 0 으로 못박아도(d4b65f3), 조이스틱은
 #   /teleop 으로 따로 나가고 mux.yaml 우선순위가 teleop:100 vs drive:10 이라
@@ -264,6 +287,8 @@ case "$CMD" in
         echo "    2) 주행으로 트랙 한 바퀴"
         echo "    3) 터미널B:  ./race.sh savemap $NAME  ← A를 끄기 전에!"
         echo "    4) 저장 확인 후 터미널A 에서 Ctrl+C"
+        echo "    5) yaml map_name 바꾼 뒤 waypoints-kappa → box → (새 맵이면) savepose"
+        echo "       savepose 는 맵핑 중이 아니라 ./race.sh box 위에서."
         exit 1
     fi
 
@@ -279,7 +304,15 @@ case "$CMD" in
     # install 쪽에도 복사 (rebuild 없이 바로 사용)
     INSTALL_MAPS="$WS/install/race_stack/share/race_stack/maps"
     [ -d "$INSTALL_MAPS" ] && cp "$PKG_SHARE_MAPS/$NAME".* "$INSTALL_MAPS/" || true
-    echo "[race.sh] 완료. race_script.yaml의 map_name을 '$NAME'으로 바꾸세요."
+    echo "[race.sh] 완료. race_script.yaml 의 map_name 을 '$NAME' 으로 바꾸세요."
+    echo "[race.sh] 다음:"
+    echo "          1) 맵핑 창에서 Ctrl+C"
+    echo "          2) yaml 의 map_name / waypoints 를 '$NAME' 으로"
+    echo "          3) ./race.sh waypoints-kappa"
+    echo "          4) 차를 출발선에 두고 ./race.sh box"
+    echo "             새 맵 → RViz 2D Pose Estimate 로 맞춘 뒤 ./race.sh savepose"
+    echo "          ※ savepose 는 지금(맵핑 중)이 아닙니다. AMCL 주행 스택이 떠 있어야 합니다."
+    echo "          ※ 맵을 다시 뜨면 좌표가 바뀌므로 웨이포인트와 savepose 를 다시 하세요."
     exit 0 ;;
   teleop)
     exec ros2 run race_stack keyboard_teleop --ros-args -p max_speed:=$(get_yaml speed.mapping_max) ;;
@@ -341,6 +374,8 @@ case "$CMD" in
     fi ;;
   waypoints-kappa)
     # gen_waypoints 와 동일하되 조향각 물리 한계(곡률) 제약이 들어간 버전.
+    # vehicle overlay 의 wheelbase/max_steer 를 읽고, 한계의 85% 만 써서
+    # 라인 R_min 이 차 R_min 과 같아지는 일을 막는다 (08/13: 0.869 vs 0.872).
     # 결과는 <맵이름>_wp_kappa.csv 로 따로 저장되어 기존 결과와 랩타임 비교 가능.
     NAME=${2:-}
     if [ -n "$NAME" ]; then
@@ -425,6 +460,8 @@ if r.returncode != 0:
     sys.exit(1)
 PYEOF
     echo "[race.sh] 저장 완료 — 다음 실행부터 이 위치로 시작합니다"
+    echo "[race.sh]   같은 맵이면 매번 2D Pose Estimate 를 찍을 필요 없습니다."
+    echo "[race.sh]   맵을 다시 뜨면 좌표가 바뀌므로 savepose 를 다시 하세요."
     exit 0 ;;
   "" ) MODE=$(get_yaml mode); CTRL="" ;;
   mapping|mapping-joy) MODE=$CMD; CTRL="" ;;
@@ -442,6 +479,7 @@ PYEOF
     echo "[race.sh] ★ BENCH 모드 — 속도 0 강제. 바퀴는 돌지 않고 조향만 동작합니다."
     echo "[race.sh]   각 컨트롤러 기동 로그에 'BENCH 모드' 경고가 보이는지 확인하세요."
     echo "[race.sh]   ⚠ 그 줄이 없으면 즉시 Ctrl+C — 속도 강제가 안 걸린 것입니다."
+    echo "[race.sh]   새 맵 정렬: 노트북 ./rviz.sh → 2D Pose Estimate → ./race.sh savepose"
     ;;
   q1|q2|q3|race)
     MODE=$CMD
@@ -535,7 +573,23 @@ elif [ "$MODE" = "mapping-joy" ]; then
     BRIDGE="$SCRIPT_DIR/js_joy_bridge.py"
     if [ -f "$BRIDGE" ]; then
         echo "[race.sh] js_joy_bridge → $JS_DEV  (SDL joy_node 대신, 혼자 주행 방지)"
-        python3 "$BRIDGE" "$JS_DEV" &
+        python3 "$BRIDGE" "$JS_DEV" &#    ./race.sh savemap <이름>  맵핑 끝난 뒤 맵 저장
+#    ./race.sh savepose        ★ 지금 AMCL 위치를 초기 추정으로 저장
+#                              RViz "2D Pose Estimate" 로 맵과 스캔을 맞춘 뒤 실행하면
+#                              다음 실행부터 그 위치에서 시작 (맵-스캔 어긋남 해소)
+    echo "[race.sh] 완료. race_script.yaml의 map_name을 '$NAME'으로 바꾸세요."
+    echo ""
+    echo ">>> 키보드로 천천히 트랙 1~2바퀴 돌면서 맵을 만드세요."
+    echo ">>> ★ 이 창을 끄지 말고, 다른 터미널에서 저장하세요:"
+    echo ">>>       ./race.sh savemap <맵이름>"
+    echo ">>> ★ 저장이 끝난 뒤에 이 창에서 Ctrl+C  (먼저 끄면 /map이 사라져 저장 실패)"
+    echo ""
+    echo ""
+    echo ">>> 조이스틱으로 천천히 트랙 1~2바퀴 돌면서 맵을 만드세요."
+    echo ">>> ★ 이 창을 끄지 말고, 다른 터미널에서 저장하세요:"
+    echo ">>>       ./race.sh savemap <맵이름>"
+    echo ">>> ★ 저장이 끝난 뒤에 이 창에서 Ctrl+C  (먼저 끄면 /map이 사라져 저장 실패)"
+    echo ""
         JOY_PID=$!
     else
         echo "[race.sh] js_joy_bridge 없음 — joy_node device_id=0"
