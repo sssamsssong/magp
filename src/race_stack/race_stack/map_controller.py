@@ -59,7 +59,8 @@ from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import Bool, ColorRGBA, Float64
 
-from race_stack.speed_profile import solve_profile, LaunchLimiter
+from race_stack.speed_profile import (
+    solve_profile, LaunchLimiter, preview_speed, steer_speed_limit)
 from visualization_msgs.msg import Marker
 
 from race_stack.stanley_controller import _REPO_ROOT, _normalize, write_run_config
@@ -187,8 +188,8 @@ class MapController(Node):
         self.declare_parameter('launch_time', 3.0)
 
         # 구동계 지연 [s]. 지령→실측 속도의 상호상관으로 실측한 값(2026-08-09:
-        # 250~290ms). 이만큼 앞의 프로파일 **최솟값**을 미리 지령해 감속을
-        # 앞당긴다. 0 = 끔. 자세한 이유는 _profile_speed 참고.
+        # 250~290ms, 고속에선 410ms). _profile_speed 가 이 지연 **과** 제동거리
+        # 중 긴 쪽을 본다. 0 = 지연항만 끔 (제동거리 미리보기는 a_brk 로 남는다).
         self.declare_parameter('speed_lag',   0.25)
 
         # ★ 박스 위 벤치 모드. true 면 **발행 직전에 속도를 0 으로 못박는다**
@@ -261,6 +262,8 @@ class MapController(Node):
 
         wp_file = self.get_parameter('waypoint_file').value
         self._wp_ds = 0.1
+        self._a_acc = 0.0
+        self._a_brk = 0.0
         self.wp = self._load_waypoints(wp_file)
         if self.wp is None:
             self.get_logger().error(
@@ -276,7 +279,6 @@ class MapController(Node):
 
         # ── 주행 상태 ───────────────────────────────────────────────────
         self.enabled = False    # ★ mission_manager 의 /race/enabled 를 받아야 켜진다
-        self._a_acc  = 0.0      # 프로파일이 실제로 쓴 가속 상한 (기동 시 채워진다)
         self._launch = LaunchLimiter()   # 출발 직후 가속 제한 (휠 스핀 방지)
         self.pos = None
         self.yaw = 0.0
@@ -420,6 +422,7 @@ class MapController(Node):
             self.get_logger().warn("a_brake 는 폐기됐다 — a_lon_brk 를 쓸 것.")
 
         self._a_acc = float(info['a_acc'])   # 출발 제한이 여기로 복귀한다
+        self._a_brk = float(info['a_brk'])   # 제동 미리보기
         self.get_logger().info(
             f"속도 프로파일 η={info['eta']:.2f}  예산 {info['a_g']:.2f}㎧² "
             f"(가속 {info['a_acc']:.2f} / 제동 {info['a_brk']:.2f})")
@@ -447,28 +450,15 @@ class MapController(Node):
         return v
 
     def _profile_speed(self, near, v):
-        """프로파일에서 지령 속도를 뽑되 **구동계 지연만큼 미리 감속**한다.
+        """프로파일에서 지령 속도를 뽑되 **제동거리와 구동 지연 중 긴 쪽**을 본다.
 
-        2026-08-09 실측 (driven_path.csv 의 speed 와 cmd_v 상호상관):
-        지령→실측 지연이 **250~290ms**. 4.7㎧ 이면 1.2m 를 지나서야 반응한다.
-        헤어핀(s=14m, 프로파일 2.09㎧) 진입에서 실측이 3.30㎧ 로 1.2㎧ 초과했고,
-        그 다음 점(s=16m)에서 라인 바깥으로 0.39m 밀렸다 — 그립이 모자라서가
-        아니라 **감속을 늦게 시작해서**다.
-
-        보정은 감속 방향에만 건다:  앞으로 v·t_lag 만큼의 구간에서 프로파일의
-        **최솟값**을 취한다. 가속까지 앞당기면 코너를 다 빠져나오기 전에 밟게 되어
-        마찰원을 넘는다 — 브레이크는 미리, 액셀은 제때가 맞다.
+        지연만 보면 v·t_lag 앞만 감속한다. 제동거리 v²/(2 a_brk) 가 더 길면
+        그걸 쓴다. a_brk 는 프로파일(오버레이 a_lon_brk, 0 이면 자동) 그대로.
+        가속은 앞당기지 않는다.
         """
-        i = int(near)
-        lag = float(self.p('speed_lag'))
-        if lag <= 0.0 or self._wp_ds <= 0.0:
-            return float(self._v_profile[i])
-        k = int(round(v * lag / self._wp_ds))
-        if k <= 0:
-            return float(self._v_profile[i])
-        n = len(self._v_profile)
-        idx = (np.arange(i, i + k + 1) % n)
-        return float(self._v_profile[idx].min())
+        return preview_speed(
+            self._v_profile, near, v, self._wp_ds,
+            lag=float(self.p('speed_lag')), a_brk=self._a_brk)
 
     def _launch_limit(self, speed, dt):
         """출발 가속 제한. 로직은 speed_profile.LaunchLimiter (컨트롤러 공용).
@@ -830,6 +820,13 @@ class MapController(Node):
         # 값을 못 보고 다음 틱에서 다시 튄다.
         speed *= self._frenet_speed_scale()
         speed = self._launch_limit(speed, 0.02)   # 타이머 주기 50Hz
+        # 조향이 포화되면 그 곡률을 마찰 예산 안에서 돌 수 있는 속도로 자른다.
+        v_lock = steer_speed_limit(
+            steer, float(self.p('wheelbase')),
+            float(self.p('mu')) * float(self.p('pac_d')),
+            float(self.p('grip_util')))
+        if v_lock < speed:
+            speed = v_lock
 
         self.get_logger().info(
             f'[MAP] κ={self._curvature[near]:.3f}  '

@@ -47,7 +47,8 @@ from sensor_msgs.msg import LaserScan
 # ★ Frenet 회피 로직은 obstacle_avoid 로 **이동**했다 (2026-08-09).
 #   컨트롤러마다 복붙하지 않으려는 것 — frenet_planner 노드와 MAP 이
 #   같은 코드를 쓴다. 로직은 한 글자도 안 바뀌었다.
-from race_stack.speed_profile import solve_profile, LaunchLimiter
+from race_stack.speed_profile import (
+    solve_profile, LaunchLimiter, preview_speed, steer_speed_limit)
 from race_stack.obstacle_avoid import (ObstacleAvoidMixin, _load_map,
                                        _world_to_img)
 from std_msgs.msg import Bool, ColorRGBA
@@ -147,6 +148,8 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self.declare_parameter('grip_util',  0.6)
         self.declare_parameter('a_lon_acc',  0.0)   # 0=자동(후륜 하중분율)
         self.declare_parameter('a_lon_brk',  0.0)   # 0=자동(예산 전체)
+        # 구동계 지연 [s]. MAP 과 같은 preview_speed — 지연과 제동거리 중 긴 쪽.
+        self.declare_parameter('speed_lag',  0.25)
         # 출발 직후만 가속을 더 조인다 — 정지에서 뗄 때 휠 스핀이 커서 odom 이
         # 거리를 과대보고하고, 그게 종방향 위치 오차로 남아 첫 코너를 일찍 돈다.
         # 실측 근거와 로직은 speed_profile.LaunchLimiter 참고. 0 = 끔.
@@ -371,6 +374,8 @@ class StanleyController(ObstacleAvoidMixin, Node):
         # ── 곡률 사전계산 (피드포워드용, 로드 시 1회) ──────────────────
         self.kappa  = None
         self._wp_ds = 0.1
+        self._a_acc = 0.0     # 프로파일이 실제로 쓴 가속 상한 (기동 시 채워진다)
+        self._a_brk = 0.0     # 제동 상한 — 프로파일/오버레이 a_lon_brk 그대로
         if self.wps is not None and len(self.wps) > 10:
             self.kappa, self._wp_ds = self._precompute_curvature()
             self._v_profile = self._build_speed_profile()
@@ -379,7 +384,6 @@ class StanleyController(ObstacleAvoidMixin, Node):
                 f'(spacing {self._wp_ds:.3f}m)')
 
         # ── state ─────────────────────────────────────────────────────
-        self._a_acc  = 0.0     # 프로파일이 실제로 쓴 가속 상한 (기동 시 채워진다)
         self._launch = LaunchLimiter()   # 출발 직후 가속 제한 (휠 스핀 방지)
         self.enabled = False   # ★ mission_manager 의 /race/enabled(래치)를 받아야 켜진다.
         #   True 로 두면 그 값이 도착하기 전 한 틱이라도 먼저 나가버린다.
@@ -518,6 +522,13 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self.yaw = pose[2]
         steer, speed = self._compute_cmd(*pose)
         speed = self._launch_limit(speed)
+        # 조향 포화 시 그 곡률을 마찰 예산 안에서 돌 수 있는 속도로 자른다.
+        p = lambda n: self.get_parameter(n).value
+        v_lock = steer_speed_limit(
+            steer, self.wheelbase, float(p('mu')) * float(p('pac_d')),
+            float(p('grip_util')))
+        if v_lock < speed:
+            speed = v_lock
         self._publish_cmd(steer, speed)
         self._update_car_trail(pose[0], pose[1])
 
@@ -730,7 +741,10 @@ class StanleyController(ObstacleAvoidMixin, Node):
 
         # ── target speed from CSV ──────────────────────────────────────
         # ★ 마찰원 프로파일에서 읽는다 (CSV×배수 + clip 아님 — 위 grip_util 주석)
-        cmd_v = float(self._v_profile[nearest])
+        #   제동거리·구동 지연만큼 앞을 본다.
+        cmd_v = preview_speed(
+            self._v_profile, nearest, speed, self._wp_ds,
+            lag=float(self.get_parameter('speed_lag').value), a_brk=self._a_brk)
         if self._avoid_active and not self.lane_free:
             cmd_v *= self.obs_decel
         cmd_v = max(cmd_v, self.min_speed)
@@ -772,6 +786,7 @@ class StanleyController(ObstacleAvoidMixin, Node):
             f"속도 프로파일 η={info['eta']:.2f}  예산 {info['a_g']:.2f}㎧² "
             f"(가속 {info['a_acc']:.2f} / 제동 {info['a_brk']:.2f})")
         self._a_acc = float(info['a_acc'])   # 출발 제한이 여기로 복귀한다
+        self._a_brk = float(info['a_brk'])   # 제동 미리보기
         self.get_logger().info(
             f"  v {info['v_min']:.2f}~{info['v_max']:.2f}㎧ (중앙 {info['v_med']:.2f}) "
             f"| 예상 랩 {info['lap_time']:.1f}s"

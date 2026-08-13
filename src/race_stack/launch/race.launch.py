@@ -438,6 +438,8 @@ def generate_launch_description():
                 'launch_acc':      launch_acc,
                 'launch_time':     launch_time,
                 'hard_cap':        hard_cap,
+                # 구동계 지연 보상 — 감속만 앞당긴다 (MAP 과 같은 preview_speed)
+                'speed_lag':       float(_lim.get('speed_lag', 0.25)),
                 'mu':              veh['mu'],
                 'pac_d':           veh['pac_d'],
                 'lf':              veh['lf'],
@@ -562,7 +564,7 @@ def generate_launch_description():
                 # 출발 직후만 가속을 더 조인다 (휠 스핀 → 종방향 허위거리 방지)
                 'launch_acc':    launch_acc,
                 'launch_time':   launch_time,
-                # 구동계 지연 보상 (실측 0.25~0.29s) — 감속만 앞당긴다
+                # 구동계 지연 + 제동거리 미리보기 (실측 지연 0.25~0.41s, 제동 ~2㎧²)
                 'speed_lag':     float(_lim.get('speed_lag', 0.25)),
                 # ↓ 폐기. 옛 설정이 죽지 않게만 남겨둔다 (컨트롤러가 경고하고 무시)
                 'a_brake':       float(mp.get('a_brake',     0.0)),

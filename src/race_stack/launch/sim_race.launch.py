@@ -88,6 +88,7 @@ def generate_launch_description():
         'a_lon_acc':     a_lon_acc,
         'a_lon_brk':     a_lon_brk,
         'hard_cap':      hard_cap,
+        'speed_lag':     float(_lim.get('speed_lag', 0.25)),
         'mu':            float(mc.get('mu',          1.0)),
         'mass':          float(mc.get('mass',         3.354)),
         'lf':            float(mc.get('lf',           0.1757)),
