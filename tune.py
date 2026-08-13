@@ -278,6 +278,36 @@ def format_value(v):
     return str(v)
 
 
+def merge_flow_map(rest, subkey, new_val):
+    """인라인 딕셔너리 줄에서 **한 하위 키만** 바꾼 문자열을 돌려준다.
+
+    '{q1: 0.5, q2: 0.5, q3: 0.5}' + ('q2', 0.2) → '{q1: 0.5, q2: 0.2, q3: 0.5}'
+
+    ★ 왜 필요한가: find_line 은 'a.b' 두 단계까지만 줄을 찾는다.
+      'limits.grip_util.q2' 처럼 세 단계가 오면 grip_util 줄을 찾아놓고
+      **그 줄 전체를 스칼라로 덮어써** 나머지 모드가 통째로 사라졌다
+      (2026-08-13: grip_util: {q1..race} → grip_util: 0.2 로 뭉개짐).
+      트랜잭션 덕에 원본은 살았지만 KeyError 로 실패했다.
+    돌려줄 수 없으면 None (블록 스타일 딕셔너리 등).
+    """
+    value_txt, _comment, _off = split_value_comment(rest)
+    txt = value_txt.strip()
+    if not (txt.startswith('{') and txt.endswith('}')):
+        return None
+    out, found = [], False
+    for part in txt[1:-1].split(','):
+        if ':' not in part:
+            out.append(part.strip())
+            continue
+        k, v = part.split(':', 1)
+        if k.strip() == subkey:
+            out.append(f'{k.strip()}: {format_value(new_val)}')
+            found = True
+        else:
+            out.append(f'{k.strip()}: {v.strip()}')
+    return '{' + ', '.join(out) + '}' if found else None
+
+
 def write_value(lines, idx, m, new_val):
     """주석과 정렬 열을 보존하며 값만 교체한 새 줄을 만든다."""
     orig = lines[idx]
@@ -632,7 +662,15 @@ def main(argv):
         if idx is None:
             die(f'{fkey} 의 줄을 {os.path.basename(path)} 에서 찾지 못했다 '
                 f'— 수동으로 확인할 것')
-        pending.append((path, idx, lm, new))
+        # 세 단계 키(예: tuning.grip_util.q2)는 그 줄이 인라인 딕셔너리다.
+        # 줄 전체를 덮으면 형제 키가 사라지므로 해당 항목만 바꿔 끼운다.
+        line_val = new
+        if len(fkey.split('.')) >= 3:
+            line_val = merge_flow_map(lm.group(3), fkey.split('.')[2], new)
+            if line_val is None:
+                die(f'{fkey} 는 인라인 딕셔너리 줄이 아니라 자동 수정할 수 없다 '
+                    f'— {os.path.basename(path)} 를 직접 고칠 것')
+        pending.append((path, idx, lm, line_val))
         entries.append({'key': key, 'old': old, 'new': new,
                         'file': path, 'fkey': fkey})
 
