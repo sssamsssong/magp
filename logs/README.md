@@ -1,8 +1,12 @@
 # logs/
 
-`stanley_controller.py` / `pure_pursuit.py` 가 **주행 종료 시 1회** 저장하는
-실주행 기록. 팀 전체 공유용 (개인 대화 기록인 `chat_log/`와 다르게 gitignore
-안 됨 — git으로 커밋해서 공유).
+`stanley_controller.py` / `pure_pursuit.py` / `map_controller.py` 가
+**주행 종료 시 1회** 저장하는 실주행 기록. CSV 와 `--bag` 녹화는 둘 다
+`logs/` 에 쌓이고, 주행 창 Ctrl+C 뒤 `race.sh` 가 car1/car2 에 커밋·푸시한다.
+
+팀 공유기에서는 GitHub 가 안 되므로 그때는 커밋만 되고, 인터넷 되는
+와이파이에서 `./race.sh push-logs` 하면 올라간다. 노트북은
+`git pull origin car1` (또는 car2).
 
 ## 폴더 구조
 

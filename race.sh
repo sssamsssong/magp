@@ -15,7 +15,10 @@
 #                              속도만 0. 토픽 통신·RViz 표시·조향 서보 확인용.
 #    ./race.sh <모드> --bag    ★ 주행 중 원시 토픽을 bag 으로 녹화 (분당 약 9MB)
 #                              /scan · odom · IMU · pose · drive. 사후 분석용.
-#                              logs/bags/<시각>_<모드>_<컨트롤러>/ 에 쌓인다
+#                              logs/bags/<시각>_<모드>_<컨트롤러>/ 에 쌓이고,
+#                              Ctrl+C 후 CSV·bag 을 car1/car2 에 커밋·푸시한다.
+#    ./race.sh push-logs       아직 안 올라간 logs/ 를 커밋·푸시 (팀 공유기에서
+#                              푸시가 실패한 뒤, 인터넷 되는 와이파이에서)
 #    ./race.sh check           토픽이 실제로 발행 중인지 표로 확인 (주행 중 별도 터미널)
 #    ./race.sh stop            돌고 있는 스택 전부 정리
 #    ./race.sh savemap <이름>  맵핑 끝난 뒤 맵 저장 (맵핑 창을 끄기 전에)
@@ -234,9 +237,53 @@ bench_kill_joy () {
     echo "[race.sh] BENCH — joy_node/joy_teleop 정리 완료 (조이스틱 입력 무시)"
 }
 
+# logs/ (CSV + bag) 를 현재 브랜치에 커밋하고 푸시한다. 코드 WIP 는 안 건드린다.
+commit_logs () {
+    cd "$SCRIPT_DIR" || return 0
+    git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+    local br; br=$(git rev-parse --abbrev-ref HEAD)
+    if [ "$br" = "main" ]; then
+        echo "[race.sh] 로그 git 생략 — 브랜치가 main 입니다. car1/car2 에서 올리세요."
+        return 0
+    fi
+    git add logs/ || true
+    local need_push=0
+    if ! git diff --cached --quiet; then
+        echo "[race.sh] 로그 커밋:"
+        git diff --cached --name-only | sed 's/^/          /'
+        local names
+        names=$(git diff --cached --name-only \
+            | awk -F/ '/^logs\// && NF>=2 {print $2}' \
+            | sort -u | tr '\n' ' ' | sed 's/ *$//')
+        git commit -m "$(cat <<EOF
+logs: ${names:-주행 기록}
+
+EOF
+)" || true
+        need_push=1
+    fi
+    if git rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+        local ahead; ahead=$(git rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0)
+        [ "$ahead" != "0" ] && need_push=1
+    elif [ "$need_push" = "0" ]; then
+        return 0
+    fi
+    [ "$need_push" = "0" ] && return 0
+    echo "[race.sh] 로그 푸시 ($br)…"
+    if git push -u origin HEAD; then
+        echo "[race.sh] 올렸습니다. 노트북에서 git pull origin $br"
+    else
+        echo "[race.sh] 푸시 실패 — 팀 공유기는 GitHub 가 안 됩니다."
+        echo "          인터넷 되는 와이파이에서  ./race.sh push-logs"
+    fi
+}
+
 case "$CMD" in
   stop)
     kill_stack; exit $? ;;
+  push-logs)
+    commit_logs
+    exit 0 ;;
   go)
     # 출발 게이트 해제 (mission.start_gate: true 일 때).
     # 같은 터미널에서 Enter 를 못 쓰는 경우(tmux·jetson.sh 원격 등) 용.
@@ -375,7 +422,7 @@ case "$CMD" in
   waypoints-kappa)
     # gen_waypoints 와 동일하되 조향각 물리 한계(곡률) 제약이 들어간 버전.
     # vehicle overlay 의 wheelbase/max_steer 를 읽고, 한계의 85% 만 써서
-    # 라인 R_min 이 차 R_min 과 같아지는 일을 막는다 (08/13: 0.869 vs 0.872).
+    # 라인 R_min 이 차 R_min 과 같아지는 일을 막는다 (추종 오차만큼 안쪽은 κ 증가).
     # 결과는 <맵이름>_wp_kappa.csv 로 따로 저장되어 기존 결과와 랩타임 비교 가능.
     NAME=${2:-}
     if [ -n "$NAME" ]; then
@@ -633,8 +680,8 @@ elif [ "$RECORD_BAG" = "1" ]; then
         /commands/servo/position /race/enabled /diagnostics \
         /particle_cloud >/dev/null 2>&1 &
     BAG_PID=$!
-    # SIGINT 로 곱게 닫고, 안 죽으면 3초 뒤 강제 종료
-    trap 'kill -INT $BAG_PID 2>/dev/null; ( sleep 3; kill -9 $BAG_PID 2>/dev/null ) & wait $BAG_PID 2>/dev/null' EXIT INT TERM
+    # SIGINT 로 곱게 닫고, 안 죽으면 3초 뒤 강제 종료. 닫힌 bag 을 git 에 올린다.
+    trap 'kill -INT $BAG_PID 2>/dev/null; ( sleep 3; kill -9 $BAG_PID 2>/dev/null ) & wait $BAG_PID 2>/dev/null; commit_logs' EXIT INT TERM
 
     ros2 launch race_stack race.launch.py mode:=$MODE \
         ${CTRL:+controller:=$CTRL} ${BENCH:+bench:=true} || true
@@ -642,7 +689,7 @@ elif [ "$RECORD_BAG" = "1" ]; then
     kill -INT $BAG_PID 2>/dev/null || true
     wait $BAG_PID 2>/dev/null || true
     echo "[race.sh] bag 저장 완료: $BAG_DIR  ($(du -sh "$BAG_DIR" 2>/dev/null | cut -f1))"
-    echo "[race.sh]   ※ logs/ 는 .gitignore 다 — 공유하려면 따로 옮길 것"
+    commit_logs
 elif [ -n "${BENCH:-}" ]; then
     # bench 는 컨트롤러 속도를 0 으로 못박지만(각 컨트롤러의 발행 직전), bringup 이
     # 함께 띄우는 joy_node+joy_teleop 은 /teleop 으로 따로 나가 그 경로를 우회한다.
@@ -654,6 +701,8 @@ elif [ -n "${BENCH:-}" ]; then
     bench_kill_joy
     wait $LAUNCH_PID
 else
-    exec ros2 launch race_stack race.launch.py mode:=$MODE \
-        ${CTRL:+controller:=$CTRL}
+    # exec 하면 셸이 교체돼 Ctrl+C 뒤 로그 커밋을 못 한다.
+    trap commit_logs EXIT
+    ros2 launch race_stack race.launch.py mode:=$MODE \
+        ${CTRL:+controller:=$CTRL} || true
 fi

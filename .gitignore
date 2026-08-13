@@ -30,9 +30,6 @@ chat_log/
 forza_traj_opt/
 global_racetrajectory_optimization/
 
-# 실차 주행 로그
-logs/
-
 # sim.sh 자동 생성 심링크
 f1TENTH-contest_full_stack/sim_ws/src/f1tenth_gym_ros/maps/*_waypoints.csv
 
