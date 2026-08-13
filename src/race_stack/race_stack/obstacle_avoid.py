@@ -135,16 +135,95 @@ class ObstacleAvoidMixin:
         # (N, M, 2) — 후보 × 경로점 × 좌표
         cands = seg[None, :, :] + self.fr_grid[:, None, None] * left[None, :, :]
         return cands, seg, left
-    def _frenet_select(self, px: float, py: float, yaw: float) -> float:
-        """후보 오프셋 중 비용이 최소인 것을 고른다 (m, 좌측 +).
+    # ── 소비자가 안 정해도 동작하도록 하는 기본값 ─────────────────────
+    #   frenet_planner 와 stanley_controller 가 각자 파라미터로 덮어쓴다.
+    #   여기 기본값이 없으면 한쪽만 갱신했을 때 AttributeError 로 죽는다.
+    fr_min_room = 0.22      # 통과 여유 하한 [m] = 차 반폭 0.17 + 여유 0.05
+    fr_gap_hyst = 0.10      # 반대쪽 통로로 갈아탈 때 요구하는 우세폭 [m]
 
-        비용 = w_offset·|d|            라인에서 멀어질수록 손해 (복귀력)
-             + w_change·|d - 현재|     급하게 바꾸지 않도록 (히스테리시스)
-             - w_clear·min(여유, cap)  장애물에서 멀수록 이득 (cap 이상은 무의미)
-        여유 < frenet_clearance 이거나 트랙 밖으로 나가는 후보는 **실행 불가**.
+    def _wall_room(self, flat: np.ndarray) -> np.ndarray:
+        """각 점에서 맵 벽까지의 거리 [m]. 맵이 없으면 +inf.
+
+        거리변환을 기동 시 한 번 만들어 두므로 조회는 배열 인덱싱 한 번이다.
+        맵 밖으로 나간 점은 0 (= 갈 수 없는 곳) 으로 본다.
+        """
+        wd = getattr(self, 'wall_dist_m', None)
+        if wd is None or self.map_meta is None:
+            return np.full(len(flat), np.inf)
+        h, w = self.map_meta[0], self.map_meta[1]
+        res, ox, oy = self.map_meta[2], self.map_meta[3], self.map_meta[4]
+        img = _world_to_img(flat, h, res, ox, oy)
+        ix, iy = img[:, 0], img[:, 1]
+        ok = (ix >= 0) & (ix < w) & (iy >= 0) & (iy < h)
+        out = np.zeros(len(flat))
+        out[ok] = wd[iy[ok], ix[ok]]
+        return out
+
+    @staticmethod
+    def _runs(mask: np.ndarray):
+        """연속된 True 구간을 [(시작, 끝+1), ...] 로. 빈 배열이면 []."""
+        out = []
+        i = 0
+        n = len(mask)
+        while i < n:
+            if mask[i]:
+                j = i
+                while j + 1 < n and mask[j + 1]:
+                    j += 1
+                out.append((i, j + 1))
+                i = j + 1
+            else:
+                i += 1
+        return out
+
+    def _frenet_select(self, px: float, py: float, yaw: float) -> float:
+        """후보 오프셋 중 하나를 고른다 (m, 좌측 +).
+
+        ★★ 2026-08-11 재작성. 그 전 판정이 **레이싱라인 자신을 27% 의 프레임에서
+            "트랙 밖" 으로 탈락시키고 있었다.** ★★
+
+          옛 방식은 `inside = 마스크안(모든 점).all()` 이었다. 호라이즌이
+          2.9~5.0m 인데 그 구간 전체가 벽에서 track_margin(0.28m) 밖이어야
+          통과다. cool_clean 은 라인 점의 0.7% 가 0.28m 보다 벽에 가까운데,
+          5m 창에 `all()` 을 걸면 그 0.7% 가 **27% 프레임 탈락**으로 증폭된다.
+          17개 후보 중 중앙 5개만 살아남고 전부 살아남는 프레임은 0% 였다.
+
+          결과가 로그에 그대로 있었다 — **장애물이 없을 때 더 많이 움직였다**:
+              q1(장애물 없음)  |d| 중앙 0.075m  p90 0.375m  |d|>0.1 이 31%
+              q2(장애물 있음)  |d| 중앙 0.075m  p90 0.225m           17%
+          "회피가 안 된다" 의 절반은 회피 로직이 아니라 이 판정이었다.
+
+        이제 예/아니오 대신 **통과 여유(room)** 를 잰다:
+
+            room[i] = min over 경로점 ( 벽까지 거리 , 장애물까지 거리 )
+                    = 그 후보 라인으로 갈 때 차가 확보하는 최소 반경
+
+          · 벽 거리는 거리변환 조회 한 번 (마스크와 같은 비용)
+          · 실행가능 = 벽여유 ≥ fr_min_room **그리고** 장애물여유 ≥ fr_clear
+            두 임계를 따로 두는 이유는 아래 본문 주석 참고 — 합치면 장애물
+            요구치가 조용히 내려간다.
+            fr_min_room 0.22m 면 두 트랙 모두 레이싱라인 탈락 0% 다
+            (실측 라인→벽 최소: cool_clean 0.280m, fun_clean 0.360m)
+
+        그리고 **"더 넓은 쪽" 을 실제로 고른다** (2026-08-11 요구사항):
+
+          실행가능한 후보들을 연속 구간(run)으로 묶으면 각 run 이 "그쪽으로
+          지나갈 수 있는 통로" 다. run 의 점수는 그 안의 **최대 room** —
+          곧 그쪽으로 갔을 때 낼 수 있는 가장 넓은 여유다. 점수가 큰 run 을
+          고른다. 장애물이 왼쪽에 치우쳐 있으면 오른쪽 run 의 room 이 크므로
+          자동으로 오른쪽을 고른다.
+
+          ★ 좌우 뒤집힘 방지: 지금 쓰는 오프셋이 든 run 을 계속 쓴다. 다른
+            run 이 fr_gap_hyst 이상 더 넓을 때만 갈아탄다. 이게 없으면
+            장애물 정면에서 좌우가 프레임마다 바뀌어 조향이 진동한다.
+
+        고른 run 안에서는 예전 비용으로 한 점을 정한다 — 라인 복귀력(w_offset)이
+        살아 있으므로 **장애물이 지나가면 저절로 d=0 으로 돌아온다.**
+
+            비용 = w_offset·|d| + w_change·|d-현재| - w_clear·min(room, cap)
 
         ★ 비용 벡터를 투표 창만큼 이동평균한다. 라이다 한 프레임의 노이즈로
-          목표 오프셋이 튀면 그게 곧 조향 킥이 된다 (검출 쪽 free_votes 와 같은 이유).
+          목표 오프셋이 튀면 그게 곧 조향 킥이 된다.
         """
         cands, seg, left = self._frenet_paths(px, py)
         if cands is None:
@@ -163,43 +242,61 @@ class ObstacleAvoidMixin:
             obs = obs[near_m]
         if len(obs):
             d_obs = scipy.spatial.distance.cdist(flat, obs).min(axis=1)
-            clear = d_obs.reshape(N, M).min(axis=1)          # 후보별 최소 여유
         else:
-            clear = np.full(N, np.inf)
+            d_obs = np.full(N * M, np.inf)
 
-        # ── 트랙 경계 이탈 검사 ────────────────────────────────────────
-        inside = np.ones(N, bool)
-        if self.fr_bounds and getattr(self, 'track_mask', None) is not None:
-            h, w = self.map_meta[0], self.map_meta[1]
-            res, ox, oy = self.map_meta[2], self.map_meta[3], self.map_meta[4]
-            img = _world_to_img(flat, h, res, ox, oy)
-            ix, iy = img[:, 0], img[:, 1]
-            ok = (ix >= 0) & (ix < w) & (iy >= 0) & (iy < h)
-            good = np.zeros(N * M, bool)
-            good[ok] = self.track_mask[iy[ok], ix[ok]]
-            inside = good.reshape(N, M).all(axis=1)
+        # ── 벽까지의 여유 ─────────────────────────────────────────────
+        d_wall = (self._wall_room(flat) if self.fr_bounds
+                  else np.full(N * M, np.inf))
 
-        # ── 비용 ───────────────────────────────────────────────────────
+        # ── 통과 여유 ─────────────────────────────────────────────────
+        #   ★ 벽과 장애물은 **요구치가 다르다.** 둘을 min 으로 합쳐 임계 하나를
+        #     걸면 안 된다 (2026-08-11 첫 시도에서 실제로 그랬다):
+        #       · 벽    — 맵에 있고 안 움직인다. 차 반폭 + 여유(0.22m)면 지나간다
+        #       · 장애물 — 위치가 덜 정확하고 움직일 수 있다. 더 크게(0.30m) 잡는다
+        #     합치면 장애물 요구치가 0.30 → 0.22 로 조용히 내려가, 검증에서
+        #     q1 은 좋아졌는데 **q2 의 회피량까지 같이 줄었다** (|d|>0.1 이 16%→5%).
+        #     "여유가 늘었다" 가 아니라 "덜 피하게 됐다" 는 뜻이라 정반대다.
+        obs_room  = d_obs.reshape(N, M).min(axis=1)
+        wall_room = d_wall.reshape(N, M).min(axis=1)
+        # 넓이 순위를 매길 때는 실제로 차가 쓸 수 있는 폭이므로 둘 중 좁은 쪽
+        room = np.minimum(obs_room, wall_room)
+
         d = self.fr_grid
+        feasible = (wall_room >= self.fr_min_room) & (obs_room >= self.fr_clear)
+
         cost = (self.fr_w_off * np.abs(d)
                 + self.fr_w_chg * np.abs(d - self._shift_cur)
-                - self.fr_w_clr * np.minimum(clear, self.fr_clr_cap))
-        feasible = inside & (clear >= self.fr_clear)
-
+                - self.fr_w_clr * np.minimum(room, self.fr_clr_cap))
         self._fr_costs.append(cost)
         cost_avg = np.mean(np.stack(self._fr_costs), axis=0)
 
-        if feasible.any():
-            masked = np.where(feasible, cost_avg, np.inf)
-            best = int(np.argmin(masked))
+        runs = self._runs(feasible)
+        if runs:
+            # ── 어느 쪽이 더 넓은가 ────────────────────────────────────
+            scores = [float(room[a:b].max()) for a, b in runs]
+            pick = int(np.argmax(scores))
+            # 지금 쓰는 오프셋이 든 run 은 웬만하면 유지한다 (좌우 진동 방지)
+            cur_i = int(np.argmin(np.abs(d - self._shift_cur)))
+            for k, (a, b) in enumerate(runs):
+                if a <= cur_i < b:
+                    if scores[pick] < scores[k] + self.fr_gap_hyst:
+                        pick = k
+                    break
+            a, b = runs[pick]
+            best = a + int(np.argmin(cost_avg[a:b]))
+            self._fr_gap_room = scores[pick]
+            self._fr_status = 0.0 if abs(float(d[best])) < 1e-3 else 1.0
         else:
-            # 전부 막혔다 — 그나마 가장 여유 있는 쪽으로. 여기까지 오면 속도를
+            # 전부 막혔다 — 그나마 가장 넓은 쪽으로. 여기까지 오면 속도를
             # 줄이는 게 정답이지만 그건 AEB/감속의 영역이고, 조향은 최선을 다한다.
-            best = int(np.argmax(np.where(inside, clear, -np.inf))
-                       if inside.any() else np.argmax(clear))
+            best = int(np.argmax(room))
+            self._fr_gap_room = float(room[best])
+            self._fr_status = 2.0
             self.get_logger().warn(
-                f'[frenet] 실행 가능한 후보 없음 — 최대여유 {clear[best]:.2f}m '
-                f'(요구 {self.fr_clear:.2f}m), d={d[best]:+.2f}m',
+                f'[frenet] 통과 가능한 후보 없음 — 최대 여유 {room[best]:.2f}m '
+                f'(요구 {self.fr_min_room:.2f}m), d={d[best]:+.2f}m. '
+                f'감속해야 하는 상황이다',
                 throttle_duration_sec=1.0)
 
         self._fr_best_d = float(d[best])
@@ -267,6 +364,10 @@ class ObstacleAvoidMixin:
         free = (~occ_top).astype(np.uint8)
         dist_m = cv2.distanceTransform(free, cv2.DIST_L2, 5) * res
         self.track_mask = dist_m > margin
+        # ★ 거리장 자체를 보관한다 (2026-08-11). 마스크는 "여기 들어가도 되나" 라는
+        #   예/아니오뿐인데, 회피는 "여기가 **얼마나 넓나**" 를 알아야 한다.
+        #   _frenet_select 가 후보별 통과 여유(room)를 이걸로 잰다.
+        self.wall_dist_m = dist_m
 
         src = '맵 자유공간'
         # 경계 폴리곤이 있으면 "트랙 밖 자유공간"(피트·관중석 등)을 덜어내는
@@ -352,7 +453,42 @@ class ObstacleAvoidMixin:
         # (meas < 0 - deficit) 이 항상 거짓이 되어 장애물로 오인하지 않는다.
         return np.where(escaped, exp, 0.0)
     def _raycast_obstacle_pts(self, msg: LaserScan) -> np.ndarray:
-        """기대보다 뚜렷하게 짧게 끊긴 빔만 골라 map 좌표 점으로 돌려준다."""
+        """장애물로 볼 빔만 골라 map 좌표 점으로 돌려준다.
+
+        검사 두 가지의 **합집합**이다. 하나로는 못 잡는 영역이 서로 다르다.
+
+        (A) 기대보다 뚜렷하게 짧게 끊긴 빔        meas < 기대 − deficit
+            벽 **근처**의 장애물을 잡는다. 기대거리는 부풀린 맵에서 오므로
+            AMCL 오차에 강하다 (_build_raycast_map 참고).
+            약점: 기대거리가 짧은 곳(좁은 통로·코너 정면)에서는 deficit 만큼의
+            여유가 안 나와 아무것도 못 잡는다.
+
+        (B) 빔 끝점이 **열린 공간 한가운데** 찍혔다  벽까지 거리 > free_gap
+            트랙 한가운데 놓인 장애물을 잡는다. "거리 차이" 가 아니라 "그 점이
+            벽에서 얼마나 떨어졌나" 를 보므로 좁은 통로에서도 그대로 동작하고,
+            AMCL 오차에도 강하다 (벽 반사는 정의상 벽 근처에 찍힌다).
+
+        ★ 왜 (B) 를 넣었나 — 2026-08-09 q2 bag 6개를 재생해 실측했다.
+          가려진 장애물(벽 뒤)을 제외한 진짜 검출률:
+
+              거리        0.3~1m   1~2m   2~3m   3~4m   4~5m
+              (A)만         32%    25%    14%    17%     2%
+              (A)|(B)       37%    46%    41%    35%    21%
+
+          호라이즌은 2.9~5.0m 로 맞춰 뒀는데 **검출기가 그 거리에서 안 잡고
+          있었다.** 감지했을 땐 이미 1m 앞이고, MAP 은 오프셋을 옮기는 데
+          2.2~3.7m 를 달려야 한다 — 구조적으로 못 피한다.
+          (B) 를 더하면 2~3m 에서 3배, 4~5m 에서 10배가 된다.
+
+          대안으로 raycast_pose_unc 를 0.25→0.12 로 낮추면 비슷한 재현율이
+          나오지만 그건 **벽을 장애물로 보게 만드는 방향**이다 (2026-08-05 에
+          직선 9.4m 를 42cm 밀려 달린 그 실패). 우리 AMCL 종방향 오차가 실측
+          10~20cm 이므로 0.12 는 쓸 수 없다. (B) 는 unc 를 건드리지 않는다.
+
+          free_gap 은 0.30m 가 무릎점이다 (0.25 로 더 낮춰도 이득이 없다).
+          트랙 반폭이 0.5~0.6m 이므로 한가운데 장애물은 0.30 을 넘고, AMCL
+          오차 0.2m 를 빼도 여유가 남는다.
+        """
         deficit = float(self.get_parameter('raycast_deficit').value)
         fov     = math.radians(float(self.get_parameter('raycast_fov_deg').value))
         bstep   = math.radians(float(self.get_parameter('raycast_beam_deg').value))
@@ -378,7 +514,16 @@ class ObstacleAvoidMixin:
         ly0 = float(self.pos[1]) + sy * self.laser_dx + cy * self.laser_dy
         exp = self._raycast_expected(lx0, ly0, self.yaw + a_car, rmax)
 
-        obs = valid & (meas < horizon) & (meas < exp - deficit)
+        ahead = valid & (meas < horizon)
+        obs = ahead & (meas < exp - deficit)                     # (A)
+
+        free_gap = float(self.get_parameter('raycast_free_gap').value)
+        if free_gap > 0.0 and getattr(self, 'wall_dist_m', None) is not None:
+            ang = self.yaw + a_car
+            ends = np.vstack((lx0 + meas * np.cos(ang),
+                              ly0 + meas * np.sin(ang))).T
+            obs = obs | (ahead & (self._wall_room(ends) > free_gap))   # (B)
+
         if not obs.any():
             return np.zeros((0, 2))
         r, a = meas[obs], (self.yaw + a_car)[obs]

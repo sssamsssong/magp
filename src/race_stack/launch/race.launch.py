@@ -504,6 +504,8 @@ def generate_launch_description():
                 'raycast_deficit':  float(sc.get('raycast_deficit',  0.30)),
                 'raycast_fov_deg':  float(sc.get('raycast_fov_deg',  100.0)),
                 'raycast_beam_deg': float(sc.get('raycast_beam_deg', 1.0)),
+                # 검사 (B) — 좁은 통로 한가운데 장애물. frenet_planner 와 같은 값
+                'raycast_free_gap': float(sc.get('raycast_free_gap', 0.30)),
             }])
 
     elif controller == 'map':
@@ -607,6 +609,13 @@ def generate_launch_description():
                     'frenet_w_clear':   float(fr.get('w_clear',   2.0)),
                     'frenet_bounds':    bool( fr.get('bounds',    True)),
                     'frenet_votes':     int(  fr.get('votes',     3)),
+                    # 통과 여유 하한 = 차 반폭 + 안전여유. 옛 마스크 판정이
+                    # 레이싱라인 자신을 27% 프레임에서 탈락시켰다 (2026-08-11)
+                    'frenet_min_room':  float(fr.get('min_room',  0.22)),
+                    'frenet_gap_hyst':  float(fr.get('gap_hyst',  0.10)),
+                    # 컨트롤러의 램프 속도와 같아야 한다 — 플래너가 "지금 어디에
+                    # 있는지" 를 이걸로 안다 (히스테리시스·좌우 유지)
+                    'shift_rate':       float(fr.get('shift_rate', 2.0)),
                     'debug':            bool( fr.get('debug',     True)),
                     # 레이캐스팅은 [stanley] 값을 재사용한다 — 같은 트랙·같은 차다
                     'raycast_obs':      bool( st.get('raycast_obs',      True)),
@@ -614,6 +623,9 @@ def generate_launch_description():
                     'raycast_beam_deg': float(st.get('raycast_beam_deg', 1.0)),
                     'raycast_deficit':  float(st.get('raycast_deficit',  0.30)),
                     'raycast_pose_unc': float(st.get('raycast_pose_unc', 0.25)),
+                    # 검사 (B) — 빔 끝점이 벽에서 이만큼 떨어지면 장애물.
+                    # 좁은 통로 한가운데 장애물의 원거리 검출률을 3~10배로 올린다
+                    'raycast_free_gap': float(st.get('raycast_free_gap', 0.30)),
                     'track_margin':     float(st.get('track_margin',     0.15)),
                 }]))
 

@@ -93,6 +93,15 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         d('frenet_bounds',    True)
         d('frenet_votes',     3)
         d('track_margin',     0.15)
+        # ★ 통과 여유 하한 [m] — 차 반폭 + 안전여유. 이보다 좁으면 못 지나간다.
+        #   옛 판정(마스크 all())이 레이싱라인 자신을 27% 프레임에서 탈락시켰다.
+        #   0.22 면 두 트랙 모두 라인 탈락 0% (_frenet_select 주석 참고).
+        d('frenet_min_room',  0.22)
+        # 다른 쪽 통로가 이만큼 더 넓어야 갈아탄다 [m]. 좌우 진동 방지.
+        d('frenet_gap_hyst',  0.10)
+        # 컨트롤러의 기준선 램프 속도 [m/s]. 같아야 플래너가 보는 "현재 위치"가
+        # 실제와 맞는다 (race_script.yaml frenet.shift_rate 와 동일 값).
+        d('shift_rate',       2.0)
 
         # ── 레이캐스팅 (믹스인이 self.get_parameter 로 직접 읽는다) ────────
         #   기본값은 stanley_controller 와 동일하게 맞췄다. 갈라지면 같은 코드가
@@ -102,6 +111,9 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         d('raycast_beam_deg', 1.0)
         d('raycast_deficit',  0.30)
         d('raycast_pose_unc', 0.25)
+        # 검사 (B): 빔 끝점이 벽에서 이만큼 떨어지면 장애물. 0 = 끔.
+        #   좁은 통로 한가운데 장애물을 잡는다 (_raycast_obstacle_pts 참고).
+        d('raycast_free_gap', 0.30)
         d('use_bounds',       False)
         d('debug',            True)
 
@@ -129,9 +141,15 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.fr_w_chg  = float(p('frenet_w_change'))
         self.fr_w_clr  = float(p('frenet_w_clear'))
         self.fr_bounds = bool(p('frenet_bounds'))
+        self.fr_min_room = float(p('frenet_min_room'))
+        self.fr_gap_hyst = float(p('frenet_gap_hyst'))
         self._fr_costs = deque(maxlen=max(int(p('frenet_votes')), 1))
         self._fr_best_d = 0.0
-        self._shift_cur = 0.0        # 여기서는 램프를 안 건다 — 컨트롤러의 몫
+        self._fr_gap_room = 0.0
+        self._fr_status = 0.0
+        self._shift_rate = max(float(p('shift_rate')), 1e-3)
+        self._dt = 1.0 / max(float(p('rate_hz')), 1.0)
+        self._shift_cur = 0.0        # 컨트롤러와 같은 램프로 _tick 에서 따라간다
 
         self.free_votes = deque(maxlen=max(int(p('frenet_votes')), 1))
         self.lane_free  = True
@@ -202,9 +220,22 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
             return
         d = self._frenet_select(float(self.pos[0]), float(self.pos[1]), self.yaw)
         m = Float64();  m.data = float(d);  self.off_pub.publish(m)
-        s = Float64()
-        s.data = 0.0 if abs(d) < 1e-3 else 1.0
-        self.st_pub.publish(s)
+        s = Float64();  s.data = float(self._fr_status);  self.st_pub.publish(s)
+
+        # ★ 컨트롤러가 실제로 옮기고 있는 위치를 여기서도 따라간다.
+        #   예전엔 _shift_cur 이 **영원히 0** 이었다. 그러면
+        #     · 비용의 w_change·|d − 현재| 가 w_offset·|d| 와 똑같아져
+        #       히스테리시스 항이 아무 일도 안 한다 (오프셋 벌점만 두 배)
+        #     · "지금 어느 통로에 있나" 를 몰라 좌우 유지 판정이 불가능하다
+        #   컨트롤러와 같은 램프 속도를 써야 실제 위치와 어긋나지 않는다.
+        step = self._shift_rate * self._dt
+        self._shift_cur += float(np.clip(d - self._shift_cur, -step, step))
+
+        if self._fr_status > 0.0:
+            self.get_logger().info(
+                f'[frenet] d={d:+.2f}m  통로 여유 {self._fr_gap_room:.2f}m'
+                + ('  ★막힘' if self._fr_status >= 2.0 else ''),
+                throttle_duration_sec=0.5)
 
     def _load_waypoints(self, path: str):
         import csv as _csv

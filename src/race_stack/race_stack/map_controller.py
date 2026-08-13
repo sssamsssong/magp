@@ -430,7 +430,11 @@ class MapController(Node):
         a = float(self.p('steer_alpha'))
         tau = -0.02 / math.log(a) if 0.0 < a < 1.0 else 0.0
         self.get_logger().info(
-            f"  조향 l1={self.p('l1_min'):.3f}+{self.p('l1_k'):.3f}·v  "
+            # ★ max() 다, 덧셈이 아니다 (_steer_map 과 같은 식). 2026-08-13 까지
+            #   여기가 '+' 로 찍혀 있어서 로그만 보고 L1 을 2배로 오해했다.
+            #   바로 위 주석이 "적용된 값은 여기서 확인할 것" 이라고 해놓고
+            #   정작 이 줄이 거짓말을 하고 있었다.
+            f"  조향 l1=max({self.p('l1_min'):.3f}, {self.p('l1_k'):.3f}·v)  "
             f"alpha={a:.3f}(τ{tau*1000:.0f}ms)  slip_gain={self.p('slip_gain'):.2f}  "
             f"speed_lag={self.p('speed_lag'):.2f}s  max_steer={self.p('max_steer'):.3f}")
         return v
