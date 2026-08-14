@@ -4,9 +4,8 @@
 무엇을 하나
 ──────────
 레이싱라인을 기준선으로 후보들(점별 법선으로 d 만큼 민 것)을 만들고, 장애물
-여유·트랙 이탈·복귀력·변화량으로 비용을 매겨 **최적 횡오프셋 d 하나**를 고른다.
-로직은 `obstacle_avoid.ObstacleAvoidMixin` — Stanley 가 저속에서 잘 쓰던 그것을
-그대로 쓴다 (복사 아님, 같은 코드).
+여유·트랙 이탈·복귀력·변화량·통과속도(v_max)로 비용을 매겨 **최적 횡오프셋 d** 를
+고른다. 로직은 `obstacle_avoid.ObstacleAvoidMixin`.
 
     발행:  /frenet/offset   Float64   ← 계약. 컨트롤러가 소비한다
            /frenet/status   Float64   진단용 (0=평상, 1=회피중, 2=가능후보없음)
@@ -90,6 +89,12 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         d('frenet_w_offset',  1.0)
         d('frenet_w_change',  0.5)
         d('frenet_w_clear',   2.0)
+        # 후보별 v_max/profile (0~1). 0 이면 선택 cost 는 예전과 같고
+        # speed_scale 만 v_max 로 바뀐다.
+        d('frenet_w_speed',   0.5)
+        d('frenet_w_ttc',     0.0)   # 0 = v1 (곡률만). >0 이면 TTC 를 cost 에만
+        d('frenet_ttc_ref',   2.0)   # 이보다 길면 ttc_score=0
+        d('frenet_ttc_min',   0.5)   # 이하면 ttc_score=1 (AEB 쪽 영역)
         d('frenet_bounds',    True)
         d('frenet_votes',     3)
         d('track_margin',     0.15)
@@ -111,11 +116,14 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         d('opp_min_speed',  0.5)    # 이보다 느리면 정적 취급 [m/s]
         d('opp_pred_max',   1.2)    # 예측 시간 상한 [s]
         # ── 속도 스케일 (컨트롤러가 /frenet/speed_scale 로 받는다) ────
-        #   "여백이 넓은 곳으로 더 빠르게" 의 구현. 마찰 프로파일 **위로는
-        #   절대 안 올린다** — 그건 물리를 넘는 것이라 미끄러진다. 대신
-        #   막혔을 때 줄이고, 통로가 넓으면 안 줄인다.
-        d('speed_min_scale', 0.45)  # 완전히 막혔을 때 [배]
-        d('speed_room_ref',  0.45)  # 이 여유면 감속 없음 [m]
+        #   고른 후보의 v_max / 라인 프로파일. 마찰 프로파일 **위로는
+        #   절대 안 올린다.** 막히거나 곡률이 크면 줄이고, 아니면 1.0.
+        d('speed_min_scale', 0.45)
+        d('speed_room_ref',  0.45)  # speed_scale_mode=room 일 때만
+        d('speed_scale_mode', 'vmax')  # vmax | room (ablation baseline)
+        d('grip_util',       0.6)
+        d('mu',              0.348)
+        d('pac_d',           1.15)
         # 컨트롤러의 기준선 램프 속도 [m/s]. 같아야 플래너가 보는 "현재 위치"가
         # 실제와 맞는다 (race_script.yaml frenet.shift_rate 와 동일 값).
         d('shift_rate',       2.0)
@@ -157,6 +165,13 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.fr_w_off  = float(p('frenet_w_offset'))
         self.fr_w_chg  = float(p('frenet_w_change'))
         self.fr_w_clr  = float(p('frenet_w_clear'))
+        self.fr_w_spd  = float(p('frenet_w_speed'))
+        self.fr_w_ttc  = float(p('frenet_w_ttc'))
+        self.fr_ttc_ref = float(p('frenet_ttc_ref'))
+        self.fr_ttc_min = float(p('frenet_ttc_min'))
+        self.grip_util = float(p('grip_util'))
+        self.mu        = float(p('mu'))
+        self.pac_d     = float(p('pac_d'))
         self.fr_bounds = bool(p('frenet_bounds'))
         self.fr_min_room = float(p('frenet_min_room'))
         self.fr_gap_hyst = float(p('frenet_gap_hyst'))
@@ -173,6 +188,14 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self._opp_moving = 0
         self.sp_min_scale = float(p('speed_min_scale'))
         self.sp_room_ref  = max(float(p('speed_room_ref')), 1e-3)
+        self.sp_mode      = str(p('speed_scale_mode')).lower()
+        self._fr_vmax = 0.0
+        self._fr_v_ref = 1e-3
+        self._fr_kappa = 0.0
+        self._fr_speed_score = 1.0
+        self._fr_cost = 0.0
+        self._fr_ttc = 1.0e9
+        self._fr_ttc_score = 0.0
         self._fr_costs = deque(maxlen=max(int(p('frenet_votes')), 1))
         self._fr_best_d = 0.0
         self._fr_gap_room = 0.0
@@ -254,16 +277,17 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         s = Float64();  s.data = float(self._fr_status);  self.st_pub.publish(s)
 
         # ── 속도 스케일 ──────────────────────────────────────────────
-        #   "넓은 쪽으로 더 빠르게" 를 **프로파일 위로 올리는 방식으로는 하지
-        #   않는다.** 그건 마찰원을 넘는 것이다. 넓으면 **안 줄이는** 것이
-        #   빠른 것이다.
-        #   고른 통로의 여유가 room_ref 이상이면 1.0, 좁아질수록 min_scale 까지
-        #   선형으로 내린다. 통로가 없으면(status 2) 곧장 min_scale.
+        #   vmax: 고른 후보 v_max / 라인 프로파일 (기본).
+        #   room: 옛 통로너비 선형 — path 선택 ablation 의 baseline 속도.
+        v_ref = max(float(getattr(self, '_fr_v_ref', 0.0) or 0.0), 1e-3)
+        vmax = float(getattr(self, '_fr_vmax', 0.0) or 0.0)
         if self._fr_status >= 2.0:
             scale = self.sp_min_scale
-        else:
+        elif self.sp_mode == 'room':
             r = float(np.clip(self._fr_gap_room / self.sp_room_ref, 0.0, 1.0))
             scale = self.sp_min_scale + (1.0 - self.sp_min_scale) * r
+        else:
+            scale = float(np.clip(vmax / v_ref, self.sp_min_scale, 1.0))
         sc = Float64();  sc.data = float(scale);  self.spd_pub.publish(sc)
 
         # ★ 컨트롤러가 실제로 옮기고 있는 위치를 여기서도 따라간다.
@@ -275,13 +299,19 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         step = self._shift_rate * self._dt
         self._shift_cur += float(np.clip(d - self._shift_cur, -step, step))
 
-        if self._fr_status > 0.0:
-            self.get_logger().info(
-                f'[frenet] d={d:+.2f}m  통로 여유 {self._fr_gap_room:.2f}m  '
-                f'속도×{scale:.2f}'
-                + (f'  동적 {self._opp_moving}개' if self._opp_moving else '')
-                + ('  ★막힘' if self._fr_status >= 2.0 else ''),
-                throttle_duration_sec=0.5)
+        ttc = float(getattr(self, '_fr_ttc', 1e9))
+        ttc_s = 'inf' if ttc >= 1e8 else f'{ttc:.2f}s'
+        self.get_logger().info(
+            f'[frenet] d={d:+.2f}m  room={self._fr_gap_room:.2f}  '
+            f'kappa={float(getattr(self, "_fr_kappa", 0.0)):.2f}  '
+            f'vmax={vmax:.2f}/{v_ref:.2f}  '
+            f'speed_score={float(getattr(self, "_fr_speed_score", 0.0)):.2f}  '
+            f'ttc={ttc_s}({float(getattr(self, "_fr_ttc_score", 0.0)):.2f})  '
+            f'cost={float(getattr(self, "_fr_cost", 0.0)):.2f}  '
+            f'속도×{scale:.2f}'
+            + (f'  동적 {self._opp_moving}개' if self._opp_moving else '')
+            + ('  ★막힘' if self._fr_status >= 2.0 else ''),
+            throttle_duration_sec=0.5)
 
     def _load_waypoints(self, path: str):
         import csv as _csv

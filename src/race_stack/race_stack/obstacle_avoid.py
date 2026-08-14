@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """obstacle_avoid — Frenet 장애물 회피 로직 (컨트롤러 공용).
 
-stanley_controller 에서 **원문 그대로 추출**한 것이다 (2026-08-09). 복사가 아니라
-이동이라 사본이 늘지 않는다. 로직은 한 글자도 바꾸지 않았다 — Stanley 가 저속에서
-잘 돌고 있고, 여기서 동작이 바뀌면 그 검증이 통째로 무효가 되기 때문이다.
+stanley_controller 에서 추출한 공용 회피 로직. Frenet 후보 비용에는
+통과속도(v_max) 항을 넣을 수 있다 (fr_w_spd, 기본 0 이면 예전과 동일).
 
 무엇을 하나
 ──────────
@@ -38,6 +37,8 @@ from PIL import Image
 from geometry_msgs.msg import Point
 from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker, MarkerArray
+
+from race_stack.speed_profile import GRAVITY
 
 
 def _load_map(map_yaml_path: str):
@@ -97,7 +98,9 @@ class ObstacleAvoidMixin:
     라이다: laser_dx, laser_dy
     호라이즌: obs_h_sec, obs_h_min, obs_h_max, obs_corr_hw, obs_release_scale
     Frenet: fr_grid, fr_clear, fr_clr_cap, fr_dmax, fr_bounds,
-            fr_w_off, fr_w_chg, fr_w_clr, _shift_cur, _fr_costs, _fr_best_d
+            fr_w_off, fr_w_chg, fr_w_clr, fr_w_spd (없으면 0=속도항 끔),
+            grip_util/mu/pac_d 또는 fr_a_lat,
+            _shift_cur, _fr_costs, _fr_best_d, _fr_vmax, _fr_v_ref
     검출결과: on_track_pts, blocking_pts, free_votes, lane_free
     발행:   fr_pub, obs_pub   (없으면 None)
     """
@@ -265,33 +268,62 @@ class ObstacleAvoidMixin:
         d = self.fr_grid
         feasible = (wall_room >= self.fr_min_room) & (obs_room >= self.fr_clear)
 
-        # ── 곡률 실행가능 ─────────────────────────────────────────────
+        # ── 곡률 실행가능 + 후보별 v_max ─────────────────────────────
         # 법선 오프셋 d 의 평행곡선: κ' = κ / (1 − d·κ)  (좌회전 +, d 좌측 +).
         # 안쪽으로 밀면 반경이 차 R_min = L/tan(max_steer) 아래로 떨어질 수 있다.
         # 한계는 차량 기하에서 온다. d=0 은 항상 살린다 — 라인 자체가 κ_max 에
         # 붙어 있어도 회피가 라인에서 쫓겨나면 안 된다.
+        #
+        # v_curve = √(a_lat / |κ'|). 조향 뒤에 깎는 steer_speed_limit 과 같은
+        # 물리지만, **고르기 전**에 써서 빠르게 통과할 후보를 고른다.
         wb = float(getattr(self, 'wheelbase', 0.33) or 0.33)
         ms = float(getattr(self, 'max_steer', 0.36) or 0.36)
         kappa_max = math.tan(ms) / max(wb, 1e-6)
+        a_lat = self._frenet_a_lat()
+        v_ref = self._line_speed(px, py)
         dx, dy = np.gradient(seg[:, 0]), np.gradient(seg[:, 1])
         ddx, ddy = np.gradient(dx), np.gradient(dy)
         kap = (dx * ddy - dy * ddx) / np.maximum((dx * dx + dy * dy) ** 1.5, 1e-9)
         kappa_ok = np.ones(N, dtype=bool)
+        v_curve = np.zeros(N)
+        kmax_arr = np.zeros(N)
+        den_eps = 0.05
+        kap_eps = 1e-4
         for i, di in enumerate(d):
             denom = 1.0 - float(di) * kap
-            if np.any(denom <= 0.05):
-                kappa_ok[i] = False          # 곡률 중심을 지나감
-                continue
-            if float(np.max(np.abs(kap / denom))) > kappa_max * 1.05:
+            # 곡률 중심을 지나거나 분모≈0 이면 κ' 가 폭주한다 → 탈락, v=0.
+            if np.any(~np.isfinite(denom)) or np.any(denom <= den_eps):
                 kappa_ok[i] = False
+                continue
+            kabs = np.abs(kap / denom)
+            kmax = float(np.max(kabs))
+            if (not np.isfinite(kmax)) or kmax > kappa_max * 1.05:
+                kappa_ok[i] = False
+                continue
+            kmax_arr[i] = kmax
+            v_curve[i] = math.sqrt(a_lat / max(kmax, kap_eps))
         zero_i = int(np.argmin(np.abs(d)))
         kappa_ok[zero_i] = True
+        if kmax_arr[zero_i] <= 0.0:
+            kmax_arr[zero_i] = float(np.max(np.abs(kap)))
+            v_curve[zero_i] = math.sqrt(a_lat / max(kmax_arr[zero_i], kap_eps))
         feasible_wo = feasible.copy()
         feasible = feasible & kappa_ok
 
+        v_cand = np.minimum(v_curve, v_ref)
+        speed_score = np.clip(v_cand / max(v_ref, 1e-3), 0.0, 1.0)
+        w_spd = float(getattr(self, 'fr_w_spd', 0.0) or 0.0)
+        w_ttc = float(getattr(self, 'fr_w_ttc', 0.0) or 0.0)
+        ttc_sec, ttc_score = self._candidate_ttc(d, px, py)
+
+        # w_speed=w_ttc=0 이면 cost 벡터가 예전과 같다 (경로 선택 동일).
         cost = (self.fr_w_off * np.abs(d)
                 + self.fr_w_chg * np.abs(d - self._shift_cur)
                 - self.fr_w_clr * np.minimum(room, self.fr_clr_cap))
+        if w_spd > 0.0:
+            cost = cost - w_spd * speed_score
+        if w_ttc > 0.0:
+            cost = cost + w_ttc * ttc_score
         self._fr_costs.append(cost)
         cost_avg = np.mean(np.stack(self._fr_costs), axis=0)
 
@@ -328,9 +360,93 @@ class ObstacleAvoidMixin:
                 throttle_duration_sec=1.0)
 
         self._fr_best_d = float(d[best])
+        self._fr_v_ref = float(v_ref)
+        self._fr_vmax = float(v_cand[best])
+        self._fr_kappa = float(kmax_arr[best])
+        self._fr_speed_score = float(speed_score[best])
+        self._fr_cost = float(cost_avg[best])
+        self._fr_ttc = float(ttc_sec[best])
+        self._fr_ttc_score = float(ttc_score[best])
         if self.fr_pub is not None:
             self._pub_frenet(cands, feasible, best)
         return self._fr_best_d
+
+    def _frenet_a_lat(self) -> float:
+        """허용 횡가속. fr_a_lat 이 있으면 그걸 쓰고, 없으면 η·μ·D·g."""
+        a = float(getattr(self, 'fr_a_lat', 0.0) or 0.0)
+        if a > 0.0:
+            return a
+        eta = float(getattr(self, 'grip_util', 0.6) or 0.6)
+        mu = float(getattr(self, 'mu', 0.348) or 0.348)
+        pac_d = float(getattr(self, 'pac_d', 1.15) or 1.15)
+        return max(float(np.clip(eta, 0.05, 1.0)) * mu * pac_d * GRAVITY, 1e-3)
+
+    def _line_speed(self, px: float, py: float) -> float:
+        """현재 위치의 레이싱라인 프로파일 속도. 없으면 odom."""
+        wps = getattr(self, 'wps', None)
+        if wps is not None and len(wps) >= 2:
+            i = int(np.argmin(np.hypot(wps[:, 0] - px, wps[:, 1] - py)))
+            if wps.shape[1] >= 3 and float(wps[i, 2]) > 1e-3:
+                return float(wps[i, 2])
+        return max(float(getattr(self, 'speed', 0.0) or 0.0), 1e-3)
+
+    def _candidate_ttc(self, d_grid, px, py):
+        """후보별 (ttc_sec, ttc_score).
+
+        `_opp_tracks['s_dot']` 는 **레이싱라인 전역 속도 ṡ** 이다 (ego-relative
+        가 아님). 상대속도는 v_rel = v_ego_s − s_dot. 정적(ṡ≈0)이면 TTC≈Δs/v_ego.
+
+        score = clip((ttc_ref − ttc) / (ttc_ref − ttc_min), 0, 1)
+        장애물이 없거나 멀어지면 0. w_ttc=0 이면 계산을 건너뛴다.
+        """
+        n = len(d_grid)
+        inf = 1.0e9
+        ttc = np.full(n, inf)
+        zeros = np.zeros(n)
+        if float(getattr(self, 'fr_w_ttc', 0.0) or 0.0) <= 0.0:
+            return ttc, zeros
+        lut = self._s_lut()
+        if lut is None:
+            return ttc, zeros
+        s_ego, _ = self._project_sd(np.array([px, py], float), lut)
+        v_ego = abs(float(getattr(self, 'speed', 0.0) or 0.0))
+        half = float(getattr(self, 'obs_corr_hw', 0.22) or 0.22)
+        ttc_ref = float(getattr(self, 'fr_ttc_ref', 2.0) or 2.0)
+        ttc_min = float(getattr(self, 'fr_ttc_min', 0.5) or 0.5)
+        den = max(ttc_ref - ttc_min, 1e-3)
+        eps = 0.1
+
+        obs = []
+        for tr in getattr(self, '_opp_tracks', []) or []:
+            obs.append((float(tr.get('s', 0.0)),
+                        float(tr.get('d_lat', 0.0)),
+                        float(tr.get('s_dot', 0.0))))
+        if not obs:
+            pts = getattr(self, 'on_track_pts', None)
+            if pts is not None and len(pts):
+                # 정적 점. 너무 많으면 가까운 것만.
+                rel = np.hypot(pts[:, 0] - px, pts[:, 1] - py)
+                keep = np.argsort(rel)[:40]
+                for p in pts[keep]:
+                    s, dlat = self._project_sd(p, lut)
+                    obs.append((s, dlat, 0.0))
+        if not obs:
+            return ttc, zeros
+
+        for s_o, d_o, s_dot in obs:
+            ds = self._wrap_ds(s_o - s_ego, lut['L'])
+            if ds <= 0.05:
+                continue
+            v_rel = v_ego - s_dot
+            dt = ds / v_rel if v_rel > eps else inf
+            for i, di in enumerate(d_grid):
+                if abs(d_o - float(di)) > half:
+                    continue
+                if dt < ttc[i]:
+                    ttc[i] = dt
+        score = np.clip((ttc_ref - ttc) / den, 0.0, 1.0)
+        return ttc, score
+
     def _pub_frenet(self, cands, feasible, best):
         """후보 경로를 RViz 에 그린다 — 초록=선택, 파랑=가능, 빨강=불가."""
         arr = MarkerArray()
