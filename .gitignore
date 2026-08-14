@@ -25,6 +25,7 @@ chat_log/
 # tune.sh 로컬 상태 (튜닝 이력 · --undo 용 백업)
 .tune_history
 .tune_backup.yaml
+.tune_backup.json
 
 # 외부 최적화 도구 (로컬 클론)
 forza_traj_opt/

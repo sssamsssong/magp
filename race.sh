@@ -36,9 +36,12 @@
 #                              맵핑 중이 아니라 ./race.sh box (주행 스택) 위에서.
 #                              새 맵이면 RViz 2D Pose Estimate 로 맞춘 뒤 1회.
 #
-#  게인 튜닝은 ./tune.sh — race_script.yaml 을 열지 않고 값만 바꾼다.
-#    ./tune.sh                       현재 값 보기
-#    ./tune.sh stanley.gain=1.2      설정 → 다음 ./race.sh 부터 적용 (재빌드 불필요)
+#  게인 튜닝은 ./tune.sh — yaml 을 열지 않고 값만 바꾼다. 설명: ./tune.sh -h
+#    ./tune.sh i                     속도 대화형. η q1/q2/race 는 모드마다 따로
+#                                    (./race.sh q1 → q1 만, ./race.sh race → race 만)
+#    ./tune.sh cap=3                 전 모드 공통 천장
+#    ./tune.sh q1=0.6                ./race.sh q1 전용. q2= / race= 도 됨
+#    ./tune.sh stanley.gain=1.2      다음 ./race.sh 부터 적용 (재빌드 불필요)
 # ============================================================
 set -e
 
