@@ -136,6 +136,15 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         d('grip_util',       0.6)
         d('mu',              0.348)
         d('pac_d',           1.15)
+        # ★ speed_scale 의 분모(= 컨트롤러가 낼 속도)를 여기서 다시 푼다.
+        #   CSV 열을 쓰면 안 된다 — gen_raceline 이 --mu 0.9 로 계산한 값이라
+        #   분모만 1.5배 커져 배율이 항상 0.5 로 깎인다 (_line_speed 주석).
+        d('lf',              0.1757)
+        d('lr',              0.1441)
+        d('min_speed',       0.3)
+        d('a_lon_acc',       0.0)
+        d('a_lon_brk',       0.0)
+        d('hard_cap',        0.0)
         # 컨트롤러의 기준선 램프 속도 [m/s]. 같아야 플래너가 보는 "현재 위치"가
         # 실제와 맞는다 (race_script.yaml frenet.shift_rate 와 동일 값).
         d('shift_rate',       2.0)
@@ -184,6 +193,12 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.grip_util = float(p('grip_util'))
         self.mu        = float(p('mu'))
         self.pac_d     = float(p('pac_d'))
+        self.lf        = float(p('lf'))
+        self.lr        = float(p('lr'))
+        self.min_speed = float(p('min_speed'))
+        self.a_lon_acc = float(p('a_lon_acc'))
+        self.a_lon_brk = float(p('a_lon_brk'))
+        self.hard_cap  = float(p('hard_cap'))
         self.fr_bounds = bool(p('frenet_bounds'))
         self.fr_min_room = float(p('frenet_min_room'))
         self.fr_gap_hyst = float(p('frenet_gap_hyst'))

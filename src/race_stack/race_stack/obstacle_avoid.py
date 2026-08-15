@@ -332,6 +332,7 @@ class ObstacleAvoidMixin:
         #     허용한다. 구간 경계를 넘는 순간 오프셋을 계단으로 끊으면 조향이
         #     튀고, 무엇보다 지금 상대 옆에 있을 수 있다.
         self._ot_allowed = True
+        self._ot_static = False
         if self.ot_zone_on:
             zone = self._overtake_zone()
             lut = self._s_lut()
@@ -339,6 +340,25 @@ class ObstacleAvoidMixin:
                 i_ego = int(np.argmin(np.hypot(lut['xy'][:, 0] - px,
                                                lut['xy'][:, 1] - py)))
                 self._ot_allowed = bool(zone[i_ego])
+            # ★★ 2026-08-15 — 앞을 막은 것이 **정지 장애물**이면 구간을 안 따진다.
+            #   08/15 실차: "정지한 장애물조차 q2 에선 피했는데 추월 모드에서는
+            #   못 피하고 박았다." 당연하다 — 구간 밖이면 d=0 으로 묶여 있었다.
+            #
+            #   구간을 두는 이유는 **상대차와 나란히 달리는 시간이 길기 때문**이다.
+            #   그 사이 통로가 좁아지면 낀다. 콘은 길이 20cm 라 스쳐 지나가면
+            #   끝이고, 낄 일이 없다. 정지 장애물에 구간을 걸면 얻는 것 없이
+            #   **회피 능력만 잃는다** (q2 에서 ot_zone 을 끈 것과 같은 논리).
+            #
+            #   "정지" 판정은 추적된 클러스터의 ṡ 로 한다. 아직 추적이 덜 됐으면
+            #   (n < opp_min_obs) 보수적으로 **움직인다고 본다** — 상대차를
+            #   정지로 오판해 좁은 데서 나가는 쪽이 훨씬 위험하다.
+            if not self._ot_allowed:
+                trs = [t for t in (getattr(self, '_opp_tracks', []) or [])
+                       if t.get('n', 0) >= self.opp_min_obs]
+                if trs and all(abs(float(t.get('s_dot', 0.0))) < self.opp_min_speed
+                               for t in trs):
+                    self._ot_allowed = True
+                    self._ot_static = True
         #   ※ feasible 을 여기서 깎지 않는다. 깎으면 후보가 전멸해 아래
         #     "전부 막혔다" 폴백(argmax(room))으로 떨어지고, 하필 그게 **가장
         #     크게 옆으로 나가는 후보**다 — 금지하려던 것을 정확히 하게 된다.
@@ -467,11 +487,56 @@ class ObstacleAvoidMixin:
         pac_d = float(getattr(self, 'pac_d', 1.15) or 1.15)
         return max(float(np.clip(eta, 0.05, 1.0)) * mu * pac_d * GRAVITY, 1e-3)
 
+    def _profile_speed_arr(self):
+        """컨트롤러가 실제로 쓰는 속도 프로파일. wps 가 그대로면 캐시.
+
+        ★★ 2026-08-15 — 예전엔 여기서 **CSV 속도열을 그대로** 썼다.
+          그런데 CSV 는 gen_raceline 이 --mu 0.9 로 계산한 값이고(넉넉히 잡는 게
+          규약), 주행 중 실제 속도는 solve_profile 이 μ_eff(0.483)로 다시 푼다.
+          그래서 speed_scale = v_max/v_ref 의 **분모만 1.5배 큰** 상태가 됐고,
+          장애물이 없어도 배율이 항상 0.5 근처로 깎였다.
+
+          실차 로그가 그대로 말해줬다 (08/15 race):
+              status 0(평상, 막힌 것 없음) 에서도 speed_scale 중앙 0.52
+              지령 속도 중앙 1.50㎧ (프로파일은 2.47~5.20)
+          "q2 가 잘 피하는데 계속 느리다" 의 원인이 이것이다. 회피와 무관하다.
+        """
+        wps = getattr(self, 'wps', None)
+        if wps is None or len(wps) < 3 or wps.shape[1] < 3:
+            return None
+        cached = getattr(self, '_prof_cache', None)
+        if cached is not None and cached[0] is wps:
+            return cached[1]
+        from race_stack.speed_profile import solve_profile
+        try:
+            v, _ = solve_profile(
+                wps[:, 0], wps[:, 1], wps[:, 2],
+                mu_eff=float(getattr(self, 'mu', 0.348))
+                       * float(getattr(self, 'pac_d', 1.15)),
+                grip_util=float(getattr(self, 'grip_util', 0.6)),
+                lf=float(getattr(self, 'lf', 0.1757)),
+                lr=float(getattr(self, 'lr', 0.1441)),
+                v_min=float(getattr(self, 'min_speed', 0.3)),
+                a_lon_acc=float(getattr(self, 'a_lon_acc', 0.0)),
+                a_lon_brk=float(getattr(self, 'a_lon_brk', 0.0)),
+                hard_cap=float(getattr(self, 'hard_cap', 0.0)))
+        except Exception:
+            return None
+        self._prof_cache = (wps, v)
+        return v
+
     def _line_speed(self, px: float, py: float) -> float:
-        """현재 위치의 레이싱라인 프로파일 속도. 없으면 odom."""
+        """현재 위치에서 **컨트롤러가 낼 속도**. speed_scale 의 분모다.
+
+        ★ CSV 열이 아니라 solve_profile 결과를 써야 한다 — 컨트롤러가 그걸
+          쓰기 때문이다. 분모가 다르면 배율이 통째로 어긋난다 (위 주석 참고).
+        """
         wps = getattr(self, 'wps', None)
         if wps is not None and len(wps) >= 2:
             i = int(np.argmin(np.hypot(wps[:, 0] - px, wps[:, 1] - py)))
+            prof = self._profile_speed_arr()
+            if prof is not None and float(prof[i]) > 1e-3:
+                return float(prof[i])
             if wps.shape[1] >= 3 and float(wps[i, 2]) > 1e-3:
                 return float(wps[i, 2])
         return max(float(getattr(self, 'speed', 0.0) or 0.0), 1e-3)
@@ -957,7 +1022,24 @@ class ObstacleAvoidMixin:
         v_prof = max(float(getattr(self, '_fr_v_ref', 0.0) or 0.0), 1e-3)
         v_tgt = max(s_dot + self.follow_k * (gap - self.follow_gap), 0.0)
         self._follow_gap = gap
-        return float(np.clip(v_tgt / v_prof, self.follow_min, 1.0))
+
+        # ★★ 2026-08-15 — 하한(follow_min)을 **움직이는 상대에게만** 건다.
+        #   08/15 race 주행에서 차가 정지 장애물을 **25% 속도로 들이받았다.**
+        #     · 추월 금지 구간이라 d=0 (옆으로 안 나감)
+        #     · 정지 장애물이라 ṡ=0 → v_target = 1.2·(gap−0.8) → gap 0.8 에서 0
+        #     · 그런데 clip 하한이 0.25 라 **0 이 되지 못하고 계속 전진**
+        #   하한의 뜻은 "앞차를 쫓다가 너무 느려지면 영영 못 잡는다" 였다.
+        #   상대가 **멈춰 있으면 쫓을 이유가 없다** — 서야 한다.
+        #   서고 나면 회피가 필요한데 금지 구간이면 그것도 못 하므로, 그때는
+        #   status 2 로 올려 사람이 알 수 있게 한다 (조용히 서 있지 않도록).
+        lo = self.follow_min if abs(s_dot) >= self.opp_min_speed else 0.0
+        if lo <= 0.0 and v_tgt <= 1e-3:
+            self._fr_status = 2.0               # 정지 장애물 앞 — 막힘
+            self.get_logger().warn(
+                f'[frenet] 정지 장애물 {gap:.2f}m 앞 — 추월 금지 구간이라 '
+                f'옆으로 못 나간다. 정지한다',
+                throttle_duration_sec=1.0)
+        return float(np.clip(v_tgt / v_prof, lo, 1.0))
 
     def _overtake_zone(self):
         """레이싱라인 각 점에서 **추월을 시작해도 되는가** (bool 배열).

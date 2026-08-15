@@ -655,6 +655,13 @@ def generate_launch_description():
                     'grip_util':        grip_util,
                     'mu':               veh['mu'],
                     'pac_d':            veh['pac_d'],
+                    # speed_scale 분모를 컨트롤러와 **같은 물리**로 풀기 위한 값들
+                    'lf':               veh['lf'],
+                    'lr':               veh['lr'],
+                    'min_speed':        min_speed,
+                    'a_lon_acc':        a_lon_acc,
+                    'a_lon_brk':        a_lon_brk,
+                    'hard_cap':         hard_cap,
                     # 컨트롤러의 램프 속도와 같아야 한다 — 플래너가 "지금 어디에
                     # 있는지" 를 이걸로 안다 (히스테리시스·좌우 유지)
                     'shift_rate':       float(fr.get('shift_rate', 2.0)),
