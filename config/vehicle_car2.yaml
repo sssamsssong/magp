@@ -149,7 +149,7 @@ tuning:
   launch_acc:  0.8
   launch_time: 3.0
   # ★ 첫 주행은 낮게. 캘리브레이션이 다 끝난 뒤 0.1 씩 올리며 한계를 찾는다.
-  grip_util: 0.6
+  grip_util: 0.8
 
 joystick:
   # ✅ 2026-08-10 실차 확인: false 가 맞다 (스틱 좌 = 앞바퀴 좌).
