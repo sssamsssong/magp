@@ -118,6 +118,18 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         # ── 속도 스케일 (컨트롤러가 /frenet/speed_scale 로 받는다) ────
         #   고른 후보의 v_max / 라인 프로파일. 마찰 프로파일 **위로는
         #   절대 안 올린다.** 막히거나 곡률이 크면 줄이고, 아니면 1.0.
+        # ── 추월 가능 구간 (1대1) ──────────────────────────────────────
+        #   회피는 시작보다 **끝내는 것**이 어렵다. 넓은 구간 끝에서 옆으로
+        #   나가면 다 지나가기 전에 좁아져 상대와 벽 사이에 낀다.
+        #   상세는 obstacle_avoid._overtake_zone 주석.
+        d('ot_zone',       False)  # 켜면 넓은 구간에서만 옆으로 나간다
+        d('ot_width',      1.10)   # 나란히 가려면 필요한 복도 폭 [m]
+        d('ot_exit_pad',   2.50)   # 좁아지기 전에 미리 끝낼 거리 [m]
+        d('ot_min_len',    2.00)   # 이보다 짧은 구간은 버린다 [m]
+        # 추월 금지 구간에서 상대 뒤를 따라가는 법칙
+        d('follow_gap',    0.80)   # 유지할 s 간격 [m]
+        d('follow_k',      1.2)    # 간격오차 → 속도 이득 [1/s]
+        d('follow_min',    0.25)   # 속도 배율 하한
         d('speed_min_scale', 0.45)
         d('speed_room_ref',  0.45)  # speed_scale_mode=room 일 때만
         d('speed_scale_mode', 'vmax')  # vmax | room (ablation baseline)
@@ -186,6 +198,15 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.opp_pred_max  = float(p('opp_pred_max'))
         self._opp_tracks = []
         self._opp_moving = 0
+        self.ot_zone_on  = bool( p('ot_zone'))
+        self.ot_width    = float(p('ot_width'))
+        self.ot_exit_pad = float(p('ot_exit_pad'))
+        self.ot_min_len  = float(p('ot_min_len'))
+        self.follow_gap  = float(p('follow_gap'))
+        self.follow_k    = float(p('follow_k'))
+        self.follow_min  = float(p('follow_min'))
+        self._ot_allowed = True
+        self._follow_gap = float('inf')
         self.sp_min_scale = float(p('speed_min_scale'))
         self.sp_room_ref  = max(float(p('speed_room_ref')), 1e-3)
         self.sp_mode      = str(p('speed_scale_mode')).lower()
@@ -288,6 +309,15 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
             scale = self.sp_min_scale + (1.0 - self.sp_min_scale) * r
         else:
             scale = float(np.clip(vmax / v_ref, self.sp_min_scale, 1.0))
+
+        # ★ 추월 금지 구간이면 상대 뒤를 따라간다 — 옆으로 못 푸니 종으로 푼다.
+        #   둘 중 **작은 쪽**을 쓴다. 통로가 좁아서 줄여야 하는데 추종이 1.0 을
+        #   주면 안 되고, 그 반대도 마찬가지다.
+        # status 3(추월금지)이면 추종 법칙이 속도를 정한다. status 2(막힘)와
+        # 달리 "지나갈 곳이 없다" 가 아니라 "지금은 안 나간다" 이므로 따로 둔다.
+        if self.ot_zone_on and not getattr(self, '_ot_allowed', True):
+            scale = min(scale, self._follow_scale(float(self.pos[0]),
+                                                  float(self.pos[1])))
         sc = Float64();  sc.data = float(scale);  self.spd_pub.publish(sc)
 
         # ★ 컨트롤러가 실제로 옮기고 있는 위치를 여기서도 따라간다.
@@ -309,6 +339,9 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
             f'ttc={ttc_s}({float(getattr(self, "_fr_ttc_score", 0.0)):.2f})  '
             f'cost={float(getattr(self, "_fr_cost", 0.0)):.2f}  '
             f'속도×{scale:.2f}'
+            + ('' if not self.ot_zone_on else
+               ('  [추월가능]' if getattr(self, '_ot_allowed', True)
+                else f'  [추월금지 추종 gap={self._follow_gap:.2f}m]'))
             + (f'  동적 {self._opp_moving}개' if self._opp_moving else '')
             + ('  ★막힘' if self._fr_status >= 2.0 else ''),
             throttle_duration_sec=0.5)

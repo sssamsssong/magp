@@ -268,6 +268,28 @@ class ObstacleAvoidMixin:
         d = self.fr_grid
         feasible = (wall_room >= self.fr_min_room) & (obs_room >= self.fr_clear)
 
+        # ── 추월 금지 구간이면 옆으로 안 나간다 ───────────────────────
+        #   구간 밖에서 옆으로 나가면 다 지나가기 전에 통로가 좁아져 **상대와
+        #   벽 사이에 낀다.** 그때는 손쓸 방법이 없다. 그래서 여기서는 후보를
+        #   d=0(레이싱라인) 하나로 묶고, 대신 상대 뒤를 따라간다 —
+        #   횡으로 못 풀면 종으로 푸는 수밖에 없다 (_follow_scale).
+        #   ※ 이미 옆으로 나가 있으면(|shift|>0.05) 라인으로 **돌아오는 것**은
+        #     허용한다. 구간 경계를 넘는 순간 오프셋을 계단으로 끊으면 조향이
+        #     튀고, 무엇보다 지금 상대 옆에 있을 수 있다.
+        self._ot_allowed = True
+        if self.ot_zone_on:
+            zone = self._overtake_zone()
+            lut = self._s_lut()
+            if zone is not None and lut is not None:
+                i_ego = int(np.argmin(np.hypot(lut['xy'][:, 0] - px,
+                                               lut['xy'][:, 1] - py)))
+                self._ot_allowed = bool(zone[i_ego])
+        #   ※ feasible 을 여기서 깎지 않는다. 깎으면 후보가 전멸해 아래
+        #     "전부 막혔다" 폴백(argmax(room))으로 떨어지고, 하필 그게 **가장
+        #     크게 옆으로 나가는 후보**다 — 금지하려던 것을 정확히 하게 된다.
+        #     (실측: 금지 구간에서 d 가 −0.075 → −0.150 으로 오히려 커졌다)
+        #     그래서 고른 뒤에 라인으로 되돌린다.
+
         # ── 곡률 실행가능 + 후보별 v_max ─────────────────────────────
         # 법선 오프셋 d 의 평행곡선: κ' = κ / (1 − d·κ)  (좌회전 +, d 좌측 +).
         # 안쪽으로 밀면 반경이 차 R_min = L/tan(max_steer) 아래로 떨어질 수 있다.
@@ -358,6 +380,15 @@ class ObstacleAvoidMixin:
                 f'(요구 {self.fr_min_room:.2f}m), d={d[best]:+.2f}m. '
                 f'감속해야 하는 상황이다',
                 throttle_duration_sec=1.0)
+
+        # ── 추월 금지 구간: 라인으로 되돌린다 ────────────────────────
+        #   이미 옆에 나가 있으면(|shift|>0.05) 그대로 둔다 — 구간 경계에서
+        #   오프셋을 계단으로 끊으면 조향이 튀고, 지금 상대 옆일 수도 있다.
+        #   대신 종방향으로 푼다 (_follow_scale 이 속도를 상대에 맞춘다).
+        if self.ot_zone_on and not self._ot_allowed and abs(self._shift_cur) <= 0.05:
+            best = zero_i
+            self._fr_gap_room = float(room[best])
+            self._fr_status = 3.0        # 3 = 추월금지(추종)
 
         self._fr_best_d = float(d[best])
         self._fr_v_ref = float(v_ref)
@@ -821,6 +852,117 @@ class ObstacleAvoidMixin:
                 lab[i] = nxt
             nxt += 1
         return lab, nxt
+
+    # ── 추월 가능 구간 ────────────────────────────────────────────────
+    #   기본값. frenet_planner 가 파라미터로 덮어쓴다.
+    ot_zone_on   = False   # 끄면 예전과 동일 (어디서든 회피)
+    ot_width     = 1.10    # 나란히 지나가려면 필요한 복도 폭 [m]
+    ot_exit_pad  = 2.50    # 좁아지기 전에 이만큼 미리 구간을 끝낸다 [m]
+    ot_min_len   = 2.00    # 이보다 짧은 구간은 버린다 [m]
+
+    # 추종(follow) 파라미터 — frenet_planner 가 덮어쓴다
+    follow_gap   = 0.80    # 상대 뒤 이 간격을 유지한다 [m] (범퍼 사이가 아니라 s 차)
+    follow_k     = 1.2     # 간격 오차 → 속도 보정 이득 [1/s]
+    follow_min   = 0.25    # 속도 배율 하한
+
+    def _follow_scale(self, px, py):
+        """추월 금지 구간에서 **상대 뒤를 따라가는** 속도 배율.
+
+        내가 더 빠르니 그냥 두면 들이받는다. 옆으로 못 피하는 구간이므로
+        종방향으로 푸는 수밖에 없다.
+
+            v_target = ṡ_opp + follow_k · (gap − follow_gap)
+            scale    = clip(v_target / v_profile, follow_min, 1.0)
+
+        · gap 이 목표보다 크면 상대보다 빨리 가서 좁힌다 (추월 구간까지 붙어간다)
+        · gap 이 목표보다 작으면 상대보다 느려져 벌린다
+        · 상대가 없으면 1.0 (프로파일 그대로)
+
+        ★ 위로는 절대 안 올린다 (clip 상한 1.0). 프로파일은 마찰 한계이고,
+          상대를 쫓는다고 그걸 넘으면 미끄러진다.
+        """
+        lut = self._s_lut()
+        if lut is None:
+            return 1.0
+        best = None
+        s_ego, _ = self._project_sd(np.array([px, py], float), lut)
+        for tr in getattr(self, '_opp_tracks', []) or []:
+            if tr.get('n', 0) < self.opp_min_obs:
+                continue
+            gap = (float(tr.get('s', 0.0)) - s_ego) % lut['L']
+            if gap > 0.5 * lut['L']:
+                continue                       # 뒤에 있다 — 신경 쓸 것 없다
+            if best is None or gap < best[0]:
+                best = (gap, float(tr.get('s_dot', 0.0)))
+        if best is None:
+            return 1.0
+        gap, s_dot = best
+        if gap > self._obs_horizon():
+            return 1.0                          # 아직 멀다
+        v_prof = max(float(getattr(self, '_fr_v_ref', 0.0) or 0.0), 1e-3)
+        v_tgt = max(s_dot + self.follow_k * (gap - self.follow_gap), 0.0)
+        self._follow_gap = gap
+        return float(np.clip(v_tgt / v_prof, self.follow_min, 1.0))
+
+    def _overtake_zone(self):
+        """레이싱라인 각 점에서 **추월을 시작해도 되는가** (bool 배열).
+
+        ★ 왜 필요한가 (2026-08-15)
+          회피는 시작보다 **끝내는 것**이 어렵다. 넓은 구간 끝에서 옆으로
+          나가기 시작하면, 다 지나가기 전에 좁은 구간을 만나 **상대와 벽
+          사이에 끼인다.** 옆으로 피할 곳이 없으니 그때는 손쓸 방법이 없다.
+
+          그래서 맵에서 미리 정한다:
+            ① 복도 폭 ≥ ot_width 인 구간을 찾는다 (두 대가 나란히 갈 수 있는 곳)
+            ② 그 구간의 **끝에서 ot_exit_pad 만큼 잘라낸다** — 추월을 시작해
+               끝내는 데 드는 거리다. 여기서 시작하면 좁은 데서 끝난다
+            ③ 남은 길이가 ot_min_len 보다 짧으면 통째로 버린다
+
+          구간 밖에서는 옆으로 안 나가고 **상대 뒤를 따라간다** (속도를 맞춘다).
+          내가 더 빠르니 그냥 두면 들이받는다 — 횡회피가 금지된 곳에서는
+          종방향으로 푸는 수밖에 없다.
+
+        복도 폭은 **맵 거리변환**으로 잰다 (라인에서 벽까지 × 2). 경계 윤곽이
+        아니라 거리장을 쓰는 이유는 중심선 추출과 같다 — 인필드가 치우쳐도
+        영향받지 않는다.
+        """
+        wps = getattr(self, 'wps', None)
+        lut = self._s_lut()
+        if wps is None or lut is None:
+            return None
+        cached = getattr(self, '_ot_cache', None)
+        if cached is not None and cached[0] is wps:
+            return cached[1]
+
+        room = self._wall_room(np.asarray(wps[:, :2], float))
+        wide = (2.0 * room) >= self.ot_width
+        n = lut['n']
+        ok = wide.copy()
+
+        if wide.any() and not wide.all():
+            # ② 각 넓은 구간의 **끝**에서 exit_pad 만큼 잘라낸다.
+            #    순환이므로 "다음 좁은 점까지 남은 거리" 를 s 로 재서 자른다.
+            s_arr = lut['s']
+            L = lut['L']
+            narrow = np.where(~wide)[0]
+            s_nar = s_arr[narrow]
+            for i in np.where(wide)[0]:
+                gap = (s_nar - s_arr[i]) % L
+                if gap.min() < self.ot_exit_pad:
+                    ok[i] = False
+            # ③ 너무 짧은 구간은 버린다 — 들어가자마자 나오면 의미가 없다
+            for a, b in self._runs(np.r_[ok, ok])[:]:
+                if a >= n:
+                    break
+                ln = (s_arr[min(b, 2 * n - 1) % n] - s_arr[a % n]) % L
+                if ln < self.ot_min_len:
+                    for j in range(a, min(b + 1, n)):
+                        ok[j % n] = False
+        elif not wide.any():
+            ok[:] = False
+
+        self._ot_cache = (wps, ok)
+        return ok
 
     def _s_lut(self):
         """닫힌 레이싱라인의 s·법선. wps 가 그대로면 캐시."""
