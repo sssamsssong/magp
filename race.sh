@@ -26,6 +26,7 @@
 #    ./race.sh joy             조이스틱 수동 조종 (브링업 포함)
 #    ./race.sh log <이름>      웨이포인트 기록 (수동주행하며 레이싱라인 녹화)
 #    ./race.sh waypoints [맵]  SLAM 맵에서 레이싱라인 생성 (GUI, 디스플레이 필요)
+#    ./race.sh clean [맵]      SLAM 맵 정제 (빛살 제거). 화면 없이 대화형
 #    ./race.sh waypoints-kappa [맵]  위와 동일 + 조향각 물리한계(곡률) 제약
 #                              → <맵>_wp_kappa.csv 로 따로 저장, 랩타임 비교용
 #    ./race.sh waypoints-tumftm [맵]  TUMFTM 최소곡률(IQP) QP 최적화 (비-GUI, 자동)
@@ -212,9 +213,10 @@ print_mapping_howto () {
     echo ">>>   1) 이 창: 주행"
     echo ">>>   2) 다른 터미널:  ./race.sh savemap <새이름>"
     echo ">>>   3) 저장 확인 후 이 창에서 Ctrl+C"
-    echo ">>>   4) race_script.yaml 의 map_name / waypoints 를 새 이름으로"
-    echo ">>>   5) ./race.sh waypoints-kappa          ← 라인 생성"
-    echo ">>>   6) 차를 출발 위치에 두고  ./race.sh box"
+    echo ">>>   4) ./race.sh clean <새이름>           ← 빛살 제거 (<이름>_clean 생성)"
+    echo ">>>   5) race_script.yaml 의 map_name / waypoints 를 _clean 이름으로"
+    echo ">>>   6) ./race.sh waypoints-kappa          ← 라인 생성"
+    echo ">>>   7) 차를 출발 위치에 두고  ./race.sh box"
     echo ">>>      새 맵이면 노트북 RViz 에서 2D Pose Estimate 로 스캔을 벽에 맞춘 뒤"
     echo ">>>      ./race.sh savepose                 ← init_x/y/yaw 저장"
     echo ">>>      (한 번 저장하면 다음부터는 같은 자리에 차만 놓으면 됩니다)"
@@ -415,6 +417,21 @@ case "$CMD" in
   log)
     NAME=${2:?웨이포인트 이름을 주세요: ./race.sh log my_track_wp}
     exec ros2 run race_stack waypoint_logger --ros-args -p output:="$PKG_SHARE_WP/$NAME.csv" ;;
+  clean)
+    # SLAM 원본 맵에서 **트랙 경계 틈으로 새어 나간 가는 빛살**을 지운다.
+    #   빛살 폭 1~3px   /  트랙 폭 20px 이상  →  opening 반경 하나로 갈린다
+    #
+    # ★ clean_map.py(GUI 폴리곤)와 같은 일을 하되 **디스플레이가 필요 없다.**
+    #   대회장·SSH 에서 쓸 수 있는 쪽이 이것이다. 맵을 목록에서 고르고, 결과
+    #   수치를 보고 반경을 바꿔가며 되풀이한 뒤 저장한다.
+    #   맞는 반경은 트랙마다 다르므로 <맵>_clean_preview.png(빨강=지워진 영역)를
+    #   반드시 눈으로 확인할 것.
+    NAME=${2:-}
+    if [ -n "$NAME" ]; then
+      exec python3 "$SCRIPT_DIR/src/race_stack/maps/clean_map_auto.py" --map "$NAME"
+    else
+      exec python3 "$SCRIPT_DIR/src/race_stack/maps/clean_map_auto.py"
+    fi ;;
   waypoints)
     NAME=${2:-}
     if [ -n "$NAME" ]; then
