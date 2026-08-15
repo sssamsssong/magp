@@ -660,6 +660,12 @@ def generate_launch_description():
                     'follow_gap':     float(fr.get('follow_gap',   0.80)),
                     'follow_k':       float(fr.get('follow_k',     1.2)),
                     'follow_min':     float(fr.get('follow_min',   0.25)),
+                    # 다 지나갈 때까지 오프셋 유지 (상대가 시야에서 사라져도)
+                    'hold':           bool( fr.get('hold',         mode == 'race')),
+                    'hold_car_len':   float(fr.get('hold_car_len', 0.50)),
+                    'hold_obj_len':   float(fr.get('hold_obj_len', 0.50)),
+                    'hold_margin':    float(fr.get('hold_margin',  0.30)),
+                    'hold_max_sec':   float(fr.get('hold_max_sec', 3.0)),
                     'speed_min_scale':float(fr.get('speed_min_scale', 0.45)),
                     'speed_room_ref': float(fr.get('speed_room_ref',  0.45)),
                     'speed_scale_mode': str(fr.get('speed_scale_mode', 'vmax')),

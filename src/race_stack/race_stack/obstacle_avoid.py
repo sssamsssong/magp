@@ -465,7 +465,10 @@ class ObstacleAvoidMixin:
             self._fr_gap_room = float(room[best])
             self._fr_status = 3.0        # 3 = 추월금지(추종)
 
-        self._fr_best_d = float(d[best])
+        # ★ 다 지나갈 때까지 붙잡는다 (상대가 시야에서 사라져도).
+        #   d 를 정한 **뒤**에 건다 — 후보 평가를 건드리면 "지금 어디가 비었나"
+        #   판단까지 왜곡된다.
+        self._fr_best_d = self._update_hold(float(d[best]))
         self._fr_v_ref = float(v_ref)
         self._fr_vmax = float(v_cand[best])
         self._fr_kappa = float(kmax_arr[best])
@@ -995,6 +998,65 @@ class ObstacleAvoidMixin:
     follow_gap   = 0.80    # 상대 뒤 이 간격을 유지한다 [m] (범퍼 사이가 아니라 s 차)
     follow_k     = 1.2     # 간격 오차 → 속도 보정 이득 [1/s]
     follow_min   = 0.25    # 속도 배율 하한
+
+    # ── 회피 오프셋 유지 (pass-through hold) ──────────────────────────
+    hold_on      = False   # 켜면 회피를 시작한 뒤 다 지나갈 때까지 유지한다
+    hold_car_len = 0.50    # 내 차 길이 [m]
+    hold_obj_len = 0.50    # 피할 대상 길이 [m] (상대차 기준. 콘이면 훨씬 짧다)
+    hold_margin  = 0.30    # 여유 [m]
+    hold_max_sec = 3.0     # 상한 [s] — 잘못 물리면 영영 안 풀리는 것을 막는다
+
+    def _update_hold(self, d_cmd):
+        """옆으로 나간 뒤 **다 지나갈 때까지** 오프셋을 유지한다.
+
+        ★ 왜 필요한가 — 나란히 달리는 동안 상대가 **시야에서 사라진다.**
+          라이다는 base_link 앞 0.27m 에 있고 화각이 ±70° 다. 상대가 옆
+          0.4m 에 있을 때:
+              종방향 1.00m →  29°  보임
+              종방향 0.60m →  50°  보임
+              종방향 0.40m →  72°  ★ 안 보임
+              종방향 0.00m → 124°  ★ 안 보임
+          즉 **추월의 마지막 구간에서 상대를 전혀 못 본다.** 검출이 끊기면
+          비용의 w_offset 이 라인으로 되돌리므로, 아직 나란히 있는데 옆구리를
+          들이받는 쪽으로 조향한다.
+
+        ★ 왜 콘에서는 문제가 안 됐나 — 지나가는 데 걸리는 시간이 다르다.
+          필요한 **상대 종방향 변위** = 내 길이 + 대상 길이 + 여유
+              콘  (0.2m) : 1.0m / 접근속도 4㎧  → 0.25s
+              상대차(0.5m): 1.3m / 접근속도 1㎧  → 1.30s   ← 5배
+          접근속도는 v_ego − v_opp 라 상대가 빠를수록 더 오래 걸린다.
+          검출이 끊기는 시간(≈0.15s)이 콘에서는 짧아 티가 안 났다.
+
+        유지 시간은 매 틱 **남은 변위 ÷ 접근속도**로 다시 잡는다. 고정 시간으로
+        두면 접근속도가 변할 때 모자라거나 남는다.
+        """
+        if not self.hold_on:
+            return d_cmd
+        now = float(getattr(self, '_now_sec', 0.0) or 0.0)
+        need = self.hold_car_len + self.hold_obj_len + self.hold_margin
+
+        # 지금 막고 있는 것 중 가장 가까운 것의 접근속도
+        closing, seen = None, False
+        for tr in getattr(self, '_opp_tracks', []) or []:
+            if tr.get('n', 0) < self.opp_min_obs:
+                continue
+            seen = True
+            c = abs(float(getattr(self, 'speed', 0.0) or 0.0)) - float(tr.get('s_dot', 0.0))
+            closing = c if closing is None else min(closing, c)
+
+        if abs(d_cmd) > 1e-3 and seen:
+            # 회피 중이고 아직 보인다 — 만료 시각을 계속 갱신한다
+            cl = max(closing if closing is not None else 1e-3, 0.2)
+            self._hold_until = now + min(need / cl, self.hold_max_sec)
+            self._hold_d = float(d_cmd)
+            return d_cmd
+
+        # 안 보이는데 유지 기간이 남았다 → 방금 옆에 붙은 것이다. 붙잡는다.
+        until = float(getattr(self, '_hold_until', 0.0) or 0.0)
+        if now < until and abs(float(getattr(self, '_hold_d', 0.0))) > 1e-3:
+            self._fr_status = max(float(getattr(self, '_fr_status', 0.0)), 1.0)
+            return float(self._hold_d)
+        return d_cmd
 
     def _follow_scale(self, px, py):
         """추월 금지 구간에서 **상대 뒤를 따라가는** 속도 배율.

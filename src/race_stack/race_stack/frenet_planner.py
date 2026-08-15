@@ -130,6 +130,16 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         d('follow_gap',    0.80)   # 유지할 s 간격 [m]
         d('follow_k',      1.2)    # 간격오차 → 속도 이득 [1/s]
         d('follow_min',    0.25)   # 속도 배율 하한
+        # ── 회피 오프셋 유지 — 다 지나갈 때까지 ────────────────────────
+        #   나란히 달리는 동안 상대가 **시야에서 사라진다** (라이다가 앞 0.27m,
+        #   화각 ±70° 라 종방향 0.4m 안이면 안 보인다). 그때 오프셋이 풀리면
+        #   아직 옆에 있는 상대를 들이받는 쪽으로 조향한다.
+        #   상세·수치는 obstacle_avoid._update_hold 주석.
+        d('hold',          False)
+        d('hold_car_len',  0.50)   # 내 차 길이 [m]
+        d('hold_obj_len',  0.50)   # 피할 대상 길이 [m]
+        d('hold_margin',   0.30)
+        d('hold_max_sec',  3.0)    # 상한 — 잘못 물려 영영 안 풀리는 것 방지
         d('speed_min_scale', 0.45)
         d('speed_room_ref',  0.45)  # speed_scale_mode=room 일 때만
         d('speed_scale_mode', 'vmax')  # vmax | room (ablation baseline)
@@ -232,6 +242,14 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.follow_gap  = float(p('follow_gap'))
         self.follow_k    = float(p('follow_k'))
         self.follow_min  = float(p('follow_min'))
+        self.hold_on      = bool( p('hold'))
+        self.hold_car_len = float(p('hold_car_len'))
+        self.hold_obj_len = float(p('hold_obj_len'))
+        self.hold_margin  = float(p('hold_margin'))
+        self.hold_max_sec = float(p('hold_max_sec'))
+        self._hold_until = 0.0
+        self._hold_d = 0.0
+        self._now_sec = 0.0
         self._ot_allowed = True
         self._follow_gap = float('inf')
         self.sp_min_scale = float(p('speed_min_scale'))
@@ -368,6 +386,8 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
     def _tick(self):
         if self.pos is None or self.wps is None:
             return
+        # 유지 로직이 쓰는 현재 시각 (믹스인은 노드가 아니라 clock 이 없다)
+        self._now_sec = self.get_clock().now().nanoseconds * 1e-9
         d = self._frenet_select(float(self.pos[0]), float(self.pos[1]), self.yaw)
         m = Float64();  m.data = float(d);  self.off_pub.publish(m)
         s = Float64();  s.data = float(self._fr_status);  self.st_pub.publish(s)
