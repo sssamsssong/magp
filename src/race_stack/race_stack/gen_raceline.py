@@ -22,6 +22,7 @@ import cv2
 from PIL import Image
 from scipy.interpolate import CubicSpline, interp1d
 from scipy.spatial import cKDTree
+import scipy.ndimage as ndimage
 import osqp
 import scipy.sparse as sp
 
@@ -60,7 +61,7 @@ WP_DIR   = os.path.join(_PKG_DIR, 'waypoints')
 # 1. 맵 → 트랙 경계 추출
 # ══════════════════════════════════════════════════════════════════════════════
 def extract_reftrack(map_name: str, safety_m: float, n_cl: int = 300,
-                     return_bounds: bool = False):
+                     return_bounds: bool = False, gap_fill: float = 0.05):
     """
     pgm 맵에서 centerline + 트랙 폭을 추출한다.
     반환: [N, 4] = [x, y, w_right, w_left] (미터)
@@ -88,7 +89,36 @@ def extract_reftrack(map_name: str, safety_m: float, n_cl: int = 300,
         y = (h - np.asarray(py, float)) * res + origin[1]
         return x, y
 
-    free = (img > 128).astype(np.uint8) * 255
+    free_b = img > 128
+
+    # ── 벽의 틈 메우기 ────────────────────────────────────────────────
+    #
+    # ★ 트랙 경계에 작은 틈이 있으면 라이다가 그리로 새어 나가 맵에 통로가
+    #   생긴다. 그러면 "가장 큰 자유공간 성분" 이 **샌 통로까지 포함**하고,
+    #   윤곽이 그 통로를 따라 들어갔다 나오면서 중심선이 벽에 붙는다.
+    #
+    #   2026-08-14 실측 (0815_clean) — 이걸 안 하면:
+    #       복도 최소폭(능선)  0.070m   ← 실제 벽이 아니라 **샌 통로의 능선**
+    #       중심선 최소 여유   0.098m   (차 반폭 0.155m 미달 → 라인 생성 실패)
+    #     벽을 5cm(1px) 메우면:
+    #       복도 최소폭        0.750m   자유 픽셀 변화는 −24px 뿐
+    #     즉 침식이 아니라 **틈만 정확히 막는다.**
+    #
+    #   ★ border_value=1 이 필수다. 기본값(0)이면 맵 밖을 자유공간으로 보고
+    #     **테두리의 벽 채움을 침식한다** — 실제로 자유 픽셀이 20817→22853 으로
+    #     늘어 트랙이 통째로 넓어졌다. 맵 밖은 벽이다.
+    if gap_fill > 0.0:
+        r_px = max(1, int(round(gap_fill / res)))
+        kern = np.zeros((2 * r_px + 1, 2 * r_px + 1), bool)
+        yy, xx = np.ogrid[-r_px:r_px + 1, -r_px:r_px + 1]
+        kern[(yy * yy + xx * xx) <= r_px * r_px] = True
+        wall = ndimage.binary_closing(~free_b, structure=kern, border_value=1)
+        n_filled = int(free_b.sum()) - int((~wall).sum())   # + = 자유가 줄었다(=틈이 막혔다)
+        free_b = ~wall
+        print(f'  벽 틈 메움: {gap_fill:.2f}m({r_px}px) — 자유 {-n_filled:+d}px '
+              f'{"(틈만 막힘)" if abs(n_filled) < 500 else "⚠ 변화가 크다 — 침식 의심"}')
+
+    free = free_b.astype(np.uint8) * 255
     n_lbl, labels, stats, _ = cv2.connectedComponentsWithStats(free)
     largest = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
     track_mask = (labels == largest).astype(np.uint8) * 255
@@ -146,27 +176,51 @@ def extract_reftrack(map_name: str, safety_m: float, n_cl: int = 300,
     cx_s, cy_s = splev(u, tck)
     cl = np.column_stack([cx_s, cy_s])
 
-    # ── 중심선 재중심화 (2026-08-10) ──────────────────────────────────
+    # ── 중심선 재중심화 ───────────────────────────────────────────────
+    #
     # 위 중심선은 "바깥 점마다 가장 가까운 안쪽 점과의 중점" 이다. 두 경계가
     # 나란하면 맞지만, 코너에서 안쪽 경계가 휘어 달아나면 중점이 바깥벽 쪽으로
     # 밀린다. fun_clean 실측: s=2.7m 에서 우 0.159m / 좌 0.903m (치우침 70%).
-    # 전체 폭은 1.06m 로 넉넉한데 중심선이 벽에서 0.159m 라, 차 반폭(0.155)을
-    # 빼면 어떤 라인을 그려도 그 근처는 여유가 2cm 다 → QP 가 해를 못 찾는다.
     #
-    # 각 점을 법선 방향으로 (d_inner − d_outer)/2 만큼 밀어 양쪽 거리를 맞춘다.
-    # 몇 번 반복하면 수렴한다 (medial axis 로 가는 고정점 반복).
-    for _ in range(12):
-        do_, _ = tree_outer.query(cl)
-        di_, _ = tree_inner.query(cl)
-        shift = (di_ - do_) * 0.5
-        if np.max(np.abs(shift)) < 1e-3:
-            break
-        # 접선 → 법선 (왼쪽). 닫힌 경로라 roll 로 중심차분
+    # ★★ 2026-08-14 재작성 — 예전 방식은 **거리 기준이 틀렸다.**
+    #   `shift = (d_inner − d_outer)/2` 로 밀었는데, d_inner 는 "인필드 윤곽점
+    #   까지의 거리" 다. 인필드가 트랙을 고르게 감싸면 맞지만, 한쪽으로 치우쳐
+    #   있으면 그 구간에서 d_inner 가 엉뚱하게 커진다(0815_clean 실측 5.68m).
+    #   그러면 shift 가 2.5m 씩 튀고, 5점 스무딩이 그걸 도로 끌어당겨
+    #   **중심선이 바깥벽에서 2cm 인 채로 굳는다.**
+    #     0815_clean: 중심선 최소 여유 0.019m ← 차 반폭 0.155m 미달 → 라인 실패
+    #     0814-1_clean 이 되던 건 인필드가 고르게 감싸 우연히 맞아떨어져서다.
+    #
+    #   이제 **거리변환**을 쓴다 — "어느 벽이든 가장 가까운 벽까지" 라
+    #   윤곽을 안팎으로 나눌 필요가 없다. 법선 방향으로만 훑어 가장 먼 점을
+    #   고르므로 점 순서도 보존된다 (자유 이동은 능선을 따라 뭉친다).
+    dist_m = cv2.distanceTransform(track_mask, cv2.DIST_L2, 5) * res
+
+    def dist_at(pts):
+        cxp = (pts[:, 0] - origin[0]) / res
+        ryp = h - (pts[:, 1] - origin[1]) / res
+        jj = np.clip(np.round(cxp).astype(int), 0, w - 1)
+        ii = np.clip(np.round(ryp).astype(int), 0, h - 1)
+        return dist_m[ii, jj]
+
+    span = np.linspace(-0.30, 0.30, 25)      # 한 번에 ±30cm 안에서만 찾는다
+    for _ in range(20):
         tx = np.roll(cl[:, 0], -1) - np.roll(cl[:, 0], 1)
         ty = np.roll(cl[:, 1], -1) - np.roll(cl[:, 1], 1)
         tn = np.maximum(np.hypot(tx, ty), 1e-9)
-        nx, ny = -ty / tn, tx / tn          # 왼쪽 = inner 쪽(CCW)
-        cl = cl + np.column_stack([nx, ny]) * shift[:, None]
+        nx, ny = -ty / tn, tx / tn
+        # 법선 위 여러 지점의 벽거리를 재서 가장 먼 곳으로
+        best_t = np.zeros(len(cl))
+        best_d = dist_at(cl)
+        for t in span:
+            cand = cl + np.column_stack([nx, ny]) * t
+            dcand = dist_at(cand)
+            upd = dcand > best_d
+            best_d = np.where(upd, dcand, best_d)
+            best_t = np.where(upd, t, best_t)
+        if np.max(np.abs(best_t)) < 1e-3:
+            break
+        cl = cl + np.column_stack([nx, ny]) * best_t[:, None]
         # 매 스텝 가볍게 다듬어 지그재그를 막는다
         k = np.ones(5) / 5
         for c in (0, 1):
@@ -675,8 +729,31 @@ def optimize_raceline(reftrack, outer, inner, *, w_veh, r_min, stepsize,
             break
 
     if best is None:
+        # ★ 안내를 나누는 이유 (2026-08-14)
+        #   원인이 둘인데 처방이 정반대다. 예전엔 무조건 "--safety 를 올려라" 라고
+        #   해서 헛다리를 짚게 만들었다 — 0815_clean 에서 safety 0.15/0.20/0.25/0.35
+        #   를 다 시도해도 전부 실패했다. 중심선 자체가 차폭보다 좁은 곳을 지나면
+        #   QP 가 할 수 있는 일이 없기 때문이다.
+        cl_room = float(min(track_widths(reftrack[:, :2], outer, inner,
+                                         safety_m=0.0, min_w=0.0)[0].min(),
+                            track_widths(reftrack[:, :2], outer, inner,
+                                         safety_m=0.0, min_w=0.0)[1].min()))
+        if cl_room < w_veh / 2.0 + wall_clear:
+            raise RuntimeError(
+                f'optimize_raceline: 벽 여유 {wall_clear:.3f}m 를 만족하는 해가 없다.\n'
+                f'  ★ 원인은 QP 가 아니라 **중심선**이다 — 중심선의 최소 벽 여유가\n'
+                f'    {cl_room:.3f}m 로, 필요한 {w_veh/2.0 + wall_clear:.3f}m'
+                f' (차 반폭 {w_veh/2.0:.3f} + 여유 {wall_clear:.3f}) 에 못 미친다.\n'
+                f'    중심선조차 못 지나는 목이 있으면 --safety 를 어떻게 줘도 안 된다.\n'
+                f'  → 맵을 확인할 것. 흔한 원인 두 가지:\n'
+                f'     · 벽에 틈이 있어 라이다가 새어 나갔다 → --gapfill 을 올린다\n'
+                f'       (기본 0.05m. 틈이 크면 0.10~0.15)\n'
+                f'     · 그 자리에 실제로 뭔가 놓여 있었다 → 치우고 다시 맵핑\n'
+                f'  → 급하면 --wallclear 를 낮춰 통과시킬 수는 있으나, 그만큼 차가\n'
+                f'    벽에 가까이 붙는다는 뜻이다.')
         raise RuntimeError(
             f'optimize_raceline: 벽 여유 {wall_clear:.3f}m 를 만족하는 해가 없다.\n'
+            f'  중심선은 {cl_room:.3f}m 로 충분하니 **QP 가 코너를 너무 파고든 것**이다.\n'
             f'  → **--safety 를 올릴 것** (예: 0.35). safety 는 QP 가 쓸 수 있는\n'
             f'     폭을 좁혀 라인을 중앙에 붙인다 = 벽 여유가 늘어난다.\n'
             f'     직관과 반대라 2026-08-10 에 이 메시지가 "줄이라" 고 잘못\n'
@@ -823,7 +900,7 @@ def gui_draw_raceline(map_name: str, args) -> tuple | None:
     ymin, ymax = origin[1], origin[1] + h_img * res
 
     # ── 트랙 경계 ──
-    reftrack = extract_reftrack(map_name, safety_m=args.safety)
+    reftrack = extract_reftrack(map_name, safety_m=args.safety, gap_fill=args.gapfill)
     cl = reftrack[:, :2]
     path_cl = np.vstack([cl, cl[0]])
     _, _, _, nv = calc_splines(path_cl)
@@ -999,6 +1076,10 @@ def main():
     p.add_argument('--steplimit', type=float, default=0.15,
                    help='반복 1회당 최대 횡이동 (m) — 신뢰영역')
     p.add_argument('--iters',  type=int, default=12, help='재선형화 반복 횟수')
+    p.add_argument('--gapfill', type=float, default=0.05,
+                   help='트랙 벽의 틈을 이만큼까지 메운다 [m] (기본 0.05). '
+                        '틈으로 라이다가 새면 "가장 큰 자유공간"이 샌 통로까지 '
+                        '포함해 중심선이 벽에 붙는다. 0=끔')
     p.add_argument('--apex-extra', type=float, default=0.40, dest='apex_extra',
                    help='코너 안쪽에만 더 줄 여유 [m]. 0=끔 (기본 0.40). '
                         '추종 오차가 코너에 몰리므로(실측 직선 0.16 vs 코너 0.39~0.55m) '
@@ -1077,7 +1158,7 @@ def main():
 
     print('\n[1] 트랙 경계 추출...')
     reftrack, outer_w, inner_w = extract_reftrack(
-        map_name, safety_m=args.safety, return_bounds=True)
+        map_name, safety_m=args.safety, return_bounds=True, gap_fill=args.gapfill)
 
     print(f'\n[2~4] 재선형화 반복 최소곡률 최적화 '
           f'(격자 {args.gridstep}m, 스텝한계 {args.steplimit}m, 최대 {args.iters}회)...')
