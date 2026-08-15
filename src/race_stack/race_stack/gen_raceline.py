@@ -1018,11 +1018,10 @@ def main():
     if args.map:
         map_name = args.map
     else:
-        maps = sorted(set(
-            f.rsplit('.', 1)[0]
-            for f in os.listdir(MAPS_DIR)
-            if f.endswith(('.pgm', '.png'))
-        ))
+        # ★ .pgm 이 있는 것만 맵이다. maps/ 에는 미리보기 PNG 도 같이 사는데
+        #   (clean_map_auto 의 <맵>_clean_preview.png), 그걸 목록에 올리면
+        #   고를 수 있는 것처럼 보이고 고르면 죽는다.
+        maps = sorted(f[:-4] for f in os.listdir(MAPS_DIR) if f.endswith('.pgm'))
         print('\n사용 가능한 맵:')
         for i, m in enumerate(maps, 1):
             print(f'  {i}. {m}')
@@ -1073,7 +1072,8 @@ def main():
     out_name = args.out or f'{map_name}_map_wp'
     wp_path  = os.path.join(WP_DIR, out_name + '.csv')
 
-    print(f'\n맵: {map_name}  vmax={args.vmax}  wveh={args.wveh}  safety={args.safety}')
+    print(f'\n맵: {map_name}  vmax={args.vmax}  wveh={args.wveh}  '
+          f'safety={args.safety}  apex_extra={args.apex_extra}  mu={args.mu}')
 
     print('\n[1] 트랙 경계 추출...')
     reftrack, outer_w, inner_w = extract_reftrack(

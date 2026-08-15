@@ -27,6 +27,8 @@
 #    ./race.sh log <이름>      웨이포인트 기록 (수동주행하며 레이싱라인 녹화)
 #    ./race.sh waypoints [맵]  SLAM 맵에서 레이싱라인 생성 (GUI, 디스플레이 필요)
 #    ./race.sh clean [맵]      SLAM 맵 정제 (빛살 제거). 화면 없이 대화형
+#    ./race.sh line [맵] [옵션]  ★ 레이싱라인 생성 (최소곡률 QP, 자동)
+#                              예) ./race.sh line 0815_clean --apex-extra 0.5
 #    ./race.sh waypoints-kappa [맵]  위와 동일 + 조향각 물리한계(곡률) 제약
 #                              → <맵>_wp_kappa.csv 로 따로 저장, 랩타임 비교용
 #    ./race.sh waypoints-tumftm [맵]  TUMFTM 최소곡률(IQP) QP 최적화 (비-GUI, 자동)
@@ -463,6 +465,35 @@ case "$CMD" in
       exec python3 "$SCRIPT_DIR/src/race_stack/maps/clean_map_auto.py" --map "$NAME"
     else
       exec python3 "$SCRIPT_DIR/src/race_stack/maps/clean_map_auto.py"
+    fi ;;
+  line)
+    # ★ 레이싱라인 생성기 (TUMFTM 최소곡률 QP + 재선형화 반복).
+    #
+    #   waypoints-kappa 와의 차이 — 둘 다 파체이카는 **안 쓴다** (마찰원만 쓴다).
+    #     waypoints-kappa : 사람이 GUI 로 경로를 스케치 → 후보 매칭 → 랩타임 최적화
+    #     line(gen_raceline): 맵에서 자동으로 최소곡률 QP. 사람이 안 그린다
+    #
+    #   0814-1_clean 실측 비교 (같은 맵·같은 물리, η=1.0):
+    #       kappa      길이 26.60m  R_min 1.021  코너여유 0.749  랩 8.75s
+    #       line       길이 24.77m  R_min 1.079  코너여유 0.550  랩 7.52s
+    #     라인이 짧고 곡률이 낮아 1.2초 빠르지만 벽에 더 붙는다.
+    #     --apex-extra(기본 0.40)가 코너 안쪽에만 여유를 되돌려 준다.
+    #
+    #   ※ setup.py entry point 대신 python3 -m 으로 부른다 — setup.py 를 건드리면
+    #     colcon build 가 필요한데, 이건 맵 도구라 재빌드 없이 바로 써야 한다.
+    #     MAPS_DIR/WP_DIR 이 __file__ 기준이라 실행 위치와 무관하다.
+    #   ★★ PYTHONPATH 를 repo 로 못박는다. 안 그러면 `python3 -m` 이
+    #     **colcon build 디렉토리의 사본**을 집는다:
+    #         맵 이미지 없음: ~/f1tenth_ws/build/race_stack/maps/0814-1_clean.pgm
+    #     MAPS_DIR 은 __file__ 기준이라, 어느 race_stack 을 import 했느냐가
+    #     그대로 맵 경로가 된다. 이 저장소가 이미 겪은 "colcon prefix 그림자"
+    #     와 같은 종류다 — 옛 사본이 조용히 실행되는 쪽이 더 위험하다.
+    NAME=${2:-}
+    export PYTHONPATH="$SCRIPT_DIR/src/race_stack:${PYTHONPATH:-}"
+    if [ -n "$NAME" ]; then
+      exec python3 -m race_stack.gen_raceline --map "$NAME" "${@:3}"
+    else
+      exec python3 -m race_stack.gen_raceline "${@:2}"
     fi ;;
   waypoints)
     NAME=${2:-}
