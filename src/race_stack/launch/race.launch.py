@@ -682,6 +682,12 @@ def generate_launch_description():
                     # 컨트롤러의 램프 속도와 같아야 한다 — 플래너가 "지금 어디에
                     # 있는지" 를 이걸로 안다 (히스테리시스·좌우 유지)
                     'shift_rate':       float(fr.get('shift_rate', 2.0)),
+                    # 컨트롤러의 L1 — 회피 완료 거리 계산용. 갈리면 상한이 틀어진다
+                    'l1_min':           float(mp.get('l1_min', 1.32)),
+                    'l1_k':             float(mp.get('l1_k',   0.75)),
+                    'shift_cap':        bool( fr.get('shift_cap',    True)),
+                    'shift_safety':     float(fr.get('shift_safety', 1.25)),
+                    'shift_min_v':      float(fr.get('shift_min_v',  0.8)),
                     # 후보 경로 곡률이 조향 한계를 넘으면 탈락 (안쪽 오프셋)
                     'wheelbase':        float(pp.get('wheelbase', 0.33)),
                     'max_steer':        float(pp.get('max_steer', 0.36)),

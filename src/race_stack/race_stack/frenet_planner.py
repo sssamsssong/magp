@@ -158,6 +158,9 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         # 컨트롤러의 기준선 램프 속도 [m/s]. 같아야 플래너가 보는 "현재 위치"가
         # 실제와 맞는다 (race_script.yaml frenet.shift_rate 와 동일 값).
         d('shift_rate',       2.0)
+        # 컨트롤러의 L1 (회피 완료 거리 계산용). 값이 갈리면 상한이 틀어진다.
+        d('l1_min',           1.32)
+        d('l1_k',             0.75)
 
         # ── 레이캐스팅 (믹스인이 self.get_parameter 로 직접 읽는다) ────────
         #   기본값은 stanley_controller 와 동일하게 맞췄다. 갈라지면 같은 코드가
@@ -178,6 +181,13 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         d('skew_max',      0.35)
         # 속도 판정에 쓸 전방 거리 [m]. 0 = 경로 전체(옛 동작 = 이중 감속)
         d('spd_span',      1.20)
+        # ── 회피 완료 가능성 속도 상한 ─────────────────────────────────
+        #   콘은 2m 안에서야 검출되는데(스캔 평면이 낮다) 오프셋을 다 옮기려면
+        #   3.2㎧ 에서 4m 가 필요하다. 그 차이를 속도로 메운다.
+        #   상세는 obstacle_avoid._shift_feasible_speed 주석.
+        d('shift_cap',     True)
+        d('shift_safety',  1.25)
+        d('shift_min_v',   0.8)
         # ── AMCL 용 스캔 마스킹 (앞차 뒤에 붙었을 때) ──────────────────
         #   앞차가 벽을 가리면 AMCL 이 그 빔을 벽으로 읽어 자세가 끌려간다.
         #   실측(08/15 race): 장애물 0.6m 안이면 전방 빔의 18~43% 가 맵으로
@@ -205,6 +215,12 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.skew_gain    = float(p('skew_gain'))
         self.skew_max     = float(p('skew_max'))
         self.spd_span     = float(p('spd_span'))
+        self.shift_cap_on   = bool( p('shift_cap'))
+        self.shift_safety   = float(p('shift_safety'))
+        self.shift_min_v    = float(p('shift_min_v'))
+        self.shift_l1_min   = float(p('l1_min'))
+        self.shift_l1_k     = float(p('l1_k'))
+        self.shift_rate_ref = float(p('shift_rate'))
 
         self.fr_dmax   = float(p('frenet_dmax'))
         step           = max(float(p('frenet_dstep')), 1e-3)
@@ -415,6 +431,13 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
             scale = self.sp_min_scale + (1.0 - self.sp_min_scale) * r
         else:
             scale = float(np.clip(vmax / v_ref, self.sp_min_scale, 1.0))
+
+        # ★ 옆으로 다 옮길 수 있는 속도로 상한을 건다 (회피 중일 때만).
+        #   콘이 2m 안에서야 보이는데 오프셋 이동에 4m 가 필요하면, 남는 방법은
+        #   속도를 줄여 거리를 버는 것뿐이다.
+        vcap = self._shift_feasible_speed(float(self.pos[0]), float(self.pos[1]), d)
+        if np.isfinite(vcap):
+            scale = min(scale, float(np.clip(vcap / v_ref, self.sp_min_scale, 1.0)))
 
         # ★ 추월 금지 구간이면 상대 뒤를 따라간다 — 옆으로 못 푸니 종으로 푼다.
         #   둘 중 **작은 쪽**을 쓴다. 통로가 좁아서 줄여야 하는데 추종이 1.0 을

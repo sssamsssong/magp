@@ -1114,6 +1114,53 @@ class ObstacleAvoidMixin:
             return float(self._hold_d)
         return d_cmd
 
+    # ── 회피 완료 가능성 속도 상한 ────────────────────────────────────
+    shift_cap_on   = True    # 끄면 예전 동작
+    shift_l1_min   = 1.32    # L1 = max(l1_min, l1_k·v). 컨트롤러와 같은 값이어야 한다
+    shift_l1_k     = 0.75
+    shift_rate_ref = 2.0     # 기준선 램프 속도 [m/s] (frenet.shift_rate 와 같게)
+    shift_safety   = 1.25    # 여유 배수
+    shift_min_v    = 0.8     # 이 아래로는 안 깎는다 [m/s]
+
+    def _shift_feasible_speed(self, px, py, d_cmd):
+        """**옆으로 다 옮길 수 있는** 속도 상한 [m/s]. 제한이 없으면 inf.
+
+        ★ 왜 필요한가 (2026-08-15 실차: "q2 가 너무 과감해져서 계속 박았다")
+          콘은 **2m 안에서야 검출된다.** 스캔 평면이 base_link 위 11cm 라
+          낮은 콘은 멀리서 스캔을 스치지 못한다 (하드웨어 한계).
+          실측: 라인(d=0)의 장애물 여유가
+              장애물까지 2~4m → 1.1~1.2m (아직 안 막힘. 옆 물체다)
+              장애물까지 0~2m → 0.15m   (여기서야 막힌다)
+
+          그런데 MAP 이 오프셋을 다 옮기려면 **1.8·L1/√2 + v·|d|/shift_rate**
+          를 달려야 한다. 3.2㎧ 면 L1=2.4m → 필요 4.0m. **2m 로는 절반이다.**
+
+          예전에는 통과속도를 경로 **전체** 곡률로 구해서(이중 감속) 우연히
+          느려졌고 그게 시간을 벌어줬다. 그걸 spd_span 으로 고치자 q2 가
+          제 속도로 달리며 들이받게 됐다 — 원인 하나를 고치니 그것에 기대던
+          다른 것이 드러난 것이다.
+
+          그래서 **명시적으로** 건다:
+              gap ≥ 1.8·L1/√2 + v·|d|/shift_rate   (× 여유배수)
+          를 v 에 대해 푼다. L1 은 현재 속도로 한 번 평가한다(고정점 1스텝).
+
+        ※ 감속이 아니라 **상한**이다. 회피가 필요 없으면 inf 라 아무 영향이 없다.
+        """
+        if not self.shift_cap_on or abs(d_cmd) < 1e-3:
+            return float('inf')
+        pts = getattr(self, 'on_track_pts', None)
+        if pts is None or not len(pts):
+            return float('inf')
+        gap = float(np.hypot(pts[:, 0] - px, pts[:, 1] - py).min())
+        v_now = max(abs(float(getattr(self, 'speed', 0.0) or 0.0)), 0.5)
+        L1 = max(self.shift_l1_min, self.shift_l1_k * v_now)
+        rise = 1.8 * L1 / math.sqrt(2.0)
+        room = gap / max(self.shift_safety, 1e-3) - rise
+        if room <= 0.0:
+            return self.shift_min_v          # 이미 늦었다 — 최대한 줄인다
+        v_cap = room * self.shift_rate_ref / abs(d_cmd)
+        return max(v_cap, self.shift_min_v)
+
     def _follow_scale(self, px, py):
         """추월 금지 구간에서 **상대 뒤를 따라가는** 속도 배율.
 
