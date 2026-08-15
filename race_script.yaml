@@ -11,12 +11,36 @@
 
   
 # ------------------------------------------------------------
-# 주행 모드  (아래 중 하나)
-#    mapping : SLAM으로 맵 생성 (키보드/조종기로 수동 주행)
-#    q1      : 예선1 - 장애물 없음, 레이싱라인 고속 추종 (pure_pursuit)
-#    q2      : 예선2 - 정적 장애물 회피 (gap_follower / disparity extender)
-#    q3      : 예선3 - 최소 랩타임, 공격적 속도 (pure_pursuit)
-#    race    : 1대1 경주 - 장애물+상대차량 회피 (gap_follower)
+# 주행 모드
+#
+#   ★ 이 줄은 **기본값일 뿐**이다. `./race.sh q2` 처럼 인자를 주면 그게 이긴다.
+#     여기 값은 인자 없이 `./race.sh` 만 쳤을 때와 주행 로그 이름에 쓰인다.
+#
+#   mapping : SLAM 으로 맵 생성 (조종기 수동 주행)
+#   q1      : 예선1 — 장애물 없음, 레이싱라인 고속 추종
+#   q2      : 예선2 — 정적 장애물(콘) 회피
+#   q3      : 예선3 — 최소 랩타임
+#   race    : 1대1 — 상대 차량 회피·추월
+#
+#   ── 모드별로 실제로 달라지는 것 ──────────────────────────────
+#
+#             컨트롤러      frenet_planner   추월구간(ot_zone)   grip_util
+#     q1      map            안 뜸              —                 [limits] 절
+#     q2      map            뜸                 꺼짐               〃
+#     q3      map            안 뜸              —                 〃
+#     race    map            뜸                 **켜짐**           〃
+#
+#     · 컨트롤러는 아래 `controller:` 가 정한다. auto 면 모드별 기본값인데,
+#       지금은 넷 다 map 을 쓰고 있다 (q1/q3 는 auto 기본이 pure_pursuit 이라
+#       `controller: map` 으로 명시해야 한다).
+#     · frenet_planner 는 q2·race 에서만 뜬다. 안 뜨면 회피가 **전혀** 없다.
+#       기동 로그에 `FrenetPlanner ready` 가 보이는지 확인할 것.
+#     · ot_zone(추월 가능 구간)은 race 에서만 켠다. 콘은 짧아서 살짝 비키면
+#       되는데 구간을 걸면 좁은 데 놓인 콘을 아예 못 피한다 (아래 frenet 절).
+#     · 속도는 모드가 아니라 limits.grip_util.<모드> 가 정한다.
+#
+#   ※ 옛 주석은 q1/q3=pure_pursuit, q2/race=gap_follower 라고 적혀 있었는데
+#     실제와 전혀 달랐다. gap_follower 는 레이싱라인을 아예 안 쓴다.
 # ------------------------------------------------------------
 mode: q2
 
@@ -40,13 +64,20 @@ waypoints: 0815_clean_map_wp
 
 # ------------------------------------------------------------
 # 컨트롤러 선택
-#    auto         = 모드에 따라 자동 (q1/q3→pure_pursuit, q2/race→gap_follower)
-#    stanley      = Q1/Q2/Q3 모두 Stanley 컨트롤러 사용 (아래 [stanley] 섹션 참조)
-#    pure_pursuit = 강제로 Pure Pursuit
-#    gap_follower = 강제로 Gap Follower
-#    map          = MAP 컨트롤러 (아래 [map] 섹션 참조)
+#    map          = MAP 컨트롤러 ← **지금 쓰는 것.** 아래 [map] 절 참조
 #                   ※ 'MAP' 은 알고리즘 이름(Model-based Adaptive Pure pursuit)
 #                     이고 위의 map_name(트랙 맵)과는 아무 상관 없다.
+#    auto         = 모드별 기본값. q1/q3 → pure_pursuit, q2 → gap_follower,
+#                   race → map (2026-08-13 변경)
+#    stanley      = Stanley 컨트롤러 (아래 [stanley] 절)
+#    pure_pursuit = 강제로 Pure Pursuit
+#    gap_follower = 강제로 Gap Follower
+#
+#    ★ auto 로 두지 말 것. q1/q3 가 pure_pursuit 으로 떨어지는데, 실차에서
+#      튜닝·검증한 것은 전부 map 이다 (μ·슬립보정·속도 프로파일이 map 절에 있다).
+#      race 를 8/13 에 gap_follower → map 으로 바꾼 이유도 같다 —
+#      gap_follower 는 **레이싱라인을 아예 안 쓰고** 매 프레임 가장 넓은 갭으로만
+#      달려서, 상대를 피할 수는 있어도 빠르지 않고 최적경로로 돌아오지도 않는다.
 #
 #    ★ 한 줄 고치기 싫으면 실행할 때 인자로 덮어쓸 수 있다:
 #         ./race.sh q3 map          ./race.sh q1 stanley
