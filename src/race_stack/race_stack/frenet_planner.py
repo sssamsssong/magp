@@ -160,6 +160,14 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         # 검사 (B): 빔 끝점이 벽에서 이만큼 떨어지면 장애물. 0 = 끔.
         #   좁은 통로 한가운데 장애물을 잡는다 (_raycast_obstacle_pts 참고).
         d('raycast_free_gap', 0.30)
+        # ── AMCL 용 스캔 마스킹 (앞차 뒤에 붙었을 때) ──────────────────
+        #   앞차가 벽을 가리면 AMCL 이 그 빔을 벽으로 읽어 자세가 끌려간다.
+        #   실측(08/15 race): 장애물 0.6m 안이면 전방 빔의 18~43% 가 맵으로
+        #   설명이 안 됐다. 상세·안전장치는 obstacle_avoid._amcl_mask 참고.
+        d('amcl_mask',     False)   # 켜면 /scan_amcl 발행
+        d('amcl_mask_pad', 2)       # 지우는 빔 좌우 여유 [빔]
+        d('amcl_mask_max', 0.30)    # 이 비율 넘게 지워야 하면 아예 안 지운다
+        d('amcl_scan_topic', '/scan_amcl')
         d('use_bounds',       False)
         d('debug',            True)
 
@@ -199,6 +207,10 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.a_lon_acc = float(p('a_lon_acc'))
         self.a_lon_brk = float(p('a_lon_brk'))
         self.hard_cap  = float(p('hard_cap'))
+        self.amcl_mask_on  = bool( p('amcl_mask'))
+        self.amcl_mask_pad = int(  p('amcl_mask_pad'))
+        self.amcl_mask_max = float(p('amcl_mask_max'))
+        self._amcl_masked = 0
         self.fr_bounds = bool(p('frenet_bounds'))
         self.fr_min_room = float(p('frenet_min_room'))
         self.fr_gap_hyst = float(p('frenet_gap_hyst'))
@@ -273,6 +285,9 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
             self.fr_bounds = False
 
         # ── ROS ───────────────────────────────────────────────────────
+        self.amcl_scan_pub = (
+            self.create_publisher(LaserScan, str(p('amcl_scan_topic')), 5)
+            if self.amcl_mask_on else None)
         self.off_pub = self.create_publisher(Float64, '/frenet/offset', 10)
         self.spd_pub = self.create_publisher(Float64, '/frenet/speed_scale', 10)
         self.st_pub  = self.create_publisher(Float64, '/frenet/status', 10)

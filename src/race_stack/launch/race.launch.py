@@ -195,6 +195,14 @@ def generate_launch_description():
     # 위치가 튄다. 속도를 올릴수록 정확히 비례해 나빠지므로 미리 넣어 둔다.
     deskew_on = bool(loc.get('scan_deskew', False))
     scan_topic = '/scan_deskewed' if deskew_on else '/scan'
+    # ★ AMCL 만 마스킹된 스캔을 본다. 컨트롤러·AEB·회피는 원본을 그대로 쓴다 —
+    #   빔을 지운 스캔으로 장애물을 찾으면 자기가 지운 것을 못 보게 된다.
+    #   frenet_planner 가 뜨는 모드(q2·race)에서만 켤 수 있다.
+    amcl_mask_on = (bool(loc.get('amcl_mask', False))
+                    and bool(cfg.get('frenet', {}).get('enabled', True))
+                    and mode in ('q2', 'race'))
+    amcl_scan_topic = '/scan_amcl'
+    amcl_input_topic = amcl_scan_topic if amcl_mask_on else scan_topic
     if deskew_on:
         nodes.append(Node(
             package='race_stack', executable='scan_deskew', name='scan_deskew',
@@ -265,7 +273,10 @@ def generate_launch_description():
     nodes.append(Node(
         package='nav2_amcl', executable='amcl', name='amcl', output='screen',
         parameters=[amcl_yaml,
-                    {'scan_topic': scan_topic.lstrip('/'),
+                    # ★ AMCL 만 마스킹된 스캔을 본다 (amcl_mask 켰을 때).
+                    #   컨트롤러·AEB·회피는 원본 그대로 — 지운 스캔으로
+                    #   장애물을 찾으면 자기가 지운 것을 못 보게 된다.
+                    {'scan_topic': amcl_input_topic.lstrip('/'),
                      'initial_pose.x': float(loc.get('init_x', 0.0)),
                      'initial_pose.y': float(loc.get('init_y', 0.0)),
                      'initial_pose.yaw': float(loc.get('init_yaw', 0.0)),
@@ -678,6 +689,11 @@ def generate_launch_description():
                     # 검사 (B) — 빔 끝점이 벽에서 이만큼 떨어지면 장애물.
                     # 좁은 통로 한가운데 장애물의 원거리 검출률을 3~10배로 올린다
                     'raycast_free_gap': float(st.get('raycast_free_gap', 0.30)),
+                    # AMCL 용 스캔 마스킹 (앞차가 벽을 가릴 때)
+                    'amcl_mask':        bool( loc.get('amcl_mask',      False)),
+                    'amcl_mask_pad':    int(  loc.get('amcl_mask_pad',  2)),
+                    'amcl_mask_max':    float(loc.get('amcl_mask_max',  0.30)),
+                    'amcl_scan_topic':  amcl_scan_topic,
                     'track_margin':     float(st.get('track_margin',     0.15)),
                 }]))
 

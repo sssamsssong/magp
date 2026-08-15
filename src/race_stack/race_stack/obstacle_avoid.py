@@ -818,11 +818,22 @@ class ObstacleAvoidMixin:
         obs = ahead & (meas < exp - deficit)                     # (A)
 
         free_gap = float(self.get_parameter('raycast_free_gap').value)
+        obs_b = np.zeros_like(obs)
         if free_gap > 0.0 and getattr(self, 'wall_dist_m', None) is not None:
             ang = self.yaw + a_car
             ends = np.vstack((lx0 + meas * np.cos(ang),
                               ly0 + meas * np.sin(ang))).T
-            obs = obs | (ahead & (self._wall_room(ends) > free_gap))   # (B)
+            obs_b = ahead & (self._wall_room(ends) > free_gap)
+            obs = obs | obs_b
+        # ★ AMCL 마스킹은 **두 검사를 다 통과한 빔만** 쓴다 (아래 _amcl_mask 참고).
+        #   회피는 하나만 걸려도 피하는 게 맞지만, AMCL 입력에서 빔을 지우는 건
+        #   훨씬 위험하다 — 진짜 벽을 지우면 자세가 더 틀어진다.
+        self._obs_beam_strict = idx[obs & obs_b]   # (B)
+
+        # ★ AMCL 용 마스킹에 쓸 수 있도록 "어느 빔이 장애물인가" 를 남긴다.
+        #   (idx 는 원본 ranges 의 인덱스. stride 로 솎은 것만 들어 있다)
+        self._obs_beam_idx = idx[obs]
+        self._obs_beam_n = int(len(idx))
 
         if not obs.any():
             return np.zeros((0, 2))
@@ -1213,6 +1224,83 @@ class ObstacleAvoidMixin:
                 out.append(mem + (xy_f - tr['p']))
         return np.vstack(out)
 
+    # ── AMCL 용 스캔 마스킹 ───────────────────────────────────────────
+    amcl_mask_on   = False   # 켜면 /scan_amcl 을 낸다
+    amcl_mask_pad  = 2       # 지우는 빔 좌우로 이만큼 더 (모서리 여유)
+    amcl_mask_max  = 0.30    # 이 비율을 넘게 지워야 하면 **아예 안 지운다**
+
+    def _amcl_mask(self, msg):
+        """앞차에 맞은 빔을 지운 스캔. 못 지울 상황이면 None.
+
+        ★ 왜 필요한가 (2026-08-15 실측)
+          앞차 뒤에 붙으면 라이다가 벽 대신 앞차를 본다. AMCL 은 그 빔을
+          "여기 벽이 있다" 로 읽어 자세를 그쪽으로 당긴다.
+          race bag 실측 — 맵으로 설명 안 되는 전방 빔의 비율:
+              가장 가까운 장애물 0.6m 안   18~43%
+              0.6~1.0m                    6~46%
+              2m 밖/없음                   0~20%
+
+        ★★ 피드백 루프를 조심해야 한다
+          기대거리는 **AMCL 자세로** 계산한다. 그 결과로 스캔을 걸러 다시
+          AMCL 에 먹이면, 자세가 틀어졌을 때 진짜 벽을 지우고 더 틀어진다.
+          2026-08-10 deskew A/B 에서 똑같은 함정에 빠졌다 (원시 스캔에서 나온
+          자세를 기준으로 그 스캔을 판정했다).
+
+          그래서 세 겹으로 막는다:
+            ① **두 검사를 다 통과한 빔만** 지운다 (기대보다 짧다 AND 벽에서 멀다).
+               회피는 하나만 걸려도 피하지만, 빔을 지우는 건 훨씬 위험하다.
+            ② 지울 빔이 전체의 amcl_mask_max(30%) 를 넘으면 **아예 안 지운다.**
+               그만큼 설명이 안 된다는 건 장애물이 아니라 **자세가 틀렸다**는
+               뜻이다. 그때 지우면 정확히 잘못된 방향으로 굳는다.
+            ③ 원본 /scan 은 그대로 두고 /scan_amcl 을 따로 낸다. RViz 에서
+               둘을 겹쳐 보면 무엇을 지웠는지 눈으로 확인된다.
+        """
+        idx = getattr(self, '_obs_beam_strict', None)
+        n_all = int(getattr(self, '_obs_beam_n', 0) or 0)
+        if idx is None or n_all <= 0:
+            return None
+        if len(idx) > self.amcl_mask_max * n_all:
+            self._amcl_masked = -1                 # 너무 많다 — 손대지 않는다
+            return None
+
+        rr = np.asarray(msg.ranges, dtype=float).copy()
+        if not len(rr):
+            return None
+        kill = np.zeros(len(rr), bool)
+        pad = int(self.amcl_mask_pad)
+        for i in idx:
+            kill[max(int(i) - pad, 0):int(i) + pad + 1] = True
+        rr[kill] = float('inf')
+        self._amcl_masked = int(kill.sum())
+
+        out = LaserScan()
+        out.header = msg.header
+        out.angle_min = msg.angle_min
+        out.angle_max = msg.angle_max
+        out.angle_increment = msg.angle_increment
+        out.time_increment = msg.time_increment
+        out.scan_time = msg.scan_time
+        out.range_min = msg.range_min
+        out.range_max = msg.range_max
+        out.ranges = rr.tolist()
+        out.intensities = list(msg.intensities)
+        return out
+
+    def _publish_amcl_scan(self, msg):
+        """마스킹한 스캔을 발행. 못 지울 상황이면 **원본을 그대로** 낸다.
+
+        ★ 어떤 경우에도 발행을 거르면 AMCL 이 굶는다. 마스킹은 개선이지
+          필수가 아니므로, 실패하면 원본으로 폴백하는 것이 맞다.
+        """
+        pub = getattr(self, 'amcl_scan_pub', None)
+        if pub is None or not self.amcl_mask_on:
+            return
+        try:
+            out = self._amcl_mask(msg)
+        except Exception:
+            out = None
+        pub.publish(out if out is not None else msg)
+
     def _obs_horizon(self) -> float:
         """속도에 비례하는 전방 감시 거리(m).
 
@@ -1267,12 +1355,16 @@ class ObstacleAvoidMixin:
                 self.blocking_pts = []
                 self.free_votes.append(True)
                 self._update_lane_free()
+                # ★ 장애물이 없어도 **반드시 발행한다.** 안 내면 AMCL 이
+                #   /scan_amcl 을 굶어 위치추정이 통째로 멎는다.
+                self._publish_amcl_scan(msg)
                 return
             # 마스크를 다시 걸지 않는다 — 이미 "맵으로 설명되지 않는 점" 만 남았다.
             # ★ 상대차는 움직인다 — 지금 자리가 아니라 **내가 도달할 때 있을 자리**를
             #   피해야 한다 (_predict_obstacles).
             pts_world = self._predict_obstacles(pts_world, msg)
             self._classify_obstacles(pts_world, 0.0, masked=False)
+            self._publish_amcl_scan(msg)
             return
 
         xmin = p('grid_xmin').value;   xmax = p('grid_xmax').value
