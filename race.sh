@@ -763,14 +763,24 @@ elif [ "$RECORD_BAG" = "1" ]; then
     mkdir -p "$(dirname "$BAG_DIR")"
     echo "[race.sh] ★ bag 녹화: $BAG_DIR"
     echo "[race.sh]   /scan 이 1081빔 33.5Hz 라 분당 약 9MB 쌓입니다."
+    echo "[race.sh]   회피 판정용 /frenet/{offset,status,speed_scale} 도 함께 녹화합니다."
     # ★ /scan_deskewed 도 반드시 넣는다. deskew 를 켜면 AMCL 이 보는 건 그쪽이라,
     #   /scan 만 녹화하면 **AMCL 의 실제 입력이 bag 에 없다** — 사후에 deskew 가
     #   도움이 됐는지 해가 됐는지 판정할 수가 없다 (2026-08-10 에 실제로 겪었다).
     #   토픽이 없으면 rosbag2 는 그냥 건너뛰므로 꺼져 있어도 무해하다.
+    # ★ 회피 결과(/frenet/*)도 넣는다 (2026-08-15).
+    #   회피 오프셋 d 는 driven_path.csv 에 안 남는다. 그래서 사후에
+    #   "회피가 된 건가, 라인만 따라간 건가" 를 판정할 방법이 없었다 —
+    #   라인 이탈량(CTE)으로 대신 재려다 틀린 결론을 냈다. 콘이 라인에서
+    #   30cm 옆이면 15cm 만 비켜도 충분히 피하는데, 그걸 "회피 없음" 으로 읽었다.
+    #   offset=지령 d, status=0평상/1회피/2막힘/3추월금지, speed_scale=감속배율.
+    #   토픽이 없으면 rosbag2 는 건너뛰므로 q1/q3 에서도 무해하다.
     ros2 bag record -o "$BAG_DIR" \
         /scan /scan_deskewed /odom /odom_imu /amcl_pose /drive /sensors/imu/raw \
         /commands/servo/position /race/enabled /diagnostics \
-        /particle_cloud >/dev/null 2>&1 &
+        /particle_cloud \
+        /frenet/offset /frenet/status /frenet/speed_scale \
+        /obstacle /overtake_zone >/dev/null 2>&1 &
     BAG_PID=$!
     # SIGINT 로 곱게 닫고, 안 죽으면 3초 뒤 강제 종료. 닫힌 bag 을 git 에 올린다.
     trap 'kill -INT $BAG_PID 2>/dev/null; ( sleep 3; kill -9 $BAG_PID 2>/dev/null ) & wait $BAG_PID 2>/dev/null; commit_logs' EXIT INT TERM
