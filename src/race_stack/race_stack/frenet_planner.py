@@ -46,11 +46,11 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 
-from geometry_msgs.msg import PoseWithCovarianceStamped
+from geometry_msgs.msg import Point, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float64
-from visualization_msgs.msg import MarkerArray
+from visualization_msgs.msg import Marker, MarkerArray
 
 from race_stack.obstacle_avoid import ObstacleAvoidMixin, _load_map
 
@@ -308,14 +308,13 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         mk.type = Marker.LINE_LIST; mk.action = Marker.ADD
         mk.scale.x = 0.10
         mk.color.r, mk.color.g, mk.color.b, mk.color.a = 0.0, 0.75, 1.0, 0.8
-        from geometry_msgs.msg import Point as _P
         n = len(xy)
         for i in range(n):
             j = (i + 1) % n
             if not (zone[i] and zone[j]):
                 continue
             for q in (xy[i], xy[j]):
-                pt = _P(); pt.x = float(q[0]); pt.y = float(q[1]); pt.z = 0.03
+                pt = Point(); pt.x = float(q[0]); pt.y = float(q[1]); pt.z = 0.03
                 mk.points.append(pt)
         arr.markers.append(mk)
         self.ot_pub.publish(arr)

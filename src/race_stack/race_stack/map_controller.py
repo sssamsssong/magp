@@ -535,6 +535,21 @@ class MapController(Node):
                 '/frenet/offset 끊김 — 레이싱라인으로 복귀한다 (회피 없음)',
                 throttle_duration_sec=2.0)
 
+        # ★★ **한 번도** 못 받은 경우를 따로 경고한다 (2026-08-15).
+        #   예전엔 `_fr_rx_t is not None` 조건 때문에 이 경우가 조용히 지나갔다.
+        #   frenet_planner 가 기동에서 죽으면 오프셋이 아예 안 오는데,
+        #   컨트롤러는 d=0 으로 정상 주행하므로 **로그상 완전히 정상으로 보인다.**
+        #   실제로 그랬다 — 08/15 race 주행에서 planner 가 NameError 로 즉사했고
+        #   차는 레이싱라인만 따라 달렸다. "회피를 전혀 못 한다" 로만 보였고
+        #   원인을 짚을 단서가 로그 어디에도 없었다.
+        #   회피를 켜 놓고 오프셋이 안 오면 그건 항상 고장이다.
+        if self._fr_rx_t is None:
+            self.get_logger().error(
+                '/frenet/offset 을 한 번도 못 받았다 — frenet_planner 가 죽었거나 '
+                '안 떴다. 회피가 전혀 동작하지 않는 상태다. '
+                'ros2 node list 로 frenet_planner 확인할 것',
+                throttle_duration_sec=3.0)
+
         step = float(self.p('frenet_shift_rate')) / 50.0     # _cmd_tick 50Hz
         self._fr_shift += float(np.clip(target - self._fr_shift, -step, step))
         if abs(self._fr_shift) < 1e-3:
