@@ -33,7 +33,9 @@
 #                              → <맵>_wp_tumftm.csv 로 따로 저장, 랩타임 비교용
 #    ./race.sh curvprobe       곡률-속도 캘리브레이션 리그 (slip과 별개 도구)
 #    ./race.sh steertrim       조향 중립값 자동 캘리브레이션 (IMU 기반, 전/후진 반복)
-#    ./race.sh savepose        ★ AMCL 위치를 localization.init_* 로 저장
+#    ./race.sh savepose        ★ 지금 AMCL 위치를 출발점으로 저장 (init_* + start_*)
+#                              savemap 이 맵 원점으로 이미 넣어두므로,
+#                              **출발 자리를 옮길 때만** 쓰면 됩니다
 #                              맵핑 중이 아니라 ./race.sh box (주행 스택) 위에서.
 #                              새 맵이면 RViz 2D Pose Estimate 로 맞춘 뒤 1회.
 #
@@ -203,11 +205,15 @@ kill_stack () {
 
 print_mapping_howto () {
     # mapping / mapping-joy 기동 시 터미널에 띄우는 순서. 자세한 설명은
-    # JETSON_COMMANDS.md 「권장 절차」. savemap 은 출발 자세를 안 남긴다.
+    # JETSON_COMMANDS.md 「권장 절차」.
+    # ★ savemap 이 출발점(init_* + start_*)을 맵 원점으로 저장한다 (2026-08-14).
     local how=$1
     echo ""
-    echo ">>> $how로 천천히 트랙 1~2바퀴. 가능하면 출발선에서 SLAM 을 시작하세요."
-    echo ">>>   (맵 원점 = 지금 차 자리. 다음에 차를 여기 놓을 필요는 없습니다)"
+    echo ">>> ★ 차를 **출발선에 놓고** SLAM 을 시작하세요."
+    echo ">>>   맵 원점(0,0,0) = 지금 이 자리 = 출발점입니다. savemap 이 그대로 저장합니다."
+    echo ">>>   여기서 시작하지 않으면 나중에 ./race.sh savepose 로 따로 맞춰야 합니다."
+    echo ">>>"
+    echo ">>> $how로 천천히 트랙 1~2바퀴."
     echo ">>>"
     echo ">>> 순서 — 이 창은 끄지 말 것 (먼저 Ctrl+C 하면 /map 이 사라져 저장 실패)"
     echo ">>>   1) 이 창: 주행"
@@ -216,12 +222,12 @@ print_mapping_howto () {
     echo ">>>   4) ./race.sh clean <새이름>           ← 빛살 제거 (<이름>_clean 생성)"
     echo ">>>   5) race_script.yaml 의 map_name / waypoints 를 _clean 이름으로"
     echo ">>>   6) ./race.sh waypoints-kappa          ← 라인 생성"
-    echo ">>>   7) 차를 출발 위치에 두고  ./race.sh box"
-    echo ">>>      새 맵이면 노트북 RViz 에서 2D Pose Estimate 로 스캔을 벽에 맞춘 뒤"
-    echo ">>>      ./race.sh savepose                 ← init_x/y/yaw 저장"
-    echo ">>>      (한 번 저장하면 다음부터는 같은 자리에 차만 놓으면 됩니다)"
+    echo ">>>   7) 차를 **지금 이 자리**에 두고  ./race.sh box"
     echo ">>>"
-    echo ">>> ★ savepose 는 지금(맵핑 중)이 아닙니다. AMCL 이 있는 주행 스택 위에서 합니다."
+    echo ">>> ★ 출발점은 savemap 이 맵 원점(=지금 차 자리)으로 자동 저장합니다."
+    echo ">>>   맵핑을 시작한 자리가 곧 출발선이므로 savepose 를 따로 할 필요가 없습니다."
+    echo ">>>   출발 자리를 옮기고 싶을 때만: RViz 2D Pose Estimate 로 맞춘 뒤"
+    echo ">>>   ./race.sh savepose  (맵핑 중이 아니라 AMCL 주행 스택 위에서)."
     echo ""
 }
 
@@ -339,8 +345,8 @@ case "$CMD" in
         echo "    2) 주행으로 트랙 한 바퀴"
         echo "    3) 터미널B:  ./race.sh savemap $NAME  ← A를 끄기 전에!"
         echo "    4) 저장 확인 후 터미널A 에서 Ctrl+C"
-        echo "    5) yaml map_name 바꾼 뒤 waypoints-kappa → box → (새 맵이면) savepose"
-        echo "       savepose 는 맵핑 중이 아니라 ./race.sh box 위에서."
+        echo "    5) clean → yaml map_name 바꾼 뒤 waypoints-kappa → box"
+        echo "       출발점은 savemap 이 맵 원점으로 자동 저장합니다 (savepose 불필요)."
         exit 1
     fi
 
@@ -356,15 +362,41 @@ case "$CMD" in
     # install 쪽에도 복사 (rebuild 없이 바로 사용)
     INSTALL_MAPS="$WS/install/race_stack/share/race_stack/maps"
     [ -d "$INSTALL_MAPS" ] && cp "$PKG_SHARE_MAPS/$NAME".* "$INSTALL_MAPS/" || true
+    # ── 출발점을 맵 원점으로 자동 설정 ────────────────────────────────
+    #
+    # ★ SLAM 의 map 프레임 원점 (0,0,0) 은 **맵핑을 시작한 순간의 차 자리**다.
+    #   slam_toolbox 가 첫 스캔을 원점에 놓고 시작하기 때문이다. 즉 차를 출발선에
+    #   놓고 맵핑을 시작했다면 출발점은 이미 (0,0,0) 으로 정해져 있다.
+    #   실측으로도 확인했다 — 0813-1_clean 은 (0,0) 이 벽에서 0.51m,
+    #   0814-1_clean 은 0.70m 로 둘 다 트랙 한복판이다.
+    #
+    # ★ 왜 자동으로 넣나 — 2026-08-14 에 맵만 바꾸고 이 좌표를 안 고쳐서
+    #   **옛 좌표가 벽 속**이 됐고 AMCL 이 위치를 아예 못 잡았다. 게다가
+    #   auto_localize 의 탐색 범위가 ±0.5m 라 원리적으로 못 찾는 상태였다.
+    #   출발선(mission.start_*)도 같이 벽 속이라 랩도 안 세어졌다.
+    #   맵을 만든 그 자리에서 같이 써 두면 이 사고가 구조적으로 안 난다.
+    #
+    #   출발 위치를 옮기고 싶을 때만 ./race.sh savepose 를 쓰면 된다.
+    echo "[race.sh] 출발점을 맵 원점(=맵핑 시작 시 차 자리)으로 설정합니다"
+    if "$SCRIPT_DIR/tune.sh" localization.init_x=0.0 localization.init_y=0.0 \
+                             localization.init_yaw=0.0 \
+                             mission.start_x=0.0 mission.start_y=0.0 >/dev/null; then
+        echo "[race.sh]   localization.init_x/y/yaw = 0, 0, 0"
+        echo "[race.sh]   mission.start_x/y         = 0, 0"
+    else
+        echo "[race.sh] ⚠ 좌표 저장 실패 — 손으로 넣거나 ./race.sh savepose 를 쓰세요."
+    fi
+
     echo "[race.sh] 완료. race_script.yaml 의 map_name 을 '$NAME' 으로 바꾸세요."
     echo "[race.sh] 다음:"
     echo "          1) 맵핑 창에서 Ctrl+C"
-    echo "          2) yaml 의 map_name / waypoints 를 '$NAME' 으로"
-    echo "          3) ./race.sh waypoints-kappa"
-    echo "          4) 차를 출발선에 두고 ./race.sh box"
-    echo "             새 맵 → RViz 2D Pose Estimate 로 맞춘 뒤 ./race.sh savepose"
-    echo "          ※ savepose 는 지금(맵핑 중)이 아닙니다. AMCL 주행 스택이 떠 있어야 합니다."
-    echo "          ※ 맵을 다시 뜨면 좌표가 바뀌므로 웨이포인트와 savepose 를 다시 하세요."
+    echo "          2) ./race.sh clean $NAME              ← 빛살 제거"
+    echo "          3) yaml 의 map_name / waypoints 를 '${NAME}_clean' 으로"
+    echo "          4) ./race.sh waypoints-kappa"
+    echo "          5) 차를 **맵핑 시작한 그 자리**에 두고 ./race.sh box"
+    echo "             → 출발점은 이미 저장됐으니 savepose 가 필요 없습니다."
+    echo "          ※ 출발 위치를 옮기고 싶을 때만 RViz 2D Pose Estimate 로 맞춘 뒤"
+    echo "            ./race.sh savepose (AMCL 스택이 떠 있어야 합니다)."
     exit 0 ;;
   teleop)
     exec ros2 run race_stack keyboard_teleop --ros-args -p max_speed:=$(get_yaml speed.mapping_max) ;;
@@ -518,17 +550,24 @@ print(f'[race.sh] 현재 AMCL 위치: ({t.x:.3f}, {t.y:.3f})  '
 node.destroy_node(); rclpy.shutdown()
 
 # tune.py 로 기록 — 주석·정렬이 보존되고 변경 이력도 남는다
+# ★ mission.start_x/y 도 같이 쓴다 (2026-08-14 추가).
+#   예전엔 init_* 만 써서, 맵을 바꾼 뒤 **출발선이 옛 좌표(벽 속)에 남아**
+#   위치는 잡아도 랩이 하나도 안 세어졌다. 둘은 같은 "출발 자리" 를 가리키는
+#   값이므로 따로 두면 반드시 어긋난다.
 r = subprocess.run([f'{script_dir}/tune.sh',
                     f'localization.init_x={t.x:.4f}',
                     f'localization.init_y={t.y:.4f}',
-                    f'localization.init_yaw={yaw:.4f}'])
+                    f'localization.init_yaw={yaw:.4f}',
+                    f'mission.start_x={t.x:.4f}',
+                    f'mission.start_y={t.y:.4f}'])
 if r.returncode != 0:
     print('[race.sh] 저장 실패 — 위 [tune] 메시지를 확인하세요.', flush=True)
     sys.exit(1)
 PYEOF
-    echo "[race.sh] 저장 완료 — 다음 실행부터 이 위치로 시작합니다"
+    echo "[race.sh] 저장 완료 — init_x/y/yaw 와 mission.start_x/y 를 함께 갱신했습니다"
     echo "[race.sh]   같은 맵이면 매번 2D Pose Estimate 를 찍을 필요 없습니다."
-    echo "[race.sh]   맵을 다시 뜨면 좌표가 바뀌므로 savepose 를 다시 하세요."
+    echo "[race.sh]   ※ 맵을 새로 뜨면 savemap 이 출발점을 맵 원점으로 자동 저장하므로"
+    echo "[race.sh]     savepose 는 **출발 자리를 옮길 때만** 쓰면 됩니다."
     exit 0 ;;
   "" ) MODE=$(get_yaml mode); CTRL="" ;;
   mapping|mapping-joy) MODE=$CMD; CTRL="" ;;
@@ -641,7 +680,9 @@ elif [ "$MODE" = "mapping-joy" ]; then
     if [ -f "$BRIDGE" ]; then
         echo "[race.sh] js_joy_bridge → $JS_DEV  (SDL joy_node 대신, 혼자 주행 방지)"
         python3 "$BRIDGE" "$JS_DEV" &#    ./race.sh savemap <이름>  맵핑 끝난 뒤 맵 저장
-#    ./race.sh savepose        ★ 지금 AMCL 위치를 초기 추정으로 저장
+#    ./race.sh savepose        ★ 지금 AMCL 위치를 출발점으로 저장
+#                              (savemap 이 맵 원점으로 이미 넣어두므로,
+#                               출발 자리를 옮길 때만 쓰면 됩니다)
 #                              RViz "2D Pose Estimate" 로 맵과 스캔을 맞춘 뒤 실행하면
 #                              다음 실행부터 그 위치에서 시작 (맵-스캔 어긋남 해소)
     echo "[race.sh] 완료. race_script.yaml의 map_name을 '$NAME'으로 바꾸세요."
