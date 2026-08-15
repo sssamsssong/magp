@@ -261,6 +261,12 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.off_pub = self.create_publisher(Float64, '/frenet/offset', 10)
         self.spd_pub = self.create_publisher(Float64, '/frenet/speed_scale', 10)
         self.st_pub  = self.create_publisher(Float64, '/frenet/status', 10)
+        # 추월 가능 구간 — 래치로 한 번만 낸다 (기동 시 정해지고 안 바뀐다).
+        #   RViz 에서 "지금 여기가 추월 구간인가" 를 눈으로 봐야 로그 없이도
+        #   판단이 된다. 오버레이 PNG 와 **같은 함수**로 계산한 결과다.
+        self.ot_pub  = self.create_publisher(
+            MarkerArray, '/overtake_zone',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.fr_pub  = (self.create_publisher(MarkerArray, '/frenet_candidates', 1)
                         if bool(p('debug')) else None)
         self.obs_pub = (self.create_publisher(MarkerArray, '/obstacle', 1)
@@ -277,6 +283,46 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
             f'(±{self.fr_dmax:.2f}m/{step:.2f}m), 여유 {self.fr_clear:.2f}m, '
             f'호라이즌 {self.obs_h_min:.1f}~{self.obs_h_max:.1f}m '
             f'({self.obs_h_sec:.1f}s)')
+        self._publish_overtake_zone()
+
+    def _publish_overtake_zone(self):
+        """추월 가능 구간을 RViz 로 (하늘색 = 나가도 되는 곳). 기동 시 1회.
+
+        ★ 안 켜져 있으면 **명시적으로 그 사실을 로그로 남긴다.** 조용히 아무
+          마커도 안 뜨면 "안 켠 것" 과 "계산 실패" 를 구분할 수 없다.
+        """
+        if not self.ot_zone_on:
+            self.get_logger().info('[추월구간] ot_zone=false — 어디서든 회피한다')
+            return
+        zone = self._overtake_zone()
+        lut = self._s_lut()
+        if zone is None or lut is None:
+            self.get_logger().warn('[추월구간] 계산 실패 — 웨이포인트/맵 확인')
+            return
+        xy = lut['xy']
+        arr = MarkerArray()
+        mk = Marker()
+        mk.header.frame_id = 'map'
+        mk.header.stamp = self.get_clock().now().to_msg()
+        mk.ns = 'overtake_zone'; mk.id = 0
+        mk.type = Marker.LINE_LIST; mk.action = Marker.ADD
+        mk.scale.x = 0.10
+        mk.color.r, mk.color.g, mk.color.b, mk.color.a = 0.0, 0.75, 1.0, 0.8
+        from geometry_msgs.msg import Point as _P
+        n = len(xy)
+        for i in range(n):
+            j = (i + 1) % n
+            if not (zone[i] and zone[j]):
+                continue
+            for q in (xy[i], xy[j]):
+                pt = _P(); pt.x = float(q[0]); pt.y = float(q[1]); pt.z = 0.03
+                mk.points.append(pt)
+        arr.markers.append(mk)
+        self.ot_pub.publish(arr)
+        self.get_logger().info(
+            f'[추월구간] {100.0 * zone.mean():.0f}% '
+            f'(폭≥{self.ot_width:.2f}m, 끝에서 {self.ot_exit_pad:.1f}m 잘라냄) '
+            f'→ RViz /overtake_zone')
 
     # ── 입력 ─────────────────────────────────────────────────────────
     def _pose_cb(self, msg: PoseWithCovarianceStamped):

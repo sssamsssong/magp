@@ -814,7 +814,43 @@ def calc_vel_profile(kappa:    np.ndarray,
 # ══════════════════════════════════════════════════════════════════════════════
 # 7. 오버레이 PNG 저장
 # ══════════════════════════════════════════════════════════════════════════════
-def save_overlay(map_name, raceline, v, wp_path):
+def _overtake_zone_for(map_name, raceline, args, gap_fill):
+    """오버레이에 그릴 추월 가능 구간. 실패하면 None (그림만 빠진다).
+
+    ★ 주행(frenet_planner)과 **같은 함수**를 쓴다 (obstacle_avoid.overtake_zone).
+      두 벌로 두면 그림과 실제가 갈리고, 그건 "그림은 되는데 차는 안 피한다"
+      로 나타나 디버깅이 샌다.
+    """
+    try:
+        from race_stack.obstacle_avoid import overtake_zone
+        import yaml as _y
+        cfg = _y.safe_load(open(os.path.join(MAPS_DIR, map_name + '.yaml')))
+        res = float(cfg['resolution']); ox, oy = cfg['origin'][:2]
+        img = None
+        for ext in ('.pgm', '.png'):
+            q = os.path.join(MAPS_DIR, map_name + ext)
+            if os.path.exists(q):
+                img = np.array(Image.open(q).convert('L')); break
+        if img is None:
+            return None
+        h, w = img.shape
+        free_b = img > 128
+        if gap_fill > 0.0:                       # 주행 쪽과 같은 전처리
+            r_px = max(1, int(round(gap_fill / res)))
+            yy, xx = np.ogrid[-r_px:r_px + 1, -r_px:r_px + 1]
+            kern = (yy * yy + xx * xx) <= r_px * r_px
+            free_b = ~ndimage.binary_closing(~free_b, structure=kern, border_value=1)
+        dist = cv2.distanceTransform(free_b.astype(np.uint8), cv2.DIST_L2, 5) * res
+        jj = np.clip(((raceline[:, 0] - ox) / res).astype(int), 0, w - 1)
+        ii = np.clip((h - (raceline[:, 1] - oy) / res).astype(int), 0, h - 1)
+        return overtake_zone(raceline, dist[ii, jj],
+                             args.ot_width, args.ot_exit_pad, args.ot_min_len)
+    except Exception as e:
+        print(f'  추월구간 계산 생략: {e}')
+        return None
+
+
+def save_overlay(map_name, raceline, v, wp_path, ot=None):
     try:
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -855,9 +891,25 @@ def save_overlay(map_name, raceline, v, wp_path):
         lc.set_array(v_ext)
         ax.add_collection(lc)
         ax.plot(px[0], py[0], 'b*', ms=15, zorder=6)
+
+        # ── 추월 가능 구간 (1대1) ────────────────────────────────────
+        #   주행 중 로그에만 뜨면 "트랙 어디가 추월 구간인지" 를 눈으로 못 본다.
+        #   라인을 만들 때 같이 그려두면 그 자리에서 검수할 수 있다.
+        #   계산은 obstacle_avoid.overtake_zone — **주행과 같은 함수**다.
+        ot_txt = ''
+        if ot is not None and ot.any():
+            oz = np.append(ot, ot[0])
+            seg_ot = segs[oz[:-1] & oz[1:]]
+            if len(seg_ot):
+                ax.add_collection(LineCollection(
+                    seg_ot, colors='#00bfff', linewidth=7.0, zorder=4, alpha=0.55))
+                ot_txt = f'   |  overtake zone {100*ot.mean():.0f}%'
+        elif ot is not None:
+            ot_txt = '   |  overtake zone 0%'
+
         fig.colorbar(lc, ax=ax, label='speed (m/s)', fraction=0.03, pad=0.02)
         ax.set_title(f'{map_name}  —  {len(raceline)}pts '
-                     f'({v.min():.1f}~{v.max():.1f} m/s)', fontsize=10)
+                     f'({v.min():.1f}~{v.max():.1f} m/s){ot_txt}', fontsize=10)
 
         out = os.path.splitext(wp_path)[0] + '.png'
         fig.tight_layout()
@@ -1080,6 +1132,11 @@ def main():
                    help='트랙 벽의 틈을 이만큼까지 메운다 [m] (기본 0.05). '
                         '틈으로 라이다가 새면 "가장 큰 자유공간"이 샌 통로까지 '
                         '포함해 중심선이 벽에 붙는다. 0=끔')
+    p.add_argument('--ot-width', type=float, default=1.10, dest='ot_width',
+                   help='추월 가능 구간 판정 폭 [m] — 오버레이 표시용. '
+                        '주행 값은 race_script.yaml frenet.ot_width 다')
+    p.add_argument('--ot-exit-pad', type=float, default=2.50, dest='ot_exit_pad')
+    p.add_argument('--ot-min-len',  type=float, default=2.00, dest='ot_min_len')
     p.add_argument('--apex-extra', type=float, default=0.40, dest='apex_extra',
                    help='코너 안쪽에만 더 줄 여유 [m]. 0=끔 (기본 0.40). '
                         '추종 오차가 코너에 몰리므로(실측 직선 0.16 vs 코너 0.39~0.55m) '
@@ -1143,7 +1200,8 @@ def main():
             for (x, y), vi in zip(raceline, v):
                 w.writerow([f'{x:.4f}', f'{y:.4f}', f'{vi:.4f}'])
         print(f'  저장: {len(raceline)}pts → {wp_path}')
-        save_overlay(map_name, raceline, v, wp_path)
+        save_overlay(map_name, raceline, v, wp_path,
+                     _overtake_zone_for(map_name, raceline, args, args.gapfill))
         print(f'\n완료!  race_script.yaml → waypoints: {out_name}')
         return
 
@@ -1206,7 +1264,11 @@ def main():
             w.writerow([f'{x:.4f}', f'{y:.4f}', f'{vi:.4f}'])
     print(f'  웨이포인트: {len(raceline)}pts → {wp_path}')
 
-    save_overlay(map_name, raceline, v, wp_path)
+    ot = _overtake_zone_for(map_name, raceline, args, args.gapfill)
+    if ot is not None:
+        print(f'  추월 가능 구간: {100*ot.mean():.0f}% '
+              f'(폭≥{args.ot_width:.2f}m, 끝에서 {args.ot_exit_pad:.1f}m 잘라냄)')
+    save_overlay(map_name, raceline, v, wp_path, ot)
 
     print('\n완료! 다음 단계:')
     print(f'  race_script.yaml → waypoints: {out_name}')

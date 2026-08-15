@@ -85,6 +85,61 @@ def _world_to_img(pts: np.ndarray, h, res, ox, oy) -> np.ndarray:
     return np.vstack((px, py)).T.astype(np.int32)
 
 
+def overtake_zone(xy, room, width, exit_pad, min_len):
+    """레이싱라인 각 점에서 **추월을 시작해도 되는가** (bool 배열).
+
+    ★ 한 곳에만 둔다. gen_raceline(오버레이 PNG)과 frenet_planner(주행)가
+      같은 함수를 쓴다. 두 벌로 두면 그림과 실제가 갈리는데, 그건 "그림은
+      되는데 차는 안 피한다" 로 나타나 디버깅이 샌다.
+
+    xy       (N,2) 라인 좌표
+    room     (N,)  각 점에서 벽까지 거리 [m] (거리변환)
+    width    나란히 가려면 필요한 복도 폭 [m] (= 2×room 과 비교)
+    exit_pad 좁아지기 전에 미리 구간을 끝낼 거리 [m]
+    min_len  이보다 짧은 구간은 버린다 [m]
+
+    ★ 왜 끝을 잘라내나 — 회피는 시작보다 **끝내는 것**이 어렵다. 넓은 구간
+      끝에서 옆으로 나가면 다 지나가기 전에 좁아져 상대와 벽 사이에 낀다.
+      그때는 옆으로 피할 곳이 없다.
+    """
+    xy = np.asarray(xy, float)[:, :2]
+    n = len(xy)
+    ds = np.hypot(np.roll(xy[:, 0], -1) - xy[:, 0],
+                  np.roll(xy[:, 1], -1) - xy[:, 1])
+    s_arr = np.concatenate(([0.0], np.cumsum(ds[:-1])))
+    L = float(ds.sum())
+
+    wide = (2.0 * np.asarray(room, float)) >= float(width)
+    ok = wide.copy()
+    if not wide.any():
+        return np.zeros(n, bool)
+    if wide.all():
+        return ok
+
+    # ② 각 넓은 구간의 **끝**에서 exit_pad 만큼 잘라낸다.
+    #    순환이므로 "다음 좁은 점까지 남은 거리" 를 s 로 재서 자른다.
+    s_nar = s_arr[~wide]
+    for i in np.where(wide)[0]:
+        if float(((s_nar - s_arr[i]) % L).min()) < float(exit_pad):
+            ok[i] = False
+
+    # ③ 너무 짧은 구간은 버린다 — 들어가자마자 나오면 의미가 없다
+    i = 0
+    while i < n:
+        if not ok[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and ok[j + 1]:
+            j += 1
+        if float((s_arr[j] - s_arr[i]) % L) < float(min_len):
+            ok[i:j + 1] = False
+        i = j + 1
+    # 0 을 넘어 이어지는 구간은 위 루프가 둘로 나눠 본다. 한 번 더 이어 붙여
+    # 판정하면 정확하지만, 짧게 잘리는 쪽이 안전한 방향이라 그대로 둔다.
+    return ok
+
+
 # ── 회피 로직 (믹스인) ──────────────────────────────────────────────────────
 
 
@@ -934,33 +989,9 @@ class ObstacleAvoidMixin:
         if cached is not None and cached[0] is wps:
             return cached[1]
 
-        room = self._wall_room(np.asarray(wps[:, :2], float))
-        wide = (2.0 * room) >= self.ot_width
-        n = lut['n']
-        ok = wide.copy()
-
-        if wide.any() and not wide.all():
-            # ② 각 넓은 구간의 **끝**에서 exit_pad 만큼 잘라낸다.
-            #    순환이므로 "다음 좁은 점까지 남은 거리" 를 s 로 재서 자른다.
-            s_arr = lut['s']
-            L = lut['L']
-            narrow = np.where(~wide)[0]
-            s_nar = s_arr[narrow]
-            for i in np.where(wide)[0]:
-                gap = (s_nar - s_arr[i]) % L
-                if gap.min() < self.ot_exit_pad:
-                    ok[i] = False
-            # ③ 너무 짧은 구간은 버린다 — 들어가자마자 나오면 의미가 없다
-            for a, b in self._runs(np.r_[ok, ok])[:]:
-                if a >= n:
-                    break
-                ln = (s_arr[min(b, 2 * n - 1) % n] - s_arr[a % n]) % L
-                if ln < self.ot_min_len:
-                    for j in range(a, min(b + 1, n)):
-                        ok[j % n] = False
-        elif not wide.any():
-            ok[:] = False
-
+        xy = np.asarray(wps[:, :2], float)
+        ok = overtake_zone(xy, self._wall_room(xy),
+                           self.ot_width, self.ot_exit_pad, self.ot_min_len)
         self._ot_cache = (wps, ok)
         return ok
 
