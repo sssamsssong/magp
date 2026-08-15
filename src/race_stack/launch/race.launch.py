@@ -695,6 +695,9 @@ def generate_launch_description():
                     # 검사 (B) — 빔 끝점이 벽에서 이만큼 떨어지면 장애물.
                     # 좁은 통로 한가운데 장애물의 원거리 검출률을 3~10배로 올린다
                     'raycast_free_gap': float(st.get('raycast_free_gap', 0.30)),
+                    # AMCL 어긋남 자기보정 (0=끔)
+                    'skew_gain':        float(st.get('skew_gain', 1.0)),
+                    'skew_max':         float(st.get('skew_max',  0.35)),
                     # AMCL 용 스캔 마스킹 (앞차가 벽을 가릴 때)
                     'amcl_mask':        bool( loc.get('amcl_mask',      False)),
                     'amcl_mask_pad':    int(  loc.get('amcl_mask_pad',  2)),

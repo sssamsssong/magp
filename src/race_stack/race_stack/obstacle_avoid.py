@@ -196,6 +196,8 @@ class ObstacleAvoidMixin:
     # ── 소비자가 안 정해도 동작하도록 하는 기본값 ─────────────────────
     #   frenet_planner 와 stanley_controller 가 각자 파라미터로 덮어쓴다.
     #   여기 기본값이 없으면 한쪽만 갱신했을 때 AttributeError 로 죽는다.
+    skew_gain = 1.0         # 자세 어긋남을 문턱에 얼마나 반영할지 (0=끔)
+    skew_max  = 0.35        # 그 보정의 상한 [m]
     fr_min_room = 0.22      # 통과 여유 하한 [m] = 차 반폭 0.17 + 여유 0.05
     fr_gap_hyst = 0.10      # 반대쪽 통로로 갈아탈 때 요구하는 우세폭 [m]
 
@@ -818,15 +820,47 @@ class ObstacleAvoidMixin:
         exp = self._raycast_expected(lx0, ly0, self.yaw + a_car, rmax)
 
         ahead = valid & (meas < horizon)
-        obs = ahead & (meas < exp - deficit)                     # (A)
+
+        # ── 자세 어긋남 자기보정 ──────────────────────────────────────
+        #
+        # ★★ 2026-08-15 실차: "AMCL 이 맵과 완전 일치하지 않는 순간마다 트랙
+        #    벽들을 장애물로 인식했다." 맞다. 로그로 확인했다:
+        #
+        #        정합도(호라이즌 안 빔의 벽거리 중앙)  프레임   (A) 검출점
+        #          <5cm  좋음                        1095        0
+        #          5~10cm                            210       24   ← 벽이다
+        #          10~20cm                            20       16
+        #
+        #    회피가 트랙 전 구간에 퍼졌다 (s=12~20m 는 100%, |d| 최대 0.6m).
+        #    실제 장애물은 둘뿐이었다.
+        #
+        #   pose_unc(0.25m) 로 벽을 부풀리는 것은 기대거리를 **짧게** 만드는
+        #   방향이라, "측정이 기대보다 짧다" 판정에서 **한쪽으로만** 보호된다.
+        #   차가 벽에 가까워지는 쪽으로 틀어지면 실측이 짧아져 그대로 걸린다.
+        #
+        #   자세가 얼마나 어긋났는지는 **매 스캔 공짜로 잴 수 있다** —
+        #   빔 끝점이 맵 벽에서 떨어진 거리의 중앙값이다. 자세가 맞으면 0 이고
+        #   틀어진 만큼 커진다. 중앙값이라 장애물 몇 개에는 안 흔들린다.
+        #   그만큼 두 검사의 문턱을 같이 올린다 = 자기보정.
+        skew = 0.0
+        wd_all = None
+        if getattr(self, 'wall_dist_m', None) is not None and ahead.sum() >= 20:
+            ang_a = self.yaw + a_car
+            ends_a = np.vstack((lx0 + meas * np.cos(ang_a),
+                                ly0 + meas * np.sin(ang_a))).T
+            wd_all = self._wall_room(ends_a)
+            skew = float(np.median(wd_all[ahead]))
+            skew = float(np.clip(skew * self.skew_gain, 0.0, self.skew_max))
+        self._pose_skew = skew
+
+        obs = ahead & (meas < exp - (deficit + skew))            # (A)
 
         free_gap = float(self.get_parameter('raycast_free_gap').value)
         obs_b = np.zeros_like(obs)
-        if free_gap > 0.0 and getattr(self, 'wall_dist_m', None) is not None:
-            ang = self.yaw + a_car
-            ends = np.vstack((lx0 + meas * np.cos(ang),
-                              ly0 + meas * np.sin(ang))).T
-            obs_b = ahead & (self._wall_room(ends) > free_gap)
+        if free_gap > 0.0 and wd_all is not None:
+            # (B) 도 같은 값으로 올린다. 자세가 틀어지면 **모든** 벽 반사가
+            # 그만큼 떨어져 보이므로, 안 올리면 벽 전체가 장애물이 된다.
+            obs_b = ahead & (wd_all > free_gap + skew)
             obs = obs | obs_b
         # ★ AMCL 마스킹은 **두 검사를 다 통과한 빔만** 쓴다 (아래 _amcl_mask 참고).
         #   회피는 하나만 걸려도 피하는 게 맞지만, AMCL 입력에서 빔을 지우는 건

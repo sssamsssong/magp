@@ -170,6 +170,12 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         # 검사 (B): 빔 끝점이 벽에서 이만큼 떨어지면 장애물. 0 = 끔.
         #   좁은 통로 한가운데 장애물을 잡는다 (_raycast_obstacle_pts 참고).
         d('raycast_free_gap', 0.30)
+        # ── 자세 어긋남 자기보정 ──────────────────────────────────────
+        #   AMCL 이 맵과 어긋난 만큼 두 검사의 문턱을 같이 올린다.
+        #   어긋남은 빔 끝점의 벽거리 중앙값으로 매 스캔 잰다 (공짜).
+        #   0 = 끔. 상세는 obstacle_avoid._raycast_obstacle_pts 주석.
+        d('skew_gain',     1.0)
+        d('skew_max',      0.35)
         # ── AMCL 용 스캔 마스킹 (앞차 뒤에 붙었을 때) ──────────────────
         #   앞차가 벽을 가리면 AMCL 이 그 빔을 벽으로 읽어 자세가 끌려간다.
         #   실측(08/15 race): 장애물 0.6m 안이면 전방 빔의 18~43% 가 맵으로
@@ -194,6 +200,8 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.obs_release_scale = float(p('obs_release_scale'))
         self.track_margin = float(p('track_margin'))
         self.use_bounds   = bool(p('use_bounds'))
+        self.skew_gain    = float(p('skew_gain'))
+        self.skew_max     = float(p('skew_max'))
 
         self.fr_dmax   = float(p('frenet_dmax'))
         step           = max(float(p('frenet_dstep')), 1e-3)
