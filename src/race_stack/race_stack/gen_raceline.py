@@ -522,23 +522,100 @@ def eval_spline_dense(nodes: np.ndarray, stepsize: float, n_sub: int = 40):
     return rl, el, ki, total
 
 
+def signed_curvature(line: np.ndarray, smooth_m: float = 0.5) -> np.ndarray:
+    """닫힌 폴리라인의 **부호 있는** 곡률 [1/m]. 세 점 원(Menger)으로 잰다.
+
+    부호 규약을 calc_splines 의 법선(오른쪽 방향)에 맞춘다:
+        +  오른쪽으로 돈다  → 코너 안쪽이 **오른쪽**(바깥 경계 쪽)
+        −  왼쪽으로 돈다    → 코너 안쪽이 **왼쪽**(안쪽 경계 쪽)
+
+    세 점 곡률은 점 간격이 촘촘하면 잡음이 크므로 호길이 smooth_m 만큼
+    이동평균한다. 안 하면 직선 구간에서도 곡률이 튀어 여유가 들쭉날쭉해진다.
+    """
+    p = np.asarray(line, float)[:, :2]
+    a, b, c = np.roll(p, 1, axis=0), p, np.roll(p, -1, axis=0)
+    v1, v2 = b - a, c - b
+    cross = v1[:, 0] * v2[:, 1] - v1[:, 1] * v2[:, 0]      # + = 좌회전(CCW)
+    l1 = np.linalg.norm(v1, axis=1)
+    l2 = np.linalg.norm(v2, axis=1)
+    l3 = np.linalg.norm(c - a, axis=1)
+    k = 2.0 * cross / np.maximum(l1 * l2 * l3, 1e-12)
+    k = -k                                                  # 법선(오른쪽)에 맞춤
+    ds = float(np.median(l1)) or 0.1
+    n = max(1, int(round(smooth_m / max(ds, 1e-6))) | 1)     # 홀수
+    if n > 1:                                               # 순환 이동평균
+        pad = np.r_[k[-(n // 2):], k, k[:n // 2]]
+        k = np.convolve(pad, np.ones(n) / n, 'valid')[:len(p)]
+    return k
+
+
+def apex_safety(line: np.ndarray, safety_m: float,
+                apex_extra: float, apex_kappa: float):
+    """코너 **안쪽에만** 여유를 더 준다 → (오른쪽 여유, 왼쪽 여유).
+
+    ★ 왜 균일한 --safety 로는 부족한가 (2026-08-14)
+      --safety 는 전 구간을 똑같이 좁힌다. 그런데 **추종 오차는 코너에 몰린다** —
+      실측(08/13~14, 5.3㎧): 직선 0.16m / 완만 0.23m / 코너 0.39~0.55m.
+      직선까지 같이 좁히면 랩타임만 잃고 정작 필요한 곳은 여전히 모자란다.
+
+    ★ 왜 안쪽만인가
+      코너에서 벽에 붙는 곳은 **안쪽 정점(apex)** 이다. 바깥은 그대로 두어야
+      아웃-인-아웃 진입이 살아 있어 반경을 크게 쓸 수 있다. 양쪽을 다 좁히면
+      라인이 코너 한복판에 갇혀 R 이 작아지고, 그러면 더 느려진다.
+
+    여유는 곡률에 비례해 매끄럽게 는다 (계단이면 그 지점에서 라인이 꺾인다):
+        extra = apex_extra · clip(|κ| / apex_kappa, 0, 1)
+    apex_kappa 는 "이 곡률이면 여유를 다 준다" 는 기준이고, 기본은 1/r_min —
+    즉 라인이 낼 수 있는 가장 조인 코너에서 최대 여유가 된다.
+
+    ★ 기본 0.40m 의 근거 (0814-1_clean, mu 0.42, safety 0.30 고정)
+
+        apex   코너여유   −차반폭   R_min    랩(η=1.0)
+        0      0.360     0.190    1.125    7.61s
+        0.20   0.500     0.330    1.180    7.77s
+        0.40   0.550     0.380    1.079    7.77s     ← 기본
+
+      코너 여유가 0.360 → 0.550m (+53%) 인데 랩은 0.16s 만 든다.
+      비교: 균일한 --safety 를 0.30→0.45 로 올리면 0.400m 에 0.17s —
+      **같은 비용에 훨씬 적게 번다.** 손해가 코너에만 국한되기 때문이다.
+
+    ※ 그래도 아직 부족하다 — 실측 코너 추종오차가 0.39~0.55m 라 여유 0.38m 와
+      거의 같다. 추종 오차를 0.2m 대로 줄인 뒤에야 이 라인으로 갈아탈 수 있다.
+      그전까지는 gen_waypoints_kappa 라인(코너 여유 0.579m)이 안전하다.
+    """
+    if apex_extra <= 0.0:
+        return safety_m, safety_m
+    k = signed_curvature(line)
+    f = np.clip(np.abs(k) / max(apex_kappa, 1e-6), 0.0, 1.0)
+    extra = apex_extra * f
+    #   k > 0  오른쪽으로 돎 → 안쪽이 오른쪽 → 오른쪽 여유를 늘린다
+    return (safety_m + np.where(k > 0, extra, 0.0),
+            safety_m + np.where(k < 0, extra, 0.0))
+
+
 def track_widths(line: np.ndarray, outer: np.ndarray, inner: np.ndarray,
-                 safety_m: float, min_w: float = 0.05):
+                 safety_m, min_w: float = 0.05, safety_l=None):
     """임의의 라인에서 좌우 트랙 폭을 **경계에서 다시 잰다**.
 
     반복 최적화가 매 스텝 라인을 옮기므로, 폭을 α 로 더하고 빼는 근사만 쓰면
     오차가 누적돼 라인이 조용히 트랙 밖으로 샌다. 매번 실측하면 그 경로가 없다.
     right = outer(바깥 경계), left = inner — 중심선이 CCW 라 바깥이 오른쪽이다.
+
+    safety_m 은 스칼라도 배열도 된다. 배열이면 점마다 다른 여유 (apex_safety).
+    safety_l 을 주면 좌우를 따로 쓴다.
     """
     d_o, _ = cKDTree(outer).query(line)
     d_i, _ = cKDTree(inner).query(line)
-    return (np.maximum(d_o - safety_m, min_w),
-            np.maximum(d_i - safety_m, min_w))
+    s_r = safety_m
+    s_l = safety_m if safety_l is None else safety_l
+    return (np.maximum(d_o - s_r, min_w),
+            np.maximum(d_i - s_l, min_w))
 
 
 def optimize_raceline(reftrack, outer, inner, *, w_veh, r_min, stepsize,
                       out_step, safety_m, iters=12, step_limit=0.15,
-                      wall_clear=0.06, tol=0.995):
+                      wall_clear=0.06, tol=0.995,
+                      apex_extra=0.0, apex_kappa=None):
     """재선형화 반복 최소곡률 최적화 (TUMFTM iqp 에 해당).
 
     ★ 한 번만 푸는 게 왜 안 되나 ─────────────────────────────────────────
@@ -586,7 +663,11 @@ def optimize_raceline(reftrack, outer, inner, *, w_veh, r_min, stepsize,
             best = (r_act, nodes.copy(), rl, el, kap, total, clear)
 
         # 다음 반복의 기준선 = 방금 옮긴 라인 (폭은 경계에서 다시 잰다)
-        w_r2, w_l2 = track_widths(nodes, outer, inner, safety_m)
+        #   ★ 여유는 **방금 나온 라인의 곡률**로 다시 계산한다. 반복이 진행되며
+        #     코너가 어디인지가 바뀌므로, 처음 중심선 곡률로 고정하면 어긋난다.
+        s_r, s_l = apex_safety(nodes, safety_m, apex_extra,
+                               apex_kappa if apex_kappa else 1.0 / max(r_min, 1e-6))
+        w_r2, w_l2 = track_widths(nodes, outer, inner, s_r, safety_l=s_l)
         ref = np.column_stack([nodes, w_r2, w_l2])
 
         if np.abs(alpha).max() < 1e-3:
@@ -918,6 +999,13 @@ def main():
     p.add_argument('--steplimit', type=float, default=0.15,
                    help='반복 1회당 최대 횡이동 (m) — 신뢰영역')
     p.add_argument('--iters',  type=int, default=12, help='재선형화 반복 횟수')
+    p.add_argument('--apex-extra', type=float, default=0.40, dest='apex_extra',
+                   help='코너 안쪽에만 더 줄 여유 [m]. 0=끔 (기본 0.40). '
+                        '추종 오차가 코너에 몰리므로(실측 직선 0.16 vs 코너 0.39~0.55m) '
+                        '균일한 --safety 보다 여기에 주는 편이 훨씬 싸다 — '
+                        '0814-1_clean 실측: 코너 여유 0.360→0.550m 에 랩 +0.16s')
+    p.add_argument('--apex-kappa', type=float, default=0.0, dest='apex_kappa',
+                   help='이 곡률[1/m]에서 --apex-extra 를 다 준다 (0=자동: 1/rmin)')
     p.add_argument('--wallclear', type=float, default=0.18,
                    help='벽까지 최소 여유 (m, 차폭 제외). ★ 실측 추종오차보다 커야 '
                         '한다 — 2026-08-09 CTE p95 가 η0.5 에서 0.217m, η1.0 에서 '
@@ -998,6 +1086,8 @@ def main():
         w_veh=args.wveh, r_min=args.rmin,
         stepsize=args.gridstep, out_step=args.step,
         safety_m=args.safety, iters=args.iters, step_limit=args.steplimit,
+        apex_extra=args.apex_extra,
+        apex_kappa=(args.apex_kappa if args.apex_kappa > 0 else None),
         wall_clear=args.wallclear)
 
     print(f'\n[5] 결과: {len(raceline)}pts  길이={total:.2f}m  '
