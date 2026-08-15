@@ -196,6 +196,7 @@ class ObstacleAvoidMixin:
     # ── 소비자가 안 정해도 동작하도록 하는 기본값 ─────────────────────
     #   frenet_planner 와 stanley_controller 가 각자 파라미터로 덮어쓴다.
     #   여기 기본값이 없으면 한쪽만 갱신했을 때 AttributeError 로 죽는다.
+    spd_span  = 1.20        # 속도 판정에 쓸 전방 거리 [m]. 0 = 경로 전체(옛 동작)
     skew_gain = 1.0         # 자세 어긋남을 문턱에 얼마나 반영할지 (0=끔)
     skew_max  = 0.35        # 그 보정의 상한 [m]
     fr_min_room = 0.22      # 통과 여유 하한 [m] = 차 반폭 0.17 + 여유 0.05
@@ -388,6 +389,26 @@ class ObstacleAvoidMixin:
         kmax_arr = np.zeros(N)
         den_eps = 0.05
         kap_eps = 1e-4
+        # ★★ 2026-08-15 — 속도는 **가까운 구간의 곡률**로만 정한다.
+        #
+        #   예전엔 후보 경로 **전체**(호라이즌 2.9~5.0m)의 최대 곡률로 v_max 를
+        #   구했다. 그러면 5m 앞이 조인 것 때문에 **지금** 느려진다.
+        #   그런데 컨트롤러의 속도 프로파일이 이미 앞을 보고 감속한다
+        #   (역방향 스윕 + speed_lag). **이중 감속**이다.
+        #
+        #   실차 로그가 그대로 보여줬다 (08/15 race, 장애물까지 거리별 배율):
+        #       3~4m  0.98      ← 아직 멀다
+        #       2~3m  0.85      ← 오프셋은 0.1m 뿐인데 15% 깎임
+        #       1~1.5m 0.87
+        #       0~1m  0.63      ← 붙을수록 느려진다
+        #   "너무 일찍 속도를 낮춘다. 바짝 따라붙어야 추월을 하지" 는 정확한 지적이다.
+        #
+        #   실행가능(kappa_ok)은 **전체 경로**로 판정한다 — 못 도는 길을 고르면
+        #   안 되니까. 속도만 가까운 구간을 본다.
+        n_near = len(kap)
+        if self.spd_span > 0.0:
+            n_near = max(2, int(round(self.spd_span / max(self._wp_ds, 1e-3))))
+            n_near = min(n_near, len(kap))
         for i, di in enumerate(d):
             denom = 1.0 - float(di) * kap
             # 곡률 중심을 지나거나 분모≈0 이면 κ' 가 폭주한다 → 탈락, v=0.
@@ -395,12 +416,13 @@ class ObstacleAvoidMixin:
                 kappa_ok[i] = False
                 continue
             kabs = np.abs(kap / denom)
-            kmax = float(np.max(kabs))
+            kmax = float(np.max(kabs))                 # 실행가능 판정: 전체
             if (not np.isfinite(kmax)) or kmax > kappa_max * 1.05:
                 kappa_ok[i] = False
                 continue
             kmax_arr[i] = kmax
-            v_curve[i] = math.sqrt(a_lat / max(kmax, kap_eps))
+            k_spd = float(np.max(kabs[:n_near]))       # 속도: 가까운 구간만
+            v_curve[i] = math.sqrt(a_lat / max(k_spd, kap_eps))
         zero_i = int(np.argmin(np.abs(d)))
         kappa_ok[zero_i] = True
         if kmax_arr[zero_i] <= 0.0:

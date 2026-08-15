@@ -688,7 +688,13 @@ def generate_launch_description():
                     'debug':            bool( fr.get('debug',     True)),
                     # 레이캐스팅은 [stanley] 값을 재사용한다 — 같은 트랙·같은 차다
                     'raycast_obs':      bool( st.get('raycast_obs',      True)),
-                    'raycast_fov_deg':  float(st.get('raycast_fov_deg',  140.0)),
+                    # ★ 화각은 모드별로 다르다 (2026-08-15).
+                    #   q2: 콘을 **절대** 안 건드려야 하니 넓게 본다(140°).
+                    #   race: 옆(±70°)에 있는 상대는 이미 나란히 달리는 중이라
+                    #     피할 것이 없다 — 그 구간은 hold(오프셋 유지)가 덮는다.
+                    #     넓게 보면 코너 안쪽 벽만 더 주워 담아 손해다.
+                    'raycast_fov_deg':  float(frc.get('raycast_fov_deg',
+                                          st.get('raycast_fov_deg', 140.0))),
                     'raycast_beam_deg': float(st.get('raycast_beam_deg', 0.25)),
                     'raycast_deficit':  float(st.get('raycast_deficit',  0.30)),
                     'raycast_pose_unc': float(st.get('raycast_pose_unc', 0.25)),

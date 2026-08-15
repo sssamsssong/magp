@@ -176,6 +176,8 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         #   0 = 끔. 상세는 obstacle_avoid._raycast_obstacle_pts 주석.
         d('skew_gain',     1.0)
         d('skew_max',      0.35)
+        # 속도 판정에 쓸 전방 거리 [m]. 0 = 경로 전체(옛 동작 = 이중 감속)
+        d('spd_span',      1.20)
         # ── AMCL 용 스캔 마스킹 (앞차 뒤에 붙었을 때) ──────────────────
         #   앞차가 벽을 가리면 AMCL 이 그 빔을 벽으로 읽어 자세가 끌려간다.
         #   실측(08/15 race): 장애물 0.6m 안이면 전방 빔의 18~43% 가 맵으로
@@ -202,6 +204,7 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.use_bounds   = bool(p('use_bounds'))
         self.skew_gain    = float(p('skew_gain'))
         self.skew_max     = float(p('skew_max'))
+        self.spd_span     = float(p('spd_span'))
 
         self.fr_dmax   = float(p('frenet_dmax'))
         step           = max(float(p('frenet_dstep')), 1e-3)
