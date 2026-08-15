@@ -685,9 +685,13 @@ def generate_launch_description():
                     # 컨트롤러의 L1 — 회피 완료 거리 계산용. 갈리면 상한이 틀어진다
                     'l1_min':           float(mp.get('l1_min', 1.32)),
                     'l1_k':             float(mp.get('l1_k',   0.75)),
+                    'spd_span':         float(fr.get('spd_span',     1.20)),
                     'shift_cap':        bool( fr.get('shift_cap',    True)),
                     'shift_safety':     float(fr.get('shift_safety', 1.25)),
                     'shift_min_v':      float(fr.get('shift_min_v',  0.8)),
+                    'shift_preempt':    bool( fr.get('shift_preempt', True)),
+                    'shift_det_m':      float(fr.get('shift_det_m',   2.70)),
+                    'shift_brake':      float(fr.get('shift_brake',   0.0)),
                     # 후보 경로 곡률이 조향 한계를 넘으면 탈락 (안쪽 오프셋)
                     'wheelbase':        float(pp.get('wheelbase', 0.33)),
                     'max_steer':        float(pp.get('max_steer', 0.36)),

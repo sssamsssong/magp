@@ -1121,6 +1121,69 @@ class ObstacleAvoidMixin:
     shift_rate_ref = 2.0     # 기준선 램프 속도 [m/s] (frenet.shift_rate 와 같게)
     shift_safety   = 1.25    # 여유 배수
     shift_min_v    = 0.8     # 이 아래로는 안 깎는다 [m/s]
+    shift_det_m    = 2.70    # 장애물이 **보이기 시작하는** 거리 [m] (실측)
+    shift_brake    = 0.0     # 제동 능력 [m/s²]. 0 = μ_eff·g 로 자동
+    shift_preempt  = True    # 보이기 전에도 접근속도를 제한할지
+
+    def _approach_speed_cap(self):
+        """장애물이 **보이기 전에** 걸어두는 접근속도 상한 [m/s].
+
+        ★ 왜 필요한가 (2026-08-15 실차: "지금이 딱 마지노선으로, 부딪히지 않을
+          마지막 순간에 회피한다. 대회장에서 마찰이 좋아져 속도가 오르면 못 피할
+          수도 있다" — 정확한 예측이다.)
+
+          검출 거리는 **하드웨어가 정한다.** 스캔 평면이 base_link 위 11cm 라
+          낮은 콘은 가까이 와야 보인다. 실측 회피 시작 거리 중앙 2.76m 로
+          속도와 무관하게 일정했다. 그런데 남는 **시간**은 속도에 반비례한다:
+
+              회피 시작 시 남는 시간 (오늘 실측)
+                2.81m @ 3.82㎧ → 0.74s
+                0.42m @ 4.04㎧ → 0.10s   ★
+                0.81m @ 4.57㎧ → 0.18s   ★
+              중앙 1.01s
+
+          _shift_feasible_speed 는 **보인 뒤에** 속도를 깎는데, 그때는 이미
+          제동거리가 모자란다:
+
+              접근속도  옆으로 옮기기  제동거리  합계   가용 2.76m
+                2.0㎧     2.21m      0.22m   2.43m    ✓
+                3.0㎧     3.10m      0.62m   3.72m    ★ 모자람
+                5.0㎧     5.01m      1.80m   6.81m    ★ 모자람
+
+          그래서 **미리** 건다. "지금 이 속도에서 2.7m 앞에 콘이 나타나도
+          피할 수 있는가" 를 항상 만족시킨다. 못 하면 그 속도로 달리지 않는다.
+
+        ※ q2·race 처럼 장애물이 있을 수 있는 모드에서만 의미가 있다.
+          장애물이 없으면 이 상한이 랩타임을 그대로 깎아먹으므로,
+          shift_preempt 를 꺼서 예전 동작으로 돌릴 수 있다.
+        """
+        if not (self.shift_cap_on and self.shift_preempt):
+            return float('inf')
+        det = float(self.shift_det_m)
+        if det <= 0.0:
+            return float('inf')
+        brk = float(self.shift_brake)
+        if brk <= 0.0:
+            brk = (float(getattr(self, 'grip_util', 1.0))
+                   * float(getattr(self, 'mu', 0.348))
+                   * float(getattr(self, 'pac_d', 1.15)) * GRAVITY)
+        brk = max(brk, 0.5)
+        room = det / max(self.shift_safety, 1e-3)
+
+        # v 를 위에서부터 훑어 "제동거리 + 옆으로 옮기는 거리 ≤ room" 인 최대값.
+        #   닫힌 해가 없다 (L1 이 v 에 걸리고 목표 속도도 v 에 걸린다).
+        #   격자 탐색이 가장 단순하고, 20개면 0.25㎧ 해상도라 충분하다.
+        best = self.shift_min_v
+        for v in np.linspace(self.shift_min_v, 8.0, 32):
+            L1 = max(self.shift_l1_min, self.shift_l1_k * v)
+            rise = 1.8 * L1 / math.sqrt(2.0)
+            # 그 속도에서 옆으로 다 옮기는 데 드는 거리
+            need = rise + v * self.fr_dmax / max(self.shift_rate_ref, 1e-3)
+            if need <= room:
+                best = v
+            else:
+                break                      # v 에 단조증가라 더 볼 것 없다
+        return best
 
     def _shift_feasible_speed(self, px, py, d_cmd):
         """**옆으로 다 옮길 수 있는** 속도 상한 [m/s]. 제한이 없으면 inf.
