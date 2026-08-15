@@ -638,7 +638,11 @@ def generate_launch_description():
                     'opp_min_speed':  float(fr.get('opp_min_speed', 0.5)),
                     'opp_pred_max':   float(fr.get('opp_pred_max',  1.2)),
                     # 추월 가능 구간 (1대1). 기본은 race 모드에서만 켠다
-                    'ot_zone':        bool( fr.get('ot_zone',      mode == 'race')),
+                    # ★ frc(모드별) → fr(공용) → 모드 기본 순. q2 는 꺼야 한다:
+                    #   콘은 짧아서 살짝 비키면 되고, 구간을 걸면 좁은 데 놓인
+                    #   콘을 아예 못 피한다 (2026-08-15).
+                    'ot_zone':        bool( frc.get('ot_zone',
+                                            fr.get('ot_zone', mode == 'race'))),
                     'ot_width':       float(fr.get('ot_width',     1.10)),
                     'ot_exit_pad':    float(fr.get('ot_exit_pad',  2.50)),
                     'ot_min_len':     float(fr.get('ot_min_len',   2.00)),
