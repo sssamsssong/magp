@@ -575,12 +575,12 @@ wall_avoid:
 localization:
   # ★ 2026-08-13 (2호차) map_0813_clean 기준. 1호차 fun_clean 값은 (0.0005, -0.0684, 0.0968)
   #   이었다 — 트랙 설정은 아직 차량별로 안 나뉘어 있으니 상대 차가 쓸 때 되돌릴 것.
-  init_x: -1.57         # 시작 위치 초기 추정 (map 좌표)
-  init_y: 2.96
+  init_x: 5.2699        # 시작 위치 초기 추정 (map 좌표)
+  init_y: -0.3671
   #   ⚠ yaw 는 아직 옛 값이다. 위치만 맞고 방향이 틀리면 AMCL 이 수렴을 못 하거나
   #     엉뚱한 곳으로 붙는다. ./race.sh box 로 띄우고 RViz 2D Pose Estimate 로
   #     맞춘 뒤 ./race.sh savepose 하면 x·y·yaw 가 한 번에 저장된다.
-  init_yaw: 0.0968       # 라디안
+  init_yaw: -0.1796      # 라디안
 
   # ── IMU yaw 융합 — odom 의 각속도를 VESC 자이로 실측으로 교체 ──
   #    상세: 개발현황.md 08/03
