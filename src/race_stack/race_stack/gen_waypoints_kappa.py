@@ -83,6 +83,30 @@ SMOOTH_W   = 0.005
 WHEELBASE  = 0.33         # 축간거리 (m)
 MAX_STEER  = 0.36         # 최대 조향각 (rad)
 KAPPA_MAX  = np.tan(MAX_STEER) / WHEELBASE   # 물리적 최대 곡률 (1/m)
+# 최적화는 조향 한계의 KAPPA_MARGIN 배만 쓴다. 1.0 이면 라인 R_min = 차 R_min
+# 이라, 추종 오차로 안쪽에 1cm 만 들어가도 κ' = κ/(1−dκ) 가 불법이 된다.
+KAPPA_MARGIN = 0.85
+
+
+def _car_steer_geom(fallback_wb=0.33, fallback_ms=0.36):
+    """apply_vehicle 이 만든 overlay 에서 wheelbase / max_steer.
+
+    손으로 적으면 컨트롤러와 갈라진다 (gen_raceline._car_min_radius 과 같은 이유).
+    overlay 가 없으면(노트북에서 분석만 할 때) 모듈 기본값.
+    """
+    for name in ('.vehicle_overlay.yaml',):
+        p = os.path.join(_PKG_DIR, '..', '..', 'config', name)
+        p = os.path.abspath(p)
+        if not os.path.exists(p):
+            continue
+        try:
+            o = yaml.safe_load(open(p))
+            ms = float(o['pure_pursuit']['max_steer'])
+            wb = float(o['pure_pursuit']['wheelbase'])
+            return wb, ms
+        except Exception:
+            pass
+    return fallback_wb, fallback_ms
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -622,8 +646,9 @@ def minimum_laptime_opt(cx, cy, cw, dist_track, h):
     kappa_final = np.abs(_curvature(rx, ry))
     over_pct = float((kappa_final > KAPPA_MAX).mean() * 100)
     print(f'  |κ|_max={kappa_final.max():.3f} 1/m  '
-          f'(한계 {KAPPA_MAX:.3f} 1/m = wheelbase {WHEELBASE}m·max_steer '
-          f'{np.degrees(MAX_STEER):.1f}°)  초과구간={over_pct:.1f}%')
+          f'(한계 {KAPPA_MAX:.3f} = {KAPPA_MARGIN:.0%}·tan(max_steer)/L, '
+          f'L={WHEELBASE}m·{np.degrees(MAX_STEER):.1f}°)  '
+          f'초과구간={over_pct:.1f}%')
     if over_pct > 0:
         print('  → 국소보정 이후에도 남은 초과 구간 — 트랙 폭으로도 못 피하는 코너'
               '(물리적 최소회전반경보다 좁음). 실주행에서 감속 여유를 더 주거나'
@@ -1096,9 +1121,10 @@ def load_map_config(map_base):
 
 def main():
     global A_LAT_MAX, A_LON_ACC, A_LON_BRK, V_MAX, V_MIN, SAFETY_M
-    global WHEELBASE, MAX_STEER, KAPPA_MAX
+    global WHEELBASE, MAX_STEER, KAPPA_MAX, KAPPA_MARGIN
 
     import argparse
+    wb0, ms0 = _car_steer_geom()
     p = argparse.ArgumentParser(
         description='SLAM 맵에서 레이싱 라인 웨이포인트 생성 (곡률-제약 버전)')
     p.add_argument('--map',    default=None,  help='맵 이름 (생략 시 대화형 선택)')
@@ -1110,17 +1136,20 @@ def main():
                          '08/07 실측(A_LAT_MAX=3.7) 역산치, 0.9(=8.83) 아님')
     p.add_argument('--acc',    type=float, default=5.0,  help='가속도 (m/s²)')
     p.add_argument('--brk',    type=float, default=8.0,  help='감속도 (m/s²)')
-    p.add_argument('--wheelbase', type=float, default=WHEELBASE,
-                    help='축간거리 (m) — race_script.yaml pure_pursuit.wheelbase 와 맞출 것')
-    p.add_argument('--max-steer', type=float, default=MAX_STEER,
-                    help='최대 조향각 (rad) — race_script.yaml pure_pursuit.max_steer 와 맞출 것')
+    p.add_argument('--wheelbase', type=float, default=None,
+                    help='축간거리 (m). 생략 시 vehicle overlay / 기본값')
+    p.add_argument('--max-steer', type=float, default=None,
+                    help='최대 조향각 (rad). 생략 시 vehicle overlay / 기본값')
+    p.add_argument('--kappa-margin', type=float, default=KAPPA_MARGIN,
+                    help='조향 한계 대비 곡률 여유 (기본 0.85). 1.0=한계까지 붙임')
     p.add_argument('--seed-px', type=int,  default=None, help='트랙 내부 시드 픽셀 X (미지정시 자동/클릭)')
     p.add_argument('--seed-py', type=int,  default=None, help='트랙 내부 시드 픽셀 Y')
     args = p.parse_args()
 
-    WHEELBASE = args.wheelbase
-    MAX_STEER = args.max_steer
-    KAPPA_MAX = np.tan(MAX_STEER) / WHEELBASE
+    WHEELBASE = float(args.wheelbase) if args.wheelbase is not None else wb0
+    MAX_STEER = float(args.max_steer) if args.max_steer is not None else ms0
+    KAPPA_MARGIN = float(np.clip(args.kappa_margin, 0.5, 1.0))
+    KAPPA_MAX = np.tan(MAX_STEER) / WHEELBASE * KAPPA_MARGIN
 
     map_name = args.map or select_map_interactive()
     map_base = os.path.join(MAPS_DIR, map_name)
@@ -1145,7 +1174,8 @@ def main():
     print(f'저장   : {wp_path}')
     print(f'vmax={V_MAX}  vmin={V_MIN}  safety={SAFETY_M}  mu={args.mu}')
     print(f'wheelbase={WHEELBASE}m  max_steer={np.degrees(MAX_STEER):.1f}°  '
-          f'-> 물리적 최대곡률 κ_max={KAPPA_MAX:.3f} 1/m (최소회전반경 {1/KAPPA_MAX:.2f}m)')
+          f'margin={KAPPA_MARGIN:.2f}  → κ_max={KAPPA_MAX:.3f} 1/m '
+          f'(최소회전반경 {1/KAPPA_MAX:.2f}m)')
 
     img_arr = np.array(Image.open(
         map_base + ('.pgm' if os.path.exists(map_base+'.pgm') else '.png')

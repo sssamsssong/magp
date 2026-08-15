@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """obstacle_avoid — Frenet 장애물 회피 로직 (컨트롤러 공용).
 
-stanley_controller 에서 **원문 그대로 추출**한 것이다 (2026-08-09). 복사가 아니라
-이동이라 사본이 늘지 않는다. 로직은 한 글자도 바꾸지 않았다 — Stanley 가 저속에서
-잘 돌고 있고, 여기서 동작이 바뀌면 그 검증이 통째로 무효가 되기 때문이다.
+stanley_controller 에서 추출한 공용 회피 로직. Frenet 후보 비용에는
+통과속도(v_max) 항을 넣을 수 있다 (fr_w_spd, 기본 0 이면 예전과 동일).
 
 무엇을 하나
 ──────────
@@ -38,6 +37,8 @@ from PIL import Image
 from geometry_msgs.msg import Point
 from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker, MarkerArray
+
+from race_stack.speed_profile import GRAVITY
 
 
 def _load_map(map_yaml_path: str):
@@ -84,6 +85,61 @@ def _world_to_img(pts: np.ndarray, h, res, ox, oy) -> np.ndarray:
     return np.vstack((px, py)).T.astype(np.int32)
 
 
+def overtake_zone(xy, room, width, exit_pad, min_len):
+    """레이싱라인 각 점에서 **추월을 시작해도 되는가** (bool 배열).
+
+    ★ 한 곳에만 둔다. gen_raceline(오버레이 PNG)과 frenet_planner(주행)가
+      같은 함수를 쓴다. 두 벌로 두면 그림과 실제가 갈리는데, 그건 "그림은
+      되는데 차는 안 피한다" 로 나타나 디버깅이 샌다.
+
+    xy       (N,2) 라인 좌표
+    room     (N,)  각 점에서 벽까지 거리 [m] (거리변환)
+    width    나란히 가려면 필요한 복도 폭 [m] (= 2×room 과 비교)
+    exit_pad 좁아지기 전에 미리 구간을 끝낼 거리 [m]
+    min_len  이보다 짧은 구간은 버린다 [m]
+
+    ★ 왜 끝을 잘라내나 — 회피는 시작보다 **끝내는 것**이 어렵다. 넓은 구간
+      끝에서 옆으로 나가면 다 지나가기 전에 좁아져 상대와 벽 사이에 낀다.
+      그때는 옆으로 피할 곳이 없다.
+    """
+    xy = np.asarray(xy, float)[:, :2]
+    n = len(xy)
+    ds = np.hypot(np.roll(xy[:, 0], -1) - xy[:, 0],
+                  np.roll(xy[:, 1], -1) - xy[:, 1])
+    s_arr = np.concatenate(([0.0], np.cumsum(ds[:-1])))
+    L = float(ds.sum())
+
+    wide = (2.0 * np.asarray(room, float)) >= float(width)
+    ok = wide.copy()
+    if not wide.any():
+        return np.zeros(n, bool)
+    if wide.all():
+        return ok
+
+    # ② 각 넓은 구간의 **끝**에서 exit_pad 만큼 잘라낸다.
+    #    순환이므로 "다음 좁은 점까지 남은 거리" 를 s 로 재서 자른다.
+    s_nar = s_arr[~wide]
+    for i in np.where(wide)[0]:
+        if float(((s_nar - s_arr[i]) % L).min()) < float(exit_pad):
+            ok[i] = False
+
+    # ③ 너무 짧은 구간은 버린다 — 들어가자마자 나오면 의미가 없다
+    i = 0
+    while i < n:
+        if not ok[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and ok[j + 1]:
+            j += 1
+        if float((s_arr[j] - s_arr[i]) % L) < float(min_len):
+            ok[i:j + 1] = False
+        i = j + 1
+    # 0 을 넘어 이어지는 구간은 위 루프가 둘로 나눠 본다. 한 번 더 이어 붙여
+    # 판정하면 정확하지만, 짧게 잘리는 쪽이 안전한 방향이라 그대로 둔다.
+    return ok
+
+
 # ── 회피 로직 (믹스인) ──────────────────────────────────────────────────────
 
 
@@ -97,7 +153,9 @@ class ObstacleAvoidMixin:
     라이다: laser_dx, laser_dy
     호라이즌: obs_h_sec, obs_h_min, obs_h_max, obs_corr_hw, obs_release_scale
     Frenet: fr_grid, fr_clear, fr_clr_cap, fr_dmax, fr_bounds,
-            fr_w_off, fr_w_chg, fr_w_clr, _shift_cur, _fr_costs, _fr_best_d
+            fr_w_off, fr_w_chg, fr_w_clr, fr_w_spd (없으면 0=속도항 끔),
+            grip_util/mu/pac_d 또는 fr_a_lat,
+            _shift_cur, _fr_costs, _fr_best_d, _fr_vmax, _fr_v_ref
     검출결과: on_track_pts, blocking_pts, free_votes, lane_free
     발행:   fr_pub, obs_pub   (없으면 None)
     """
@@ -138,6 +196,9 @@ class ObstacleAvoidMixin:
     # ── 소비자가 안 정해도 동작하도록 하는 기본값 ─────────────────────
     #   frenet_planner 와 stanley_controller 가 각자 파라미터로 덮어쓴다.
     #   여기 기본값이 없으면 한쪽만 갱신했을 때 AttributeError 로 죽는다.
+    spd_span  = 1.20        # 속도 판정에 쓸 전방 거리 [m]. 0 = 경로 전체(옛 동작)
+    skew_gain = 1.0         # 자세 어긋남을 문턱에 얼마나 반영할지 (0=끔)
+    skew_max  = 0.35        # 그 보정의 상한 [m]
     fr_min_room = 0.22      # 통과 여유 하한 [m] = 차 반폭 0.17 + 여유 0.05
     fr_gap_hyst = 0.10      # 반대쪽 통로로 갈아탈 때 요구하는 우세폭 [m]
 
@@ -265,9 +326,125 @@ class ObstacleAvoidMixin:
         d = self.fr_grid
         feasible = (wall_room >= self.fr_min_room) & (obs_room >= self.fr_clear)
 
+        # ── 추월 금지 구간이면 옆으로 안 나간다 ───────────────────────
+        #   구간 밖에서 옆으로 나가면 다 지나가기 전에 통로가 좁아져 **상대와
+        #   벽 사이에 낀다.** 그때는 손쓸 방법이 없다. 그래서 여기서는 후보를
+        #   d=0(레이싱라인) 하나로 묶고, 대신 상대 뒤를 따라간다 —
+        #   횡으로 못 풀면 종으로 푸는 수밖에 없다 (_follow_scale).
+        #   ※ 이미 옆으로 나가 있으면(|shift|>0.05) 라인으로 **돌아오는 것**은
+        #     허용한다. 구간 경계를 넘는 순간 오프셋을 계단으로 끊으면 조향이
+        #     튀고, 무엇보다 지금 상대 옆에 있을 수 있다.
+        self._ot_allowed = True
+        self._ot_static = False
+        if self.ot_zone_on:
+            zone = self._overtake_zone()
+            lut = self._s_lut()
+            if zone is not None and lut is not None:
+                i_ego = int(np.argmin(np.hypot(lut['xy'][:, 0] - px,
+                                               lut['xy'][:, 1] - py)))
+                self._ot_allowed = bool(zone[i_ego])
+            # ★★ 2026-08-15 — 앞을 막은 것이 **정지 장애물**이면 구간을 안 따진다.
+            #   08/15 실차: "정지한 장애물조차 q2 에선 피했는데 추월 모드에서는
+            #   못 피하고 박았다." 당연하다 — 구간 밖이면 d=0 으로 묶여 있었다.
+            #
+            #   구간을 두는 이유는 **상대차와 나란히 달리는 시간이 길기 때문**이다.
+            #   그 사이 통로가 좁아지면 낀다. 콘은 길이 20cm 라 스쳐 지나가면
+            #   끝이고, 낄 일이 없다. 정지 장애물에 구간을 걸면 얻는 것 없이
+            #   **회피 능력만 잃는다** (q2 에서 ot_zone 을 끈 것과 같은 논리).
+            #
+            #   "정지" 판정은 추적된 클러스터의 ṡ 로 한다. 아직 추적이 덜 됐으면
+            #   (n < opp_min_obs) 보수적으로 **움직인다고 본다** — 상대차를
+            #   정지로 오판해 좁은 데서 나가는 쪽이 훨씬 위험하다.
+            if not self._ot_allowed:
+                trs = [t for t in (getattr(self, '_opp_tracks', []) or [])
+                       if t.get('n', 0) >= self.opp_min_obs]
+                if trs and all(abs(float(t.get('s_dot', 0.0))) < self.opp_min_speed
+                               for t in trs):
+                    self._ot_allowed = True
+                    self._ot_static = True
+        #   ※ feasible 을 여기서 깎지 않는다. 깎으면 후보가 전멸해 아래
+        #     "전부 막혔다" 폴백(argmax(room))으로 떨어지고, 하필 그게 **가장
+        #     크게 옆으로 나가는 후보**다 — 금지하려던 것을 정확히 하게 된다.
+        #     (실측: 금지 구간에서 d 가 −0.075 → −0.150 으로 오히려 커졌다)
+        #     그래서 고른 뒤에 라인으로 되돌린다.
+
+        # ── 곡률 실행가능 + 후보별 v_max ─────────────────────────────
+        # 법선 오프셋 d 의 평행곡선: κ' = κ / (1 − d·κ)  (좌회전 +, d 좌측 +).
+        # 안쪽으로 밀면 반경이 차 R_min = L/tan(max_steer) 아래로 떨어질 수 있다.
+        # 한계는 차량 기하에서 온다. d=0 은 항상 살린다 — 라인 자체가 κ_max 에
+        # 붙어 있어도 회피가 라인에서 쫓겨나면 안 된다.
+        #
+        # v_curve = √(a_lat / |κ'|). 조향 뒤에 깎는 steer_speed_limit 과 같은
+        # 물리지만, **고르기 전**에 써서 빠르게 통과할 후보를 고른다.
+        wb = float(getattr(self, 'wheelbase', 0.33) or 0.33)
+        ms = float(getattr(self, 'max_steer', 0.36) or 0.36)
+        kappa_max = math.tan(ms) / max(wb, 1e-6)
+        a_lat = self._frenet_a_lat()
+        v_ref = self._line_speed(px, py)
+        dx, dy = np.gradient(seg[:, 0]), np.gradient(seg[:, 1])
+        ddx, ddy = np.gradient(dx), np.gradient(dy)
+        kap = (dx * ddy - dy * ddx) / np.maximum((dx * dx + dy * dy) ** 1.5, 1e-9)
+        kappa_ok = np.ones(N, dtype=bool)
+        v_curve = np.zeros(N)
+        kmax_arr = np.zeros(N)
+        den_eps = 0.05
+        kap_eps = 1e-4
+        # ★★ 2026-08-15 — 속도는 **가까운 구간의 곡률**로만 정한다.
+        #
+        #   예전엔 후보 경로 **전체**(호라이즌 2.9~5.0m)의 최대 곡률로 v_max 를
+        #   구했다. 그러면 5m 앞이 조인 것 때문에 **지금** 느려진다.
+        #   그런데 컨트롤러의 속도 프로파일이 이미 앞을 보고 감속한다
+        #   (역방향 스윕 + speed_lag). **이중 감속**이다.
+        #
+        #   실차 로그가 그대로 보여줬다 (08/15 race, 장애물까지 거리별 배율):
+        #       3~4m  0.98      ← 아직 멀다
+        #       2~3m  0.85      ← 오프셋은 0.1m 뿐인데 15% 깎임
+        #       1~1.5m 0.87
+        #       0~1m  0.63      ← 붙을수록 느려진다
+        #   "너무 일찍 속도를 낮춘다. 바짝 따라붙어야 추월을 하지" 는 정확한 지적이다.
+        #
+        #   실행가능(kappa_ok)은 **전체 경로**로 판정한다 — 못 도는 길을 고르면
+        #   안 되니까. 속도만 가까운 구간을 본다.
+        n_near = len(kap)
+        if self.spd_span > 0.0:
+            n_near = max(2, int(round(self.spd_span / max(self._wp_ds, 1e-3))))
+            n_near = min(n_near, len(kap))
+        for i, di in enumerate(d):
+            denom = 1.0 - float(di) * kap
+            # 곡률 중심을 지나거나 분모≈0 이면 κ' 가 폭주한다 → 탈락, v=0.
+            if np.any(~np.isfinite(denom)) or np.any(denom <= den_eps):
+                kappa_ok[i] = False
+                continue
+            kabs = np.abs(kap / denom)
+            kmax = float(np.max(kabs))                 # 실행가능 판정: 전체
+            if (not np.isfinite(kmax)) or kmax > kappa_max * 1.05:
+                kappa_ok[i] = False
+                continue
+            kmax_arr[i] = kmax
+            k_spd = float(np.max(kabs[:n_near]))       # 속도: 가까운 구간만
+            v_curve[i] = math.sqrt(a_lat / max(k_spd, kap_eps))
+        zero_i = int(np.argmin(np.abs(d)))
+        kappa_ok[zero_i] = True
+        if kmax_arr[zero_i] <= 0.0:
+            kmax_arr[zero_i] = float(np.max(np.abs(kap)))
+            v_curve[zero_i] = math.sqrt(a_lat / max(kmax_arr[zero_i], kap_eps))
+        feasible_wo = feasible.copy()
+        feasible = feasible & kappa_ok
+
+        v_cand = np.minimum(v_curve, v_ref)
+        speed_score = np.clip(v_cand / max(v_ref, 1e-3), 0.0, 1.0)
+        w_spd = float(getattr(self, 'fr_w_spd', 0.0) or 0.0)
+        w_ttc = float(getattr(self, 'fr_w_ttc', 0.0) or 0.0)
+        ttc_sec, ttc_score = self._candidate_ttc(d, px, py)
+
+        # w_speed=w_ttc=0 이면 cost 벡터가 예전과 같다 (경로 선택 동일).
         cost = (self.fr_w_off * np.abs(d)
                 + self.fr_w_chg * np.abs(d - self._shift_cur)
                 - self.fr_w_clr * np.minimum(room, self.fr_clr_cap))
+        if w_spd > 0.0:
+            cost = cost - w_spd * speed_score
+        if w_ttc > 0.0:
+            cost = cost + w_ttc * ttc_score
         self._fr_costs.append(cost)
         cost_avg = np.mean(np.stack(self._fr_costs), axis=0)
 
@@ -288,9 +465,13 @@ class ObstacleAvoidMixin:
             self._fr_gap_room = scores[pick]
             self._fr_status = 0.0 if abs(float(d[best])) < 1e-3 else 1.0
         else:
-            # 전부 막혔다 — 그나마 가장 넓은 쪽으로. 여기까지 오면 속도를
-            # 줄이는 게 정답이지만 그건 AEB/감속의 영역이고, 조향은 최선을 다한다.
-            best = int(np.argmax(room))
+            # 전부 막혔다. 벽·장애물로는 되는 후보가 곡률만 안 되면 라인(d=0)
+            # — 안쪽으로 더 파고들면 조향이 안 따라간다. 둘 다 막혔으면 예전처럼
+            # 제일 넓은 쪽 (그건 AEB/감속의 영역이고, 조향은 최선을 다한다).
+            if np.any(feasible_wo):
+                best = zero_i
+            else:
+                best = int(np.argmax(room))
             self._fr_gap_room = float(room[best])
             self._fr_status = 2.0
             self.get_logger().warn(
@@ -299,10 +480,151 @@ class ObstacleAvoidMixin:
                 f'감속해야 하는 상황이다',
                 throttle_duration_sec=1.0)
 
-        self._fr_best_d = float(d[best])
+        # ── 추월 금지 구간: 라인으로 되돌린다 ────────────────────────
+        #   이미 옆에 나가 있으면(|shift|>0.05) 그대로 둔다 — 구간 경계에서
+        #   오프셋을 계단으로 끊으면 조향이 튀고, 지금 상대 옆일 수도 있다.
+        #   대신 종방향으로 푼다 (_follow_scale 이 속도를 상대에 맞춘다).
+        if self.ot_zone_on and not self._ot_allowed and abs(self._shift_cur) <= 0.05:
+            best = zero_i
+            self._fr_gap_room = float(room[best])
+            self._fr_status = 3.0        # 3 = 추월금지(추종)
+
+        # ★ 다 지나갈 때까지 붙잡는다 (상대가 시야에서 사라져도).
+        #   d 를 정한 **뒤**에 건다 — 후보 평가를 건드리면 "지금 어디가 비었나"
+        #   판단까지 왜곡된다.
+        self._fr_best_d = self._update_hold(float(d[best]))
+        self._fr_v_ref = float(v_ref)
+        self._fr_vmax = float(v_cand[best])
+        self._fr_kappa = float(kmax_arr[best])
+        self._fr_speed_score = float(speed_score[best])
+        self._fr_cost = float(cost_avg[best])
+        self._fr_ttc = float(ttc_sec[best])
+        self._fr_ttc_score = float(ttc_score[best])
         if self.fr_pub is not None:
             self._pub_frenet(cands, feasible, best)
         return self._fr_best_d
+
+    def _frenet_a_lat(self) -> float:
+        """허용 횡가속. fr_a_lat 이 있으면 그걸 쓰고, 없으면 η·μ·D·g."""
+        a = float(getattr(self, 'fr_a_lat', 0.0) or 0.0)
+        if a > 0.0:
+            return a
+        eta = float(getattr(self, 'grip_util', 0.6) or 0.6)
+        mu = float(getattr(self, 'mu', 0.348) or 0.348)
+        pac_d = float(getattr(self, 'pac_d', 1.15) or 1.15)
+        return max(float(np.clip(eta, 0.05, 1.0)) * mu * pac_d * GRAVITY, 1e-3)
+
+    def _profile_speed_arr(self):
+        """컨트롤러가 실제로 쓰는 속도 프로파일. wps 가 그대로면 캐시.
+
+        ★★ 2026-08-15 — 예전엔 여기서 **CSV 속도열을 그대로** 썼다.
+          그런데 CSV 는 gen_raceline 이 --mu 0.9 로 계산한 값이고(넉넉히 잡는 게
+          규약), 주행 중 실제 속도는 solve_profile 이 μ_eff(0.483)로 다시 푼다.
+          그래서 speed_scale = v_max/v_ref 의 **분모만 1.5배 큰** 상태가 됐고,
+          장애물이 없어도 배율이 항상 0.5 근처로 깎였다.
+
+          실차 로그가 그대로 말해줬다 (08/15 race):
+              status 0(평상, 막힌 것 없음) 에서도 speed_scale 중앙 0.52
+              지령 속도 중앙 1.50㎧ (프로파일은 2.47~5.20)
+          "q2 가 잘 피하는데 계속 느리다" 의 원인이 이것이다. 회피와 무관하다.
+        """
+        wps = getattr(self, 'wps', None)
+        if wps is None or len(wps) < 3 or wps.shape[1] < 3:
+            return None
+        cached = getattr(self, '_prof_cache', None)
+        if cached is not None and cached[0] is wps:
+            return cached[1]
+        from race_stack.speed_profile import solve_profile
+        try:
+            v, _ = solve_profile(
+                wps[:, 0], wps[:, 1], wps[:, 2],
+                mu_eff=float(getattr(self, 'mu', 0.348))
+                       * float(getattr(self, 'pac_d', 1.15)),
+                grip_util=float(getattr(self, 'grip_util', 0.6)),
+                lf=float(getattr(self, 'lf', 0.1757)),
+                lr=float(getattr(self, 'lr', 0.1441)),
+                v_min=float(getattr(self, 'min_speed', 0.3)),
+                a_lon_acc=float(getattr(self, 'a_lon_acc', 0.0)),
+                a_lon_brk=float(getattr(self, 'a_lon_brk', 0.0)),
+                hard_cap=float(getattr(self, 'hard_cap', 0.0)))
+        except Exception:
+            return None
+        self._prof_cache = (wps, v)
+        return v
+
+    def _line_speed(self, px: float, py: float) -> float:
+        """현재 위치에서 **컨트롤러가 낼 속도**. speed_scale 의 분모다.
+
+        ★ CSV 열이 아니라 solve_profile 결과를 써야 한다 — 컨트롤러가 그걸
+          쓰기 때문이다. 분모가 다르면 배율이 통째로 어긋난다 (위 주석 참고).
+        """
+        wps = getattr(self, 'wps', None)
+        if wps is not None and len(wps) >= 2:
+            i = int(np.argmin(np.hypot(wps[:, 0] - px, wps[:, 1] - py)))
+            prof = self._profile_speed_arr()
+            if prof is not None and float(prof[i]) > 1e-3:
+                return float(prof[i])
+            if wps.shape[1] >= 3 and float(wps[i, 2]) > 1e-3:
+                return float(wps[i, 2])
+        return max(float(getattr(self, 'speed', 0.0) or 0.0), 1e-3)
+
+    def _candidate_ttc(self, d_grid, px, py):
+        """후보별 (ttc_sec, ttc_score).
+
+        `_opp_tracks['s_dot']` 는 **레이싱라인 전역 속도 ṡ** 이다 (ego-relative
+        가 아님). 상대속도는 v_rel = v_ego_s − s_dot. 정적(ṡ≈0)이면 TTC≈Δs/v_ego.
+
+        score = clip((ttc_ref − ttc) / (ttc_ref − ttc_min), 0, 1)
+        장애물이 없거나 멀어지면 0. w_ttc=0 이면 계산을 건너뛴다.
+        """
+        n = len(d_grid)
+        inf = 1.0e9
+        ttc = np.full(n, inf)
+        zeros = np.zeros(n)
+        if float(getattr(self, 'fr_w_ttc', 0.0) or 0.0) <= 0.0:
+            return ttc, zeros
+        lut = self._s_lut()
+        if lut is None:
+            return ttc, zeros
+        s_ego, _ = self._project_sd(np.array([px, py], float), lut)
+        v_ego = abs(float(getattr(self, 'speed', 0.0) or 0.0))
+        half = float(getattr(self, 'obs_corr_hw', 0.22) or 0.22)
+        ttc_ref = float(getattr(self, 'fr_ttc_ref', 2.0) or 2.0)
+        ttc_min = float(getattr(self, 'fr_ttc_min', 0.5) or 0.5)
+        den = max(ttc_ref - ttc_min, 1e-3)
+        eps = 0.1
+
+        obs = []
+        for tr in getattr(self, '_opp_tracks', []) or []:
+            obs.append((float(tr.get('s', 0.0)),
+                        float(tr.get('d_lat', 0.0)),
+                        float(tr.get('s_dot', 0.0))))
+        if not obs:
+            pts = getattr(self, 'on_track_pts', None)
+            if pts is not None and len(pts):
+                # 정적 점. 너무 많으면 가까운 것만.
+                rel = np.hypot(pts[:, 0] - px, pts[:, 1] - py)
+                keep = np.argsort(rel)[:40]
+                for p in pts[keep]:
+                    s, dlat = self._project_sd(p, lut)
+                    obs.append((s, dlat, 0.0))
+        if not obs:
+            return ttc, zeros
+
+        for s_o, d_o, s_dot in obs:
+            ds = self._wrap_ds(s_o - s_ego, lut['L'])
+            if ds <= 0.05:
+                continue
+            v_rel = v_ego - s_dot
+            dt = ds / v_rel if v_rel > eps else inf
+            for i, di in enumerate(d_grid):
+                if abs(d_o - float(di)) > half:
+                    continue
+                if dt < ttc[i]:
+                    ttc[i] = dt
+        score = np.clip((ttc_ref - ttc) / den, 0.0, 1.0)
+        return ttc, score
+
     def _pub_frenet(self, cands, feasible, best):
         """후보 경로를 RViz 에 그린다 — 초록=선택, 파랑=가능, 빨강=불가."""
         arr = MarkerArray()
@@ -496,6 +818,11 @@ class ObstacleAvoidMixin:
         n = len(msg.ranges)
         stride = max(1, int(round(bstep / max(msg.angle_increment, 1e-6))))
         idx = np.arange(0, n, stride)
+        # ★ 낮은/얇은 물체(콘, 상대 차 옆면)는 각폭이 1° 보다 작다.
+        #   옛 기본값 beam_deg=1.0 은 UST-10LX(0.25°) 를 4개에 하나 건너뛰어
+        #   2~4m 앞 10cm 콘을 통째로 놓쳤다. 높은 박스·차는 각폭이 커서 살아남고
+        #   낮은 콘만 안 보이던 증상의 소프트웨어 쪽 원인. (스캔 평면 11cm 보다
+        #   완전히 낮은 물체는 하드웨어로도 안 보인다.)
         a_car = msg.angle_min + idx * msg.angle_increment       # 차량 기준 빔각
         keep = np.abs(a_car) <= fov * 0.5
         idx, a_car = idx[keep], a_car[keep]
@@ -515,14 +842,57 @@ class ObstacleAvoidMixin:
         exp = self._raycast_expected(lx0, ly0, self.yaw + a_car, rmax)
 
         ahead = valid & (meas < horizon)
-        obs = ahead & (meas < exp - deficit)                     # (A)
+
+        # ── 자세 어긋남 자기보정 ──────────────────────────────────────
+        #
+        # ★★ 2026-08-15 실차: "AMCL 이 맵과 완전 일치하지 않는 순간마다 트랙
+        #    벽들을 장애물로 인식했다." 맞다. 로그로 확인했다:
+        #
+        #        정합도(호라이즌 안 빔의 벽거리 중앙)  프레임   (A) 검출점
+        #          <5cm  좋음                        1095        0
+        #          5~10cm                            210       24   ← 벽이다
+        #          10~20cm                            20       16
+        #
+        #    회피가 트랙 전 구간에 퍼졌다 (s=12~20m 는 100%, |d| 최대 0.6m).
+        #    실제 장애물은 둘뿐이었다.
+        #
+        #   pose_unc(0.25m) 로 벽을 부풀리는 것은 기대거리를 **짧게** 만드는
+        #   방향이라, "측정이 기대보다 짧다" 판정에서 **한쪽으로만** 보호된다.
+        #   차가 벽에 가까워지는 쪽으로 틀어지면 실측이 짧아져 그대로 걸린다.
+        #
+        #   자세가 얼마나 어긋났는지는 **매 스캔 공짜로 잴 수 있다** —
+        #   빔 끝점이 맵 벽에서 떨어진 거리의 중앙값이다. 자세가 맞으면 0 이고
+        #   틀어진 만큼 커진다. 중앙값이라 장애물 몇 개에는 안 흔들린다.
+        #   그만큼 두 검사의 문턱을 같이 올린다 = 자기보정.
+        skew = 0.0
+        wd_all = None
+        if getattr(self, 'wall_dist_m', None) is not None and ahead.sum() >= 20:
+            ang_a = self.yaw + a_car
+            ends_a = np.vstack((lx0 + meas * np.cos(ang_a),
+                                ly0 + meas * np.sin(ang_a))).T
+            wd_all = self._wall_room(ends_a)
+            skew = float(np.median(wd_all[ahead]))
+            skew = float(np.clip(skew * self.skew_gain, 0.0, self.skew_max))
+        self._pose_skew = skew
+
+        obs = ahead & (meas < exp - (deficit + skew))            # (A)
 
         free_gap = float(self.get_parameter('raycast_free_gap').value)
-        if free_gap > 0.0 and getattr(self, 'wall_dist_m', None) is not None:
-            ang = self.yaw + a_car
-            ends = np.vstack((lx0 + meas * np.cos(ang),
-                              ly0 + meas * np.sin(ang))).T
-            obs = obs | (ahead & (self._wall_room(ends) > free_gap))   # (B)
+        obs_b = np.zeros_like(obs)
+        if free_gap > 0.0 and wd_all is not None:
+            # (B) 도 같은 값으로 올린다. 자세가 틀어지면 **모든** 벽 반사가
+            # 그만큼 떨어져 보이므로, 안 올리면 벽 전체가 장애물이 된다.
+            obs_b = ahead & (wd_all > free_gap + skew)
+            obs = obs | obs_b
+        # ★ AMCL 마스킹은 **두 검사를 다 통과한 빔만** 쓴다 (아래 _amcl_mask 참고).
+        #   회피는 하나만 걸려도 피하는 게 맞지만, AMCL 입력에서 빔을 지우는 건
+        #   훨씬 위험하다 — 진짜 벽을 지우면 자세가 더 틀어진다.
+        self._obs_beam_strict = idx[obs & obs_b]   # (B)
+
+        # ★ AMCL 용 마스킹에 쓸 수 있도록 "어느 빔이 장애물인가" 를 남긴다.
+        #   (idx 는 원본 ranges 의 인덱스. stride 로 솎은 것만 들어 있다)
+        self._obs_beam_idx = idx[obs]
+        self._obs_beam_n = int(len(idx))
 
         if not obs.any():
             return np.zeros((0, 2))
@@ -616,6 +986,549 @@ class ObstacleAvoidMixin:
             path_in[ahead] = dmin < hw
 
         return arc_in | path_in
+    # ── 동적 장애물(상대차) 추적 ────────────────────────────────────────
+    #   1대1 에서는 장애물이 **움직인다.** 지금 자리를 피하면, 내가 거기 도달할
+    #   때쯤 상대는 이미 다른 곳에 있다. 4㎧ 로 3m 앞의 상대에게 다가가면
+    #   도달까지 0.75s 인데, 상대가 3㎧ 로 달리면 그동안 2.25m 를 간다 —
+    #   **현재 위치를 피하는 것은 거의 의미가 없다.**
+    #
+    #   검출점을 클러스터로 묶어 프레임 간 대응시키고, 도달 시각까지
+    #   **쓸고 지나갈 자리 전체**를 장애물로 넘긴다.
+    #
+    #   ★ 예측은 유클리드 등속(p+v t)이 아니라 **레이싱라인 s** 다.
+    #     접선으로 밀면 현(chord)이라 곡률 구간에서 라인(과 벽) 밖으로 나간다.
+    #     우리 차 진로는 이미 `_predicted_track_path` 가 라인+횡오차로 코너를
+    #     따라가는데, 상대만 직선이면 Frenet 이 가짜 점을 피해 안쪽으로 들어간다.
+    #     같은 기하를 상대에 쓴다: ṡ 로 라인을 따라 옮기고 d 는 유지.
+    #     웨이포인트가 없으면 예전 유클리드로 폴백한다.
+    opp_track     = True    # 동적 예측 사용
+    opp_eps       = 0.30    # 클러스터 묶는 거리 [m]
+    opp_gate      = 0.80    # 프레임 간 대응 게이트 [m]
+    opp_alpha     = 0.6     # 속도 저역통과 (0=즉답, 1=안 움직임)
+    opp_min_obs   = 3       # 이만큼 연속 관측돼야 속도를 믿는다
+    opp_min_speed = 0.5     # 이보다 느리면 정적 장애물로 본다 [m/s]
+    opp_pred_max  = 1.2     # 예측 시간 상한 [s]
+    opp_lost_sec  = 0.5     # 이만큼 못 보면 트랙 폐기
+
+    def _cluster_pts(self, pts, eps):
+        """격자 해싱 클러스터링. 이웃 격자까지 합쳐 경계에서 갈라지지 않게 한다.
+
+        DBSCAN 을 안 쓰는 이유는 40Hz 안에 끝나야 하기 때문이다 — 점이
+        수백 개라 O(n log n) 라이브러리 호출보다 이쪽이 빠르고 의존성도 없다.
+        """
+        key = np.floor(pts / eps).astype(np.int64)
+        lab = -np.ones(len(pts), np.int64)
+        table = {}
+        for i, k in enumerate(map(tuple, key)):
+            table.setdefault(k, []).append(i)
+        nxt = 0
+        for k, idxs in table.items():
+            if lab[idxs[0]] >= 0:
+                continue
+            # 이웃 격자를 너비우선으로 합친다
+            stack, comp = [k], []
+            seen = {k}
+            while stack:
+                c = stack.pop()
+                if c not in table:
+                    continue
+                comp.extend(table[c])
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        n = (c[0] + dx, c[1] + dy)
+                        if n not in seen and n in table:
+                            seen.add(n); stack.append(n)
+            for i in comp:
+                lab[i] = nxt
+            nxt += 1
+        return lab, nxt
+
+    # ── 추월 가능 구간 ────────────────────────────────────────────────
+    #   기본값. frenet_planner 가 파라미터로 덮어쓴다.
+    ot_zone_on   = False   # 끄면 예전과 동일 (어디서든 회피)
+    ot_width     = 1.10    # 나란히 지나가려면 필요한 복도 폭 [m]
+    ot_exit_pad  = 2.50    # 좁아지기 전에 이만큼 미리 구간을 끝낸다 [m]
+    ot_min_len   = 2.00    # 이보다 짧은 구간은 버린다 [m]
+
+    # 추종(follow) 파라미터 — frenet_planner 가 덮어쓴다
+    follow_gap   = 0.80    # 상대 뒤 이 간격을 유지한다 [m] (범퍼 사이가 아니라 s 차)
+    follow_k     = 1.2     # 간격 오차 → 속도 보정 이득 [1/s]
+    follow_min   = 0.25    # 속도 배율 하한
+
+    # ── 회피 오프셋 유지 (pass-through hold) ──────────────────────────
+    hold_on      = False   # 켜면 회피를 시작한 뒤 다 지나갈 때까지 유지한다
+    hold_car_len = 0.50    # 내 차 길이 [m]
+    hold_obj_len = 0.50    # 피할 대상 길이 [m] (상대차 기준. 콘이면 훨씬 짧다)
+    hold_margin  = 0.30    # 여유 [m]
+    hold_max_sec = 3.0     # 상한 [s] — 잘못 물리면 영영 안 풀리는 것을 막는다
+
+    def _update_hold(self, d_cmd):
+        """옆으로 나간 뒤 **다 지나갈 때까지** 오프셋을 유지한다.
+
+        ★ 왜 필요한가 — 나란히 달리는 동안 상대가 **시야에서 사라진다.**
+          라이다는 base_link 앞 0.27m 에 있고 화각이 ±70° 다. 상대가 옆
+          0.4m 에 있을 때:
+              종방향 1.00m →  29°  보임
+              종방향 0.60m →  50°  보임
+              종방향 0.40m →  72°  ★ 안 보임
+              종방향 0.00m → 124°  ★ 안 보임
+          즉 **추월의 마지막 구간에서 상대를 전혀 못 본다.** 검출이 끊기면
+          비용의 w_offset 이 라인으로 되돌리므로, 아직 나란히 있는데 옆구리를
+          들이받는 쪽으로 조향한다.
+
+        ★ 왜 콘에서는 문제가 안 됐나 — 지나가는 데 걸리는 시간이 다르다.
+          필요한 **상대 종방향 변위** = 내 길이 + 대상 길이 + 여유
+              콘  (0.2m) : 1.0m / 접근속도 4㎧  → 0.25s
+              상대차(0.5m): 1.3m / 접근속도 1㎧  → 1.30s   ← 5배
+          접근속도는 v_ego − v_opp 라 상대가 빠를수록 더 오래 걸린다.
+          검출이 끊기는 시간(≈0.15s)이 콘에서는 짧아 티가 안 났다.
+
+        유지 시간은 매 틱 **남은 변위 ÷ 접근속도**로 다시 잡는다. 고정 시간으로
+        두면 접근속도가 변할 때 모자라거나 남는다.
+        """
+        if not self.hold_on:
+            return d_cmd
+        now = float(getattr(self, '_now_sec', 0.0) or 0.0)
+        need = self.hold_car_len + self.hold_obj_len + self.hold_margin
+
+        # 지금 막고 있는 것 중 가장 가까운 것의 접근속도
+        closing, seen = None, False
+        for tr in getattr(self, '_opp_tracks', []) or []:
+            if tr.get('n', 0) < self.opp_min_obs:
+                continue
+            seen = True
+            c = abs(float(getattr(self, 'speed', 0.0) or 0.0)) - float(tr.get('s_dot', 0.0))
+            closing = c if closing is None else min(closing, c)
+
+        if abs(d_cmd) > 1e-3 and seen:
+            # 회피 중이고 아직 보인다 — 만료 시각을 계속 갱신한다
+            cl = max(closing if closing is not None else 1e-3, 0.2)
+            self._hold_until = now + min(need / cl, self.hold_max_sec)
+            self._hold_d = float(d_cmd)
+            return d_cmd
+
+        # 안 보이는데 유지 기간이 남았다 → 방금 옆에 붙은 것이다. 붙잡는다.
+        until = float(getattr(self, '_hold_until', 0.0) or 0.0)
+        if now < until and abs(float(getattr(self, '_hold_d', 0.0))) > 1e-3:
+            self._fr_status = max(float(getattr(self, '_fr_status', 0.0)), 1.0)
+            return float(self._hold_d)
+        return d_cmd
+
+    # ── 회피 완료 가능성 속도 상한 ────────────────────────────────────
+    shift_cap_on   = True    # 끄면 예전 동작
+    shift_l1_min   = 1.32    # L1 = max(l1_min, l1_k·v). 컨트롤러와 같은 값이어야 한다
+    shift_l1_k     = 0.75
+    shift_rate_ref = 2.0     # 기준선 램프 속도 [m/s] (frenet.shift_rate 와 같게)
+    shift_safety   = 1.25    # 여유 배수
+    shift_min_v    = 0.8     # 이 아래로는 안 깎는다 [m/s]
+    shift_det_m    = 2.70    # 장애물이 **보이기 시작하는** 거리 [m] (실측)
+    shift_brake    = 0.0     # 제동 능력 [m/s²]. 0 = μ_eff·g 로 자동
+    shift_preempt  = True    # 보이기 전에도 접근속도를 제한할지
+
+    def _approach_speed_cap(self):
+        """장애물이 **보이기 전에** 걸어두는 접근속도 상한 [m/s].
+
+        ★ 왜 필요한가 (2026-08-15 실차: "지금이 딱 마지노선으로, 부딪히지 않을
+          마지막 순간에 회피한다. 대회장에서 마찰이 좋아져 속도가 오르면 못 피할
+          수도 있다" — 정확한 예측이다.)
+
+          검출 거리는 **하드웨어가 정한다.** 스캔 평면이 base_link 위 11cm 라
+          낮은 콘은 가까이 와야 보인다. 실측 회피 시작 거리 중앙 2.76m 로
+          속도와 무관하게 일정했다. 그런데 남는 **시간**은 속도에 반비례한다:
+
+              회피 시작 시 남는 시간 (오늘 실측)
+                2.81m @ 3.82㎧ → 0.74s
+                0.42m @ 4.04㎧ → 0.10s   ★
+                0.81m @ 4.57㎧ → 0.18s   ★
+              중앙 1.01s
+
+          _shift_feasible_speed 는 **보인 뒤에** 속도를 깎는데, 그때는 이미
+          제동거리가 모자란다:
+
+              접근속도  옆으로 옮기기  제동거리  합계   가용 2.76m
+                2.0㎧     2.21m      0.22m   2.43m    ✓
+                3.0㎧     3.10m      0.62m   3.72m    ★ 모자람
+                5.0㎧     5.01m      1.80m   6.81m    ★ 모자람
+
+          그래서 **미리** 건다. "지금 이 속도에서 2.7m 앞에 콘이 나타나도
+          피할 수 있는가" 를 항상 만족시킨다. 못 하면 그 속도로 달리지 않는다.
+
+        ※ q2·race 처럼 장애물이 있을 수 있는 모드에서만 의미가 있다.
+          장애물이 없으면 이 상한이 랩타임을 그대로 깎아먹으므로,
+          shift_preempt 를 꺼서 예전 동작으로 돌릴 수 있다.
+        """
+        if not (self.shift_cap_on and self.shift_preempt):
+            return float('inf')
+        det = float(self.shift_det_m)
+        if det <= 0.0:
+            return float('inf')
+        brk = float(self.shift_brake)
+        if brk <= 0.0:
+            brk = (float(getattr(self, 'grip_util', 1.0))
+                   * float(getattr(self, 'mu', 0.348))
+                   * float(getattr(self, 'pac_d', 1.15)) * GRAVITY)
+        brk = max(brk, 0.5)
+        room = det / max(self.shift_safety, 1e-3)
+
+        # v 를 위에서부터 훑어 "제동거리 + 옆으로 옮기는 거리 ≤ room" 인 최대값.
+        #   닫힌 해가 없다 (L1 이 v 에 걸리고 목표 속도도 v 에 걸린다).
+        #   격자 탐색이 가장 단순하고, 20개면 0.25㎧ 해상도라 충분하다.
+        best = self.shift_min_v
+        for v in np.linspace(self.shift_min_v, 8.0, 32):
+            L1 = max(self.shift_l1_min, self.shift_l1_k * v)
+            rise = 1.8 * L1 / math.sqrt(2.0)
+            # 그 속도에서 옆으로 다 옮기는 데 드는 거리
+            need = rise + v * self.fr_dmax / max(self.shift_rate_ref, 1e-3)
+            if need <= room:
+                best = v
+            else:
+                break                      # v 에 단조증가라 더 볼 것 없다
+        return best
+
+    def _shift_feasible_speed(self, px, py, d_cmd):
+        """**옆으로 다 옮길 수 있는** 속도 상한 [m/s]. 제한이 없으면 inf.
+
+        ★ 왜 필요한가 (2026-08-15 실차: "q2 가 너무 과감해져서 계속 박았다")
+          콘은 **2m 안에서야 검출된다.** 스캔 평면이 base_link 위 11cm 라
+          낮은 콘은 멀리서 스캔을 스치지 못한다 (하드웨어 한계).
+          실측: 라인(d=0)의 장애물 여유가
+              장애물까지 2~4m → 1.1~1.2m (아직 안 막힘. 옆 물체다)
+              장애물까지 0~2m → 0.15m   (여기서야 막힌다)
+
+          그런데 MAP 이 오프셋을 다 옮기려면 **1.8·L1/√2 + v·|d|/shift_rate**
+          를 달려야 한다. 3.2㎧ 면 L1=2.4m → 필요 4.0m. **2m 로는 절반이다.**
+
+          예전에는 통과속도를 경로 **전체** 곡률로 구해서(이중 감속) 우연히
+          느려졌고 그게 시간을 벌어줬다. 그걸 spd_span 으로 고치자 q2 가
+          제 속도로 달리며 들이받게 됐다 — 원인 하나를 고치니 그것에 기대던
+          다른 것이 드러난 것이다.
+
+          그래서 **명시적으로** 건다:
+              gap ≥ 1.8·L1/√2 + v·|d|/shift_rate   (× 여유배수)
+          를 v 에 대해 푼다. L1 은 현재 속도로 한 번 평가한다(고정점 1스텝).
+
+        ※ 감속이 아니라 **상한**이다. 회피가 필요 없으면 inf 라 아무 영향이 없다.
+        """
+        if not self.shift_cap_on or abs(d_cmd) < 1e-3:
+            return float('inf')
+        pts = getattr(self, 'on_track_pts', None)
+        if pts is None or not len(pts):
+            return float('inf')
+        gap = float(np.hypot(pts[:, 0] - px, pts[:, 1] - py).min())
+        v_now = max(abs(float(getattr(self, 'speed', 0.0) or 0.0)), 0.5)
+        L1 = max(self.shift_l1_min, self.shift_l1_k * v_now)
+        rise = 1.8 * L1 / math.sqrt(2.0)
+        room = gap / max(self.shift_safety, 1e-3) - rise
+        if room <= 0.0:
+            return self.shift_min_v          # 이미 늦었다 — 최대한 줄인다
+        v_cap = room * self.shift_rate_ref / abs(d_cmd)
+        return max(v_cap, self.shift_min_v)
+
+    def _follow_scale(self, px, py):
+        """추월 금지 구간에서 **상대 뒤를 따라가는** 속도 배율.
+
+        내가 더 빠르니 그냥 두면 들이받는다. 옆으로 못 피하는 구간이므로
+        종방향으로 푸는 수밖에 없다.
+
+            v_target = ṡ_opp + follow_k · (gap − follow_gap)
+            scale    = clip(v_target / v_profile, follow_min, 1.0)
+
+        · gap 이 목표보다 크면 상대보다 빨리 가서 좁힌다 (추월 구간까지 붙어간다)
+        · gap 이 목표보다 작으면 상대보다 느려져 벌린다
+        · 상대가 없으면 1.0 (프로파일 그대로)
+
+        ★ 위로는 절대 안 올린다 (clip 상한 1.0). 프로파일은 마찰 한계이고,
+          상대를 쫓는다고 그걸 넘으면 미끄러진다.
+        """
+        lut = self._s_lut()
+        if lut is None:
+            return 1.0
+        best = None
+        s_ego, _ = self._project_sd(np.array([px, py], float), lut)
+        for tr in getattr(self, '_opp_tracks', []) or []:
+            if tr.get('n', 0) < self.opp_min_obs:
+                continue
+            gap = (float(tr.get('s', 0.0)) - s_ego) % lut['L']
+            if gap > 0.5 * lut['L']:
+                continue                       # 뒤에 있다 — 신경 쓸 것 없다
+            if best is None or gap < best[0]:
+                best = (gap, float(tr.get('s_dot', 0.0)))
+        if best is None:
+            return 1.0
+        gap, s_dot = best
+        if gap > self._obs_horizon():
+            return 1.0                          # 아직 멀다
+        v_prof = max(float(getattr(self, '_fr_v_ref', 0.0) or 0.0), 1e-3)
+        v_tgt = max(s_dot + self.follow_k * (gap - self.follow_gap), 0.0)
+        self._follow_gap = gap
+
+        # ★★ 2026-08-15 — 하한(follow_min)을 **움직이는 상대에게만** 건다.
+        #   08/15 race 주행에서 차가 정지 장애물을 **25% 속도로 들이받았다.**
+        #     · 추월 금지 구간이라 d=0 (옆으로 안 나감)
+        #     · 정지 장애물이라 ṡ=0 → v_target = 1.2·(gap−0.8) → gap 0.8 에서 0
+        #     · 그런데 clip 하한이 0.25 라 **0 이 되지 못하고 계속 전진**
+        #   하한의 뜻은 "앞차를 쫓다가 너무 느려지면 영영 못 잡는다" 였다.
+        #   상대가 **멈춰 있으면 쫓을 이유가 없다** — 서야 한다.
+        #   서고 나면 회피가 필요한데 금지 구간이면 그것도 못 하므로, 그때는
+        #   status 2 로 올려 사람이 알 수 있게 한다 (조용히 서 있지 않도록).
+        lo = self.follow_min if abs(s_dot) >= self.opp_min_speed else 0.0
+        if lo <= 0.0 and v_tgt <= 1e-3:
+            self._fr_status = 2.0               # 정지 장애물 앞 — 막힘
+            self.get_logger().warn(
+                f'[frenet] 정지 장애물 {gap:.2f}m 앞 — 추월 금지 구간이라 '
+                f'옆으로 못 나간다. 정지한다',
+                throttle_duration_sec=1.0)
+        return float(np.clip(v_tgt / v_prof, lo, 1.0))
+
+    def _overtake_zone(self):
+        """레이싱라인 각 점에서 **추월을 시작해도 되는가** (bool 배열).
+
+        ★ 왜 필요한가 (2026-08-15)
+          회피는 시작보다 **끝내는 것**이 어렵다. 넓은 구간 끝에서 옆으로
+          나가기 시작하면, 다 지나가기 전에 좁은 구간을 만나 **상대와 벽
+          사이에 끼인다.** 옆으로 피할 곳이 없으니 그때는 손쓸 방법이 없다.
+
+          그래서 맵에서 미리 정한다:
+            ① 복도 폭 ≥ ot_width 인 구간을 찾는다 (두 대가 나란히 갈 수 있는 곳)
+            ② 그 구간의 **끝에서 ot_exit_pad 만큼 잘라낸다** — 추월을 시작해
+               끝내는 데 드는 거리다. 여기서 시작하면 좁은 데서 끝난다
+            ③ 남은 길이가 ot_min_len 보다 짧으면 통째로 버린다
+
+          구간 밖에서는 옆으로 안 나가고 **상대 뒤를 따라간다** (속도를 맞춘다).
+          내가 더 빠르니 그냥 두면 들이받는다 — 횡회피가 금지된 곳에서는
+          종방향으로 푸는 수밖에 없다.
+
+        복도 폭은 **맵 거리변환**으로 잰다 (라인에서 벽까지 × 2). 경계 윤곽이
+        아니라 거리장을 쓰는 이유는 중심선 추출과 같다 — 인필드가 치우쳐도
+        영향받지 않는다.
+        """
+        wps = getattr(self, 'wps', None)
+        lut = self._s_lut()
+        if wps is None or lut is None:
+            return None
+        cached = getattr(self, '_ot_cache', None)
+        if cached is not None and cached[0] is wps:
+            return cached[1]
+
+        xy = np.asarray(wps[:, :2], float)
+        ok = overtake_zone(xy, self._wall_room(xy),
+                           self.ot_width, self.ot_exit_pad, self.ot_min_len)
+        self._ot_cache = (wps, ok)
+        return ok
+
+    def _s_lut(self):
+        """닫힌 레이싱라인의 s·법선. wps 가 그대로면 캐시."""
+        wps = getattr(self, 'wps', None)
+        cached = getattr(self, '_s_lut_cache', None)
+        if wps is None or len(wps) < 3:
+            return None
+        if cached is not None and cached[0] is wps:
+            return cached[1]
+        xy = np.asarray(wps[:, :2], float)
+        n = len(xy)
+        ds = np.hypot(np.roll(xy[:, 0], -1) - xy[:, 0],
+                      np.roll(xy[:, 1], -1) - xy[:, 1])
+        ds = np.maximum(ds, 1e-6)
+        s = np.concatenate(([0.0], np.cumsum(ds[:-1])))
+        fwd = np.roll(xy, -1, axis=0) - xy
+        tn = np.maximum(np.hypot(fwd[:, 0], fwd[:, 1]), 1e-9)
+        tang = fwd / tn[:, None]
+        left = np.stack([-tang[:, 1], tang[:, 0]], axis=1)
+        lut = dict(xy=xy, ds=ds, s=s, L=float(ds.sum()), left=left, n=n)
+        self._s_lut_cache = (wps, lut)
+        return lut
+
+    @staticmethod
+    def _wrap_ds(ds, L):
+        """(-L/2, L/2] 로 접은 종방향 변위."""
+        L = max(float(L), 1e-6)
+        ds = (float(ds) + 0.5 * L) % L - 0.5 * L
+        return ds
+
+    def _project_sd(self, p, lut):
+        """맵 좌표 → (s, d_lat). s 는 라인 원점부터의 호장 [m], d 좌측 +."""
+        xy = lut['xy']
+        i = int(np.argmin((xy[:, 0] - p[0]) ** 2 + (xy[:, 1] - p[1]) ** 2))
+        rel = np.asarray(p, float) - xy[i]
+        j = (i + 1) % lut['n']
+        fwd = xy[j] - xy[i]
+        u2 = float(fwd @ fwd)
+        t = float(rel @ fwd) / u2 if u2 > 1e-12 else 0.0
+        t = float(np.clip(t, 0.0, 1.0))
+        s = float(lut['s'][i] + t * lut['ds'][i])
+        d_lat = float(rel @ lut['left'][i])
+        return s, d_lat
+
+    def _pose_at_s(self, s, d_lat, lut):
+        """라인 위 s 에서 법선으로 d_lat 만큼 민 맵 좌표."""
+        L = lut['L']
+        s = float(s) % L
+        i = int(np.searchsorted(lut['s'], s, side='right') - 1)
+        i = int(np.clip(i, 0, lut['n'] - 1))
+        t = (s - lut['s'][i]) / lut['ds'][i]
+        t = float(np.clip(t, 0.0, 1.0))
+        j = (i + 1) % lut['n']
+        p = lut['xy'][i] + t * (lut['xy'][j] - lut['xy'][i])
+        return p + lut['left'][i] * float(d_lat)
+
+    def _predict_obstacles(self, pts, msg):
+        """검출점 + **도달 시각까지 상대가 쓸고 갈 자리**를 함께 돌려준다.
+
+        정적 장애물(속도 < opp_min_speed)이면 원래 점을 그대로 낸다 — q2 의
+        동작이 바뀌지 않는다. 움직이는 점은 레이싱라인 s 를 따라 옮긴다.
+        """
+        if not self.opp_track or len(pts) == 0:
+            if len(pts) == 0:
+                self._opp_tracks = []
+            return pts
+        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if t <= 0.0:
+            return pts
+        lab, n = self._cluster_pts(pts, self.opp_eps)
+        cents = [pts[lab == i].mean(axis=0) for i in range(n)]
+        lut = self._s_lut()
+
+        old = getattr(self, '_opp_tracks', [])
+        old = [tr for tr in old if t - tr['t'] < self.opp_lost_sec]
+        used, new = set(), []
+        for ci, c in enumerate(cents):
+            best, bd = None, self.opp_gate
+            for k, tr in enumerate(old):
+                if k in used:
+                    continue
+                dd = float(np.hypot(*(c - tr['p'])))
+                if dd < bd:
+                    bd, best = dd, k
+            s_now = d_lat = s_dot = 0.0
+            if lut is not None:
+                s_now, d_lat = self._project_sd(c, lut)
+            if best is None:
+                new.append(dict(p=c, v=np.zeros(2), t=t, n=1, ci=ci,
+                                s=s_now, s_dot=0.0, d_lat=d_lat))
+                continue
+            tr = old[best]; used.add(best)
+            dt = t - tr['t']
+            v = tr['v'] if dt <= 1e-3 else (
+                self.opp_alpha * tr['v'] + (1.0 - self.opp_alpha) * (c - tr['p']) / dt)
+            if lut is not None and dt > 1e-3:
+                ds = self._wrap_ds(s_now - tr['s'], lut['L'])
+                s_dot = (self.opp_alpha * tr.get('s_dot', 0.0)
+                         + (1.0 - self.opp_alpha) * (ds / dt))
+            else:
+                s_dot = float(tr.get('s_dot', 0.0))
+            new.append(dict(p=c, v=v, t=t, n=tr['n'] + 1, ci=ci,
+                            s=s_now, s_dot=s_dot, d_lat=d_lat))
+        self._opp_tracks = new
+
+        out = [pts]
+        self._opp_moving = 0
+        s_ego = None
+        if lut is not None and getattr(self, 'pos', None) is not None:
+            s_ego, _ = self._project_sd(np.asarray(self.pos, float)[:2], lut)
+        for tr in new:
+            sp = (abs(float(tr.get('s_dot', 0.0))) if lut is not None
+                  else float(np.hypot(*tr['v'])))
+            if tr['n'] < self.opp_min_obs or sp < self.opp_min_speed:
+                continue                       # 정적 — 원래 점으로 충분하다
+            self._opp_moving += 1
+            mem = pts[lab == tr['ci']]
+            tau = 0.0
+            if lut is None or s_ego is None:
+                rel = tr['p'] - self.pos
+                d = float(np.hypot(*rel))
+                closing = max(abs(self.speed) - float(rel @ tr['v']) / max(d, 1e-3), 0.5)
+                tau = float(np.clip(d / closing, 0.0, self.opp_pred_max))
+                for f in (0.35, 0.7, 1.0):
+                    out.append(mem + tr['v'] * (tau * f))
+                continue
+            gap = (tr['s'] - s_ego) % lut['L']
+            if gap > 0.5 * lut['L']:
+                continue                       # 뒤쪽 — 전방 쓸기를 만들지 않는다
+            closing = max(abs(self.speed) - float(tr['s_dot']), 0.5)
+            tau = float(np.clip(gap / closing, 0.0, self.opp_pred_max))
+            for f in (0.35, 0.7, 1.0):
+                xy_f = self._pose_at_s(tr['s'] + tr['s_dot'] * tau * f,
+                                       tr['d_lat'], lut)
+                out.append(mem + (xy_f - tr['p']))
+        return np.vstack(out)
+
+    # ── AMCL 용 스캔 마스킹 ───────────────────────────────────────────
+    amcl_mask_on   = False   # 켜면 /scan_amcl 을 낸다
+    amcl_mask_pad  = 2       # 지우는 빔 좌우로 이만큼 더 (모서리 여유)
+    amcl_mask_max  = 0.30    # 이 비율을 넘게 지워야 하면 **아예 안 지운다**
+
+    def _amcl_mask(self, msg):
+        """앞차에 맞은 빔을 지운 스캔. 못 지울 상황이면 None.
+
+        ★ 왜 필요한가 (2026-08-15 실측)
+          앞차 뒤에 붙으면 라이다가 벽 대신 앞차를 본다. AMCL 은 그 빔을
+          "여기 벽이 있다" 로 읽어 자세를 그쪽으로 당긴다.
+          race bag 실측 — 맵으로 설명 안 되는 전방 빔의 비율:
+              가장 가까운 장애물 0.6m 안   18~43%
+              0.6~1.0m                    6~46%
+              2m 밖/없음                   0~20%
+
+        ★★ 피드백 루프를 조심해야 한다
+          기대거리는 **AMCL 자세로** 계산한다. 그 결과로 스캔을 걸러 다시
+          AMCL 에 먹이면, 자세가 틀어졌을 때 진짜 벽을 지우고 더 틀어진다.
+          2026-08-10 deskew A/B 에서 똑같은 함정에 빠졌다 (원시 스캔에서 나온
+          자세를 기준으로 그 스캔을 판정했다).
+
+          그래서 세 겹으로 막는다:
+            ① **두 검사를 다 통과한 빔만** 지운다 (기대보다 짧다 AND 벽에서 멀다).
+               회피는 하나만 걸려도 피하지만, 빔을 지우는 건 훨씬 위험하다.
+            ② 지울 빔이 전체의 amcl_mask_max(30%) 를 넘으면 **아예 안 지운다.**
+               그만큼 설명이 안 된다는 건 장애물이 아니라 **자세가 틀렸다**는
+               뜻이다. 그때 지우면 정확히 잘못된 방향으로 굳는다.
+            ③ 원본 /scan 은 그대로 두고 /scan_amcl 을 따로 낸다. RViz 에서
+               둘을 겹쳐 보면 무엇을 지웠는지 눈으로 확인된다.
+        """
+        idx = getattr(self, '_obs_beam_strict', None)
+        n_all = int(getattr(self, '_obs_beam_n', 0) or 0)
+        if idx is None or n_all <= 0:
+            return None
+        if len(idx) > self.amcl_mask_max * n_all:
+            self._amcl_masked = -1                 # 너무 많다 — 손대지 않는다
+            return None
+
+        rr = np.asarray(msg.ranges, dtype=float).copy()
+        if not len(rr):
+            return None
+        kill = np.zeros(len(rr), bool)
+        pad = int(self.amcl_mask_pad)
+        for i in idx:
+            kill[max(int(i) - pad, 0):int(i) + pad + 1] = True
+        rr[kill] = float('inf')
+        self._amcl_masked = int(kill.sum())
+
+        out = LaserScan()
+        out.header = msg.header
+        out.angle_min = msg.angle_min
+        out.angle_max = msg.angle_max
+        out.angle_increment = msg.angle_increment
+        out.time_increment = msg.time_increment
+        out.scan_time = msg.scan_time
+        out.range_min = msg.range_min
+        out.range_max = msg.range_max
+        out.ranges = rr.tolist()
+        out.intensities = list(msg.intensities)
+        return out
+
+    def _publish_amcl_scan(self, msg):
+        """마스킹한 스캔을 발행. 못 지울 상황이면 **원본을 그대로** 낸다.
+
+        ★ 어떤 경우에도 발행을 거르면 AMCL 이 굶는다. 마스킹은 개선이지
+          필수가 아니므로, 실패하면 원본으로 폴백하는 것이 맞다.
+        """
+        pub = getattr(self, 'amcl_scan_pub', None)
+        if pub is None or not self.amcl_mask_on:
+            return
+        try:
+            out = self._amcl_mask(msg)
+        except Exception:
+            out = None
+        pub.publish(out if out is not None else msg)
+
     def _obs_horizon(self) -> float:
         """속도에 비례하는 전방 감시 거리(m).
 
@@ -625,6 +1538,24 @@ class ObstacleAvoidMixin:
         """
         return float(np.clip(self.obs_h_min + self.obs_h_sec * abs(self.speed),
                              self.obs_h_min, self.obs_h_max))
+
+    @property
+    def _avoid_active(self) -> bool:
+        """Q2 정적 장애물과 race 1v1 상대 모두 같은 검출기를 쓴다."""
+        return self.mode in ('q2', 'race')
+
+    def _update_lane_free(self):
+        """차단 투표 창이 과반이면 회피 유지 (통로를 넓혀 놓치지 않음).
+
+        ★ frenet_planner 는 예전엔 이 값을 영원히 True 로 뒀다. 회피를
+          시작하는 순간 장애물이 좁은 통로 밖으로 나가 감지가 풀렸다.
+        """
+        ml = self.free_votes.maxlen or len(self.free_votes)
+        if not ml:
+            self.lane_free = True
+            return
+        self.lane_free = sum(self.free_votes) * 2 >= ml
+
     def _scan_cb(self, msg: LaserScan):
         # 벽 회피는 pose 없이도 (차량 좌표계만으로) 동작해야 한다 —
         # AMCL 수렴 전에도 벽에 스치는 건 막아야 하므로 pose 검사보다 먼저 저장.
@@ -632,8 +1563,12 @@ class ObstacleAvoidMixin:
 
         if self.pos is None:
             return
-        if self.mode != 'q2':
-            return          # 아래 격자 판정은 Q2 전용
+        # ★ 2026-08-13 이전에는 `mode != 'q2'` 라 **race 에서 검출이 통째로 꺼져
+        #   있었다.** frenet_planner 는 q2·race 둘 다 뜨므로(race.launch.py) 노드는
+        #   살아서 d=0 만 계속 발행한다 — 로그로는 완전히 정상으로 보이는,
+        #   조용히 아무 일도 안 하는 종류의 버그였다.
+        if not self._avoid_active:
+            return          # q1/q3 는 빈 트랙. q2·race 만 검출한다.
 
         p = self.get_parameter
 
@@ -647,9 +1582,17 @@ class ObstacleAvoidMixin:
                 self.on_track_pts = np.zeros((0, 2))
                 self.blocking_pts = []
                 self.free_votes.append(True)
+                self._update_lane_free()
+                # ★ 장애물이 없어도 **반드시 발행한다.** 안 내면 AMCL 이
+                #   /scan_amcl 을 굶어 위치추정이 통째로 멎는다.
+                self._publish_amcl_scan(msg)
                 return
             # 마스크를 다시 걸지 않는다 — 이미 "맵으로 설명되지 않는 점" 만 남았다.
+            # ★ 상대차는 움직인다 — 지금 자리가 아니라 **내가 도달할 때 있을 자리**를
+            #   피해야 한다 (_predict_obstacles).
+            pts_world = self._predict_obstacles(pts_world, msg)
             self._classify_obstacles(pts_world, 0.0, masked=False)
+            self._publish_amcl_scan(msg)
             return
 
         xmin = p('grid_xmin').value;   xmax = p('grid_xmax').value
@@ -687,6 +1630,7 @@ class ObstacleAvoidMixin:
         if len(gxf) == 0:
             self.blocking_pts = []
             self.free_votes.append(True)
+            self._update_lane_free()
             return
 
         # rotate + translate to world frame
@@ -720,6 +1664,7 @@ class ObstacleAvoidMixin:
         if not on_track:
             self.blocking_pts = []
             self.free_votes.append(True)
+            self._update_lane_free()
             return
 
         #   그리고 "막고 있는 점"만 남겨 회피 방향·마커에 쓴다 — 예전엔 트랙 안의
@@ -735,6 +1680,7 @@ class ObstacleAvoidMixin:
 
         self.blocking_pts = blocking
         self.free_votes.append(not blocking)
+        self._update_lane_free()
         if blocking:
             self._pub_obstacle_markers(blocking)
 

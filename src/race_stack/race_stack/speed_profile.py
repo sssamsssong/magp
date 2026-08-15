@@ -138,6 +138,41 @@ def solve_profile(x, y, csv_v=None, *, mu_eff, grip_util, lf, lr, v_min,
     return v, info
 
 
+def preview_speed(v_profile, i, v_now, ds, *, lag=0.0, a_brk=0.0,
+                  max_preview=0.0):
+    """앞 구간 프로파일 최솟값을 지령으로 뽑는다 (구동 지연 + 제동거리).
+
+    창 = min( max(v·lag, v²/(2 a_brk)) , max_preview )
+      a_brk 는 프로파일/오버레이가 준 값 그대로다. 로그에서 잰 제동을 여기
+      숫자로 박지 않는다 — 실측이 다르면 vehicle yaml 의 a_lon_brk 를 쓴다.
+      max_preview ≤ 0 이면 이 루프 랩의 절반 (반대편 코너의 min 이 직선에
+      전파되지 않게). 트랙이 바뀌면 n·ds 가 바뀌므로 따라간다.
+
+    ds 는 점 간격(m). 스칼라(중앙값)여도 되고 점별 배열이어도 된다.
+    닫힌 루프. lag=0 이고 a_brk=0 이면 v_profile[i] 그대로.
+    """
+    v_profile = np.asarray(v_profile, float)
+    n = len(v_profile)
+    if n < 2:
+        return float(v_profile[i]) if n else 0.0
+    i = int(i) % n
+    v_now = max(float(v_now), 0.0)
+    lag = max(float(lag), 0.0)
+    a_brk = float(a_brk)
+    spacing = float(ds) if np.ndim(ds) == 0 else float(np.median(np.asarray(ds, float)))
+    spacing = max(spacing, 1e-3)
+    d_lag = v_now * lag
+    d_brk = (v_now * v_now) / (2.0 * a_brk) if (a_brk > 1e-6 and v_now > 0.3) else 0.0
+    cap = float(max_preview) if max_preview > 1e-6 else 0.5 * n * spacing
+    window = min(max(d_lag, d_brk), cap)
+    if window <= 1e-6:
+        return float(v_profile[i])
+    k = int(math.ceil(window / spacing))
+    k = int(np.clip(k, 1, n - 1))
+    idx = (np.arange(i, i + k + 1) % n)
+    return float(v_profile[idx].min())
+
+
 def steer_speed_limit(delta, wheelbase, mu_eff, grip_util):
     """반응형 컨트롤러용 — **지령 조향각**에서 물리 속도 한계를 낸다.
 

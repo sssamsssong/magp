@@ -111,8 +111,8 @@ ssh-copy-id jetson@192.168.50.57
 
 ### 그 밖
 
-- 게인 튜닝은 `./tune.sh` — `race_script.yaml` 을 열지 않고 값만 바꾼다
-  (`./tune.sh status`, `./tune.sh stanley.gain=1.2`, `./tune.sh --undo`)
+- 게인 튜닝은 `./tune.sh` — yaml 을 열지 않고 값만 바꾼다
+  (`./tune.sh i` 속도 대화형, `./tune.sh cap=3`, `./tune.sh --undo`)
 - 노트북에서 관찰은 `./rviz.sh`
 
 ---

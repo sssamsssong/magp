@@ -18,8 +18,12 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
+# ★ race 는 2026-08-13 부터 map 이다. gap_follower 는 레이싱라인을 **아예 안 쓰고**
+#   매 프레임 가장 넓은 갭으로만 달리므로 1대1 에서 상대차를 피할 수는 있어도
+#   빠르지 않고, 회피 후 최적경로로 돌아오지도 않는다. 1대1 은
+#   "레이싱라인 + 동적 회피" 여야 하므로 map + frenet_planner 조합을 쓴다.
 DEFAULT_CONTROLLER = {'q1': 'pure_pursuit', 'q2': 'gap_follower',
-                      'q3': 'pure_pursuit', 'race': 'gap_follower'}
+                      'q3': 'pure_pursuit', 'race': 'map'}
 
 # 'map' = MAP(Model-based Adaptive Pure pursuit) 컨트롤러. 트랙 맵(map_name)과
 # 무관한 알고리즘 이름이다 — race_script.yaml 의 [map] 절 참조.
@@ -191,6 +195,14 @@ def generate_launch_description():
     # 위치가 튄다. 속도를 올릴수록 정확히 비례해 나빠지므로 미리 넣어 둔다.
     deskew_on = bool(loc.get('scan_deskew', False))
     scan_topic = '/scan_deskewed' if deskew_on else '/scan'
+    # ★ AMCL 만 마스킹된 스캔을 본다. 컨트롤러·AEB·회피는 원본을 그대로 쓴다 —
+    #   빔을 지운 스캔으로 장애물을 찾으면 자기가 지운 것을 못 보게 된다.
+    #   frenet_planner 가 뜨는 모드(q2·race)에서만 켤 수 있다.
+    amcl_mask_on = (bool(loc.get('amcl_mask', False))
+                    and bool(cfg.get('frenet', {}).get('enabled', True))
+                    and mode in ('q2', 'race'))
+    amcl_scan_topic = '/scan_amcl'
+    amcl_input_topic = amcl_scan_topic if amcl_mask_on else scan_topic
     if deskew_on:
         nodes.append(Node(
             package='race_stack', executable='scan_deskew', name='scan_deskew',
@@ -261,7 +273,10 @@ def generate_launch_description():
     nodes.append(Node(
         package='nav2_amcl', executable='amcl', name='amcl', output='screen',
         parameters=[amcl_yaml,
-                    {'scan_topic': scan_topic.lstrip('/'),
+                    # ★ AMCL 만 마스킹된 스캔을 본다 (amcl_mask 켰을 때).
+                    #   컨트롤러·AEB·회피는 원본 그대로 — 지운 스캔으로
+                    #   장애물을 찾으면 자기가 지운 것을 못 보게 된다.
+                    {'scan_topic': amcl_input_topic.lstrip('/'),
                      'initial_pose.x': float(loc.get('init_x', 0.0)),
                      'initial_pose.y': float(loc.get('init_y', 0.0)),
                      'initial_pose.yaw': float(loc.get('init_yaw', 0.0)),
@@ -434,6 +449,8 @@ def generate_launch_description():
                 'launch_acc':      launch_acc,
                 'launch_time':     launch_time,
                 'hard_cap':        hard_cap,
+                # 구동계 지연 보상 — 감속만 앞당긴다 (MAP 과 같은 preview_speed)
+                'speed_lag':       float(_lim.get('speed_lag', 0.25)),
                 'mu':              veh['mu'],
                 'pac_d':           veh['pac_d'],
                 'lf':              veh['lf'],
@@ -502,8 +519,8 @@ def generate_launch_description():
                 'raycast_obs':      bool( sc.get('raycast_obs',      True)),
                 'raycast_pose_unc': float(sc.get('raycast_pose_unc', 0.25)),
                 'raycast_deficit':  float(sc.get('raycast_deficit',  0.30)),
-                'raycast_fov_deg':  float(sc.get('raycast_fov_deg',  100.0)),
-                'raycast_beam_deg': float(sc.get('raycast_beam_deg', 1.0)),
+                'raycast_fov_deg':  float(sc.get('raycast_fov_deg',  140.0)),
+                'raycast_beam_deg': float(sc.get('raycast_beam_deg', 0.25)),
                 # 검사 (B) — 좁은 통로 한가운데 장애물. frenet_planner 와 같은 값
                 'raycast_free_gap': float(sc.get('raycast_free_gap', 0.30)),
             }])
@@ -516,7 +533,13 @@ def generate_launch_description():
         pp = cfg.get('pure_pursuit', {})
         mp = cfg.get('map', {})
         fr = cfg.get('frenet', {})
-        frc = fr.get('per_controller', {}).get('map', {})
+        # ★ per_controller 는 컨트롤러 이름으로 찾되, **모드 키가 있으면 그게
+        #   이긴다.** 1대1(race)은 같은 map 컨트롤러를 쓰지만 상대가 마주 달려
+        #   와 접근속도가 두 배라 호라이즌이 더 필요하다 (2026-08-13).
+        #   예전엔 'map' 으로 하드코딩돼 있어 race 전용 값을 넣어도 안 읽혔다.
+        _pc = fr.get('per_controller', {})
+        frc = dict(_pc.get('map', {}))
+        frc.update(_pc.get(mode, {}))
         st = cfg.get('stanley', {})
         ctrl = Node(
             package='race_stack', executable='map_controller',
@@ -552,7 +575,7 @@ def generate_launch_description():
                 # 출발 직후만 가속을 더 조인다 (휠 스핀 → 종방향 허위거리 방지)
                 'launch_acc':    launch_acc,
                 'launch_time':   launch_time,
-                # 구동계 지연 보상 (실측 0.25~0.29s) — 감속만 앞당긴다
+                # 구동계 지연 + 제동거리 미리보기 (실측 지연 0.25~0.41s, 제동 ~2㎧²)
                 'speed_lag':     float(_lim.get('speed_lag', 0.25)),
                 # ↓ 폐기. 옛 설정이 죽지 않게만 남겨둔다 (컨트롤러가 경고하고 무시)
                 'a_brake':       float(mp.get('a_brake',     0.0)),
@@ -600,32 +623,102 @@ def generate_launch_description():
                                                      max(2.0 * l1m, 0.8))),
                     'obs_horizon_max': float(frc.get('obs_horizon_max',
                                                      fr.get('obs_horizon_max', 3.0))),
-                    'frenet_dmax':      float(fr.get('dmax',      0.6)),
+                    'frenet_dmax':      float(fr.get('dmax', fr.get('d_max', 0.6))),
                     'frenet_dstep':     float(fr.get('dstep',     0.10)),
                     'frenet_clearance': float(fr.get('clearance', 0.35)),
                     'frenet_clear_cap': float(fr.get('clear_cap', 0.8)),
                     'frenet_w_offset':  float(fr.get('w_offset',  1.0)),
                     'frenet_w_change':  float(fr.get('w_change',  0.5)),
                     'frenet_w_clear':   float(fr.get('w_clear',   2.0)),
+                    'frenet_w_speed':   float(fr.get('w_speed',   0.5)),
+                    'frenet_w_ttc':     float(fr.get('w_ttc',     0.0)),
+                    'frenet_ttc_ref':   float(fr.get('ttc_ref',   2.0)),
+                    'frenet_ttc_min':   float(fr.get('ttc_min',   0.5)),
                     'frenet_bounds':    bool( fr.get('bounds',    True)),
                     'frenet_votes':     int(  fr.get('votes',     3)),
                     # 통과 여유 하한 = 차 반폭 + 안전여유. 옛 마스크 판정이
                     # 레이싱라인 자신을 27% 프레임에서 탈락시켰다 (2026-08-11)
                     'frenet_min_room':  float(fr.get('min_room',  0.22)),
                     'frenet_gap_hyst':  float(fr.get('gap_hyst',  0.10)),
+                    # ── 1대1(race) 동적 장애물 ──
+                    'opp_track':      bool( fr.get('opp_track',     mode == 'race')),
+                    'opp_eps':        float(fr.get('opp_eps',       0.30)),
+                    'opp_gate':       float(fr.get('opp_gate',      0.80)),
+                    'opp_alpha':      float(fr.get('opp_alpha',     0.6)),
+                    'opp_min_obs':    int(  fr.get('opp_min_obs',   3)),
+                    'opp_min_speed':  float(fr.get('opp_min_speed', 0.5)),
+                    'opp_pred_max':   float(fr.get('opp_pred_max',  1.2)),
+                    # 추월 가능 구간 (1대1). 기본은 race 모드에서만 켠다
+                    # ★ frc(모드별) → fr(공용) → 모드 기본 순. q2 는 꺼야 한다:
+                    #   콘은 짧아서 살짝 비키면 되고, 구간을 걸면 좁은 데 놓인
+                    #   콘을 아예 못 피한다 (2026-08-15).
+                    'ot_zone':        bool( frc.get('ot_zone',
+                                            fr.get('ot_zone', mode == 'race'))),
+                    'ot_width':       float(fr.get('ot_width',     1.10)),
+                    'ot_exit_pad':    float(fr.get('ot_exit_pad',  2.50)),
+                    'ot_min_len':     float(fr.get('ot_min_len',   2.00)),
+                    'follow_gap':     float(fr.get('follow_gap',   0.80)),
+                    'follow_k':       float(fr.get('follow_k',     1.2)),
+                    'follow_min':     float(fr.get('follow_min',   0.25)),
+                    # 다 지나갈 때까지 오프셋 유지 (상대가 시야에서 사라져도)
+                    'hold':           bool( fr.get('hold',         mode == 'race')),
+                    'hold_car_len':   float(fr.get('hold_car_len', 0.50)),
+                    'hold_obj_len':   float(fr.get('hold_obj_len', 0.50)),
+                    'hold_margin':    float(fr.get('hold_margin',  0.30)),
+                    'hold_max_sec':   float(fr.get('hold_max_sec', 3.0)),
+                    'speed_min_scale':float(fr.get('speed_min_scale', 0.45)),
+                    'speed_room_ref': float(fr.get('speed_room_ref',  0.45)),
+                    'speed_scale_mode': str(fr.get('speed_scale_mode', 'vmax')),
+                    'grip_util':        grip_util,
+                    'mu':               veh['mu'],
+                    'pac_d':            veh['pac_d'],
+                    # speed_scale 분모를 컨트롤러와 **같은 물리**로 풀기 위한 값들
+                    'lf':               veh['lf'],
+                    'lr':               veh['lr'],
+                    'min_speed':        min_speed,
+                    'a_lon_acc':        a_lon_acc,
+                    'a_lon_brk':        a_lon_brk,
+                    'hard_cap':         hard_cap,
                     # 컨트롤러의 램프 속도와 같아야 한다 — 플래너가 "지금 어디에
                     # 있는지" 를 이걸로 안다 (히스테리시스·좌우 유지)
                     'shift_rate':       float(fr.get('shift_rate', 2.0)),
+                    # 컨트롤러의 L1 — 회피 완료 거리 계산용. 갈리면 상한이 틀어진다
+                    'l1_min':           float(mp.get('l1_min', 1.32)),
+                    'l1_k':             float(mp.get('l1_k',   0.75)),
+                    'spd_span':         float(fr.get('spd_span',     1.20)),
+                    'shift_cap':        bool( fr.get('shift_cap',    True)),
+                    'shift_safety':     float(fr.get('shift_safety', 1.25)),
+                    'shift_min_v':      float(fr.get('shift_min_v',  0.8)),
+                    'shift_preempt':    bool( fr.get('shift_preempt', True)),
+                    'shift_det_m':      float(fr.get('shift_det_m',   2.70)),
+                    'shift_brake':      float(fr.get('shift_brake',   0.0)),
+                    # 후보 경로 곡률이 조향 한계를 넘으면 탈락 (안쪽 오프셋)
+                    'wheelbase':        float(pp.get('wheelbase', 0.33)),
+                    'max_steer':        float(pp.get('max_steer', 0.36)),
                     'debug':            bool( fr.get('debug',     True)),
                     # 레이캐스팅은 [stanley] 값을 재사용한다 — 같은 트랙·같은 차다
                     'raycast_obs':      bool( st.get('raycast_obs',      True)),
-                    'raycast_fov_deg':  float(st.get('raycast_fov_deg',  100.0)),
-                    'raycast_beam_deg': float(st.get('raycast_beam_deg', 1.0)),
+                    # ★ 화각은 모드별로 다르다 (2026-08-15).
+                    #   q2: 콘을 **절대** 안 건드려야 하니 넓게 본다(140°).
+                    #   race: 옆(±70°)에 있는 상대는 이미 나란히 달리는 중이라
+                    #     피할 것이 없다 — 그 구간은 hold(오프셋 유지)가 덮는다.
+                    #     넓게 보면 코너 안쪽 벽만 더 주워 담아 손해다.
+                    'raycast_fov_deg':  float(frc.get('raycast_fov_deg',
+                                          st.get('raycast_fov_deg', 140.0))),
+                    'raycast_beam_deg': float(st.get('raycast_beam_deg', 0.25)),
                     'raycast_deficit':  float(st.get('raycast_deficit',  0.30)),
                     'raycast_pose_unc': float(st.get('raycast_pose_unc', 0.25)),
                     # 검사 (B) — 빔 끝점이 벽에서 이만큼 떨어지면 장애물.
                     # 좁은 통로 한가운데 장애물의 원거리 검출률을 3~10배로 올린다
                     'raycast_free_gap': float(st.get('raycast_free_gap', 0.30)),
+                    # AMCL 어긋남 자기보정 (0=끔)
+                    'skew_gain':        float(st.get('skew_gain', 1.0)),
+                    'skew_max':         float(st.get('skew_max',  0.35)),
+                    # AMCL 용 스캔 마스킹 (앞차가 벽을 가릴 때)
+                    'amcl_mask':        bool( loc.get('amcl_mask',      False)),
+                    'amcl_mask_pad':    int(  loc.get('amcl_mask_pad',  2)),
+                    'amcl_mask_max':    float(loc.get('amcl_mask_max',  0.30)),
+                    'amcl_scan_topic':  amcl_scan_topic,
                     'track_margin':     float(st.get('track_margin',     0.15)),
                 }]))
 

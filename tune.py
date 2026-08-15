@@ -95,8 +95,47 @@ def target_file(dotted):
     if not os.path.exists(vpath):
         return RACE_SCRIPT, dotted
     return vpath, vkey
+
+
+def overlay_cfg(cfg):
+    """race_script + 차량 파일. 젯슨에서 실제로 달리는 값."""
+    import copy
+    out = copy.deepcopy(cfg)
+    car = _car_name()
+    if not car:
+        return out
+    vpath = os.path.join(HERE, 'config', f'vehicle_{car}.yaml')
+    if not os.path.exists(vpath):
+        return out
+    v = yaml.safe_load(open(vpath)) or {}
+    for rk, vk in VEHICLE_KEYS.items():
+        try:
+            val = get_nested(v, vk)
+        except KeyError:
+            continue
+        node = out
+        parts = rk.split('.')
+        for p in parts[:-1]:
+            if not isinstance(node.get(p), dict):
+                node[p] = {}
+            node = node[p]
+        node[parts[-1]] = val
+    return out
+
+
 HISTORY = os.path.join(HERE, '.tune_history')
 BACKUP = os.path.join(HERE, '.tune_backup.yaml')
+BACKUP_JSON = os.path.join(HERE, '.tune_backup.json')
+
+# SSH 한 줄용 별칭. eta 는 현재 mode 의 grip_util.
+SPEED_ALIASES = {
+    'hard_cap': 'speed.hard_cap',
+    'cap':      'speed.hard_cap',
+    'q1':       'limits.grip_util.q1',
+    'q2':       'limits.grip_util.q2',
+    'q3':       'limits.grip_util.q3',
+    'race':     'limits.grip_util.race',
+}
 
 # 보기(no-arg) 에 출력할 섹션 — 주행 중 만질 값들만
 VIEW_SECTIONS = ['stanley', 'pure_pursuit', 'gap_follower', 'speed', 'safety']
@@ -121,11 +160,13 @@ RANGES = {
     'gap_follower.steer_gain': (0.05, 3.0),
     'gap_follower.speed_gain': (0.05, 3.0),
     'gap_follower.car_width':  (0.2, 1.0),
-    'speed.q1_max':           (0.0, 8.0),
-    'speed.q2_max':           (0.0, 8.0),
-    'speed.q3_max':           (0.0, 8.0),
-    'speed.race_max':         (0.0, 8.0),
+    'speed.hard_cap':         (0.0, 10.0),
     'speed.min_speed':        (0.0, 3.0),
+    'limits.grip_util':       (0.05, 1.0),
+    'limits.grip_util.q1':    (0.05, 1.0),
+    'limits.grip_util.q2':    (0.05, 1.0),
+    'limits.grip_util.q3':    (0.05, 1.0),
+    'limits.grip_util.race':  (0.05, 1.0),
     'safety.ttc_threshold':   (0.05, 3.0),
     'joystick.max_speed':     (0.0, 6.0),
 }
@@ -145,11 +186,13 @@ GUIDE_DOC = 'docs/stanley_gain_tuning.md'
 
 # ./tune.sh status 속도 섹션 — 현재 모드 강조
 SPEED_GUIDE = [
-    ('speed.q1_max',    '예선1 — 장애물 없음, 고속 추종'),
-    ('speed.q2_max',    '예선2 — 장애물 회피'),
-    ('speed.q3_max',    '예선3 — 공격적'),
-    ('speed.race_max',  '1대1 경주'),
-    ('speed.min_speed', '코너 최저속도 (이 밑으로 감속 안 함)'),
+    ('speed.hard_cap',        '물리 무관 천장 (0=끔). 물리면 grip_util 을 올려도 안 빨라진다'),
+    ('limits.grip_util.q1',   './race.sh q1 만. 마찰 예산 η (v ∝ √η)'),
+    ('limits.grip_util.q2',   './race.sh q2 만'),
+    ('limits.grip_util.q3',   './race.sh q3 만'),
+    ('limits.grip_util.race', './race.sh race 만'),
+    ('limits.grip_util',      '전 모드 공통 η (숫자 하나일 때)'),
+    ('speed.min_speed',       '하드웨어 바닥 (이 밑으로 안 내려감)'),
 ]
 
 # 0 으로 두면 안 되는 키 — yaml 주석에 "절대 0으로 두지 말 것" 으로 명시돼 있다.
@@ -167,6 +210,7 @@ NO_RATIO_GUARD = {
     'localization.init_x', 'localization.init_y', 'localization.init_yaw',
     'mission.start_x', 'mission.start_y',
     'sim.sx', 'sim.sy', 'sim.stheta',
+    'speed.hard_cap',   # 0 = 끔 이라 2→0 이 배수 가드에 걸리면 안 된다
 }
 
 C = {
@@ -225,6 +269,28 @@ def find_line(lines, dotted):
             m = pat.match(ln)
             if m and m.group(3).strip() and not m.group(3).lstrip().startswith('#'):
                 return i, m
+        return None, None
+
+    if len(parts) >= 3:
+        pidx, pm = find_line(lines, f'{parts[0]}.{parts[1]}')
+        if pidx is None:
+            return None, None
+        val, _, _ = split_value_comment(pm.group(3))
+        if val.strip().startswith('{') or val.strip():
+            return pidx, pm
+        parent_indent = len(pm.group(1)) - len(pm.group(1).lstrip())
+        sub_pat = re.compile(r'^([ \t]+' + re.escape(parts[2]) + r'):([ \t]*)(.*)$')
+        for j in range(pidx + 1, len(lines)):
+            ln = lines[j]
+            stripped = ln.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            indent = len(ln) - len(ln.lstrip())
+            if indent <= parent_indent:
+                break
+            sm = sub_pat.match(ln)
+            if sm:
+                return j, sm
         return None, None
 
     sect, key = parts[0], parts[1]
@@ -393,6 +459,21 @@ def show_log():
 
 
 def do_undo():
+    if os.path.exists(BACKUP_JSON):
+        snap = json.load(open(BACKUP_JSON))
+        for p, content in snap.items():
+            with open(p, 'w') as f:
+                f.write(content)
+        os.remove(BACKUP_JSON)
+        if os.path.exists(BACKUP):
+            os.remove(BACKUP)
+        if any(os.path.abspath(p) != os.path.abspath(RACE_SCRIPT) for p in snap):
+            subprocess.run([sys.executable,
+                            os.path.join(HERE, 'config', 'apply_vehicle.py'),
+                            '--quiet'], check=False)
+        print(f"{C['grn']}[tune] 직전 변경을 되돌렸다.{C['off']}")
+        log_change([{'key': '(undo)', 'old': '-', 'new': '-'}])
+        return
     if not os.path.exists(BACKUP):
         die('되돌릴 직전 변경이 없다 (.tune_backup.yaml 없음)')
     shutil.copy2(BACKUP, RACE_SCRIPT)
@@ -472,20 +553,23 @@ def show_status(cfg):
 
     # 속도 섹션
     mode = cfg.get('mode', '')
+    eff = overlay_cfg(cfg)
     speed_shown = set()
-    print(f"\n  {C['cyn']}{C['bld']}모드별 속도{C['off']}"
-          f"   {C['dim']}(./tune.sh speed.q2_max=2.0){C['off']}")
+    print(f"\n  {C['cyn']}{C['bld']}속도{C['off']}"
+          f"   {C['dim']}(./tune.sh i  또는  ./tune.sh cap=3){C['off']}")
     for dotted, hint in SPEED_GUIDE:
         try:
-            cur = get_nested(cfg, dotted)
+            cur = get_nested(eff, dotted)
         except KeyError:
             continue
-        name = dotted.split('.', 1)[1]
+        if isinstance(cur, dict):
+            continue
+        name = dotted.split('.', 1)[-1]
         speed_shown.add(dotted)
-        is_active = (dotted == f'speed.{mode}_max')
+        is_active = dotted.endswith('.' + mode) or dotted == 'limits.grip_util'
 
         mark, plain, val = ' ', str(cur), f'{C["bld"]}{cur}{C["off"]}'
-        if base is not None:
+        if base is not None and target_file(dotted)[0] == RACE_SCRIPT:
             try:
                 old = get_nested(base, dotted)
                 if old != cur:
@@ -562,6 +646,193 @@ def show(cfg, only=None):
         print()
 
 
+def speed_knobs(cfg):
+    mode = cfg.get('mode', '')
+    items = []
+    try:
+        cap = get_nested(cfg, 'speed.hard_cap')
+        items.append({
+            'key': 'speed.hard_cap', 'name': 'hard_cap', 'value': cap,
+            'unit': 'm/s', 'file': os.path.basename(target_file('speed.hard_cap')[0]),
+            'hint': '전 모드 공통 천장. 0=끔', 'active': False,
+        })
+    except KeyError:
+        pass
+    gu_path = target_file('limits.grip_util')[0]
+    try:
+        gu = get_nested(cfg, 'limits.grip_util')
+    except KeyError:
+        gu = None
+    if isinstance(gu, dict):
+        when = {
+            'q1':   './race.sh q1 만',
+            'q2':   './race.sh q2 만',
+            'q3':   './race.sh q3 만',
+            'race': './race.sh race 만',
+        }
+        for m in ('q1', 'q2', 'q3', 'race'):
+            if m not in gu:
+                continue
+            items.append({
+                'key': f'limits.grip_util.{m}', 'name': f'η {m}',
+                'value': gu[m], 'unit': '',
+                'file': os.path.basename(gu_path),
+                'hint': when[m], 'active': m == mode,
+            })
+    elif gu is not None:
+        items.append({
+            'key': 'limits.grip_util', 'name': 'grip_util',
+            'value': gu, 'unit': '',
+            'file': os.path.basename(gu_path),
+            'hint': '전 모드가 이 숫자 하나 (딕셔너리 아님)', 'active': True,
+        })
+    try:
+        ms = get_nested(cfg, 'speed.min_speed')
+        items.append({
+            'key': 'speed.min_speed', 'name': 'min_speed',
+            'value': ms, 'unit': 'm/s',
+            'file': os.path.basename(target_file('speed.min_speed')[0]),
+            'hint': '하드웨어 바닥', 'active': False,
+        })
+    except KeyError:
+        pass
+    return items
+
+
+def print_speed_table(cfg):
+    knobs = speed_knobs(cfg)
+    car = _car_name() or '시뮬'
+    print(f"\n  {C['bld']}속도 노브{C['off']}  {C['dim']}({car})  "
+          f"mode={cfg.get('mode')}  controller={cfg.get('controller')}{C['off']}")
+    print(f"  {C['dim']}η q1 / q2 / race 는 동시에 안 먹는다. "
+          f"./race.sh <모드> 가 고른 키 하나만.{C['off']}")
+    try:
+        cap = float(get_nested(cfg, 'speed.hard_cap') or 0)
+    except KeyError:
+        cap = 0
+    if cap:
+        print(f"  {C['ylw']}★ hard_cap={cap} 가 켜져 있다 — "
+              f"어느 모드든 이 속도를 못 넘는다.{C['off']}")
+    gu = None
+    try:
+        gu = get_nested(cfg, 'limits.grip_util')
+    except KeyError:
+        pass
+    if gu is not None and not isinstance(gu, dict):
+        print(f"  {C['ylw']}★ grip_util={gu} 숫자 하나라 q1/q2/race 가 전부 같다. "
+              f"모드별로 나누려면 차량 파일을 "
+              f"{{q1: {gu}, q2: {gu}, q3: {gu}, race: {gu}}} 로.{C['off']}")
+    print(f"  {C['dim']}{'─' * 64}{C['off']}")
+    for i, k in enumerate(knobs, 1):
+        mark = f"  {C['grn']}◀ 지금 yaml mode{C['off']}" if k['active'] else ''
+        unit = f" {k['unit']}" if k['unit'] else ''
+        print(f"  {C['cyn']}{i}{C['off']}  {k['name']:12s} "
+              f"{C['bld']}{k['value']}{C['off']}{unit:6s}  "
+              f"{C['dim']}{k['hint']}{C['off']}{mark}")
+    print(f"  {C['dim']}예: 1 3.0   2 +=0.1   cap=4   q1=0.6   q2+=0.1   race=0.5{C['off']}")
+    print(f"  {C['dim']}q 종료   u 되돌리기   ? 설명   ! 가드 무시{C['off']}\n")
+    return knobs
+
+
+def show_header_help():
+    """tune.sh 헤더 주석을 그대로 보여 준다. 줄 번호에 묶지 않는다."""
+    path = os.path.join(HERE, 'tune.sh')
+    with open(path) as f:
+        for ln in f:
+            if ln.startswith('set -e'):
+                break
+            if ln.startswith('#!'):
+                continue
+            if ln.startswith('# '):
+                print(ln[2:], end='')
+            elif ln.startswith('#'):
+                print(ln[1:], end='')
+            else:
+                print(ln, end='')
+
+
+def expand_alias(token, cfg):
+    m = re.match(r'^([\w.]+)\s*((?:\+=|-=|=)\s*.*)?$', token)
+    if not m:
+        return token
+    key, rest = m.group(1), m.group(2) or ''
+    if key in ('eta', 'grip'):
+        path, fkey = target_file('limits.grip_util')
+        src = yaml.safe_load(open(path)) if os.path.exists(path) else cfg
+        try:
+            gu = get_nested(src, fkey if path != RACE_SCRIPT else 'limits.grip_util')
+        except Exception:
+            gu = None
+        if isinstance(gu, dict):
+            key = f'limits.grip_util.{cfg.get("mode", "q1")}'
+        else:
+            key = 'limits.grip_util'
+    else:
+        key = SPEED_ALIASES.get(key, key)
+    return key + rest
+
+
+def cmd_interactive():
+    if not sys.stdin.isatty():
+        print_speed_table(overlay_cfg(load_cfg()))
+        print(f"{C['dim']}대화형은 SSH 들어가서  ./tune.sh i{C['off']}")
+        return
+    while True:
+        cfg = overlay_cfg(load_cfg())
+        knobs = print_speed_table(cfg)
+        try:
+            line = input(f"  {C['cyn']}>{C['off']} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if line in ('q', 'quit', 'exit'):
+            return
+        if not line:
+            continue
+        if line in ('?', 'h', 'help'):
+            show_header_help()
+            continue
+        if line in ('u', 'undo'):
+            try:
+                do_undo()
+            except SystemExit:
+                pass
+            continue
+        force = line.startswith('!')
+        if force:
+            line = line[1:].strip()
+        args = None
+        m = re.match(r'^(\d+)\s*((?:\+=|-=|=)?)\s*(.*)$', line)
+        if m and 1 <= int(m.group(1)) <= len(knobs):
+            n = int(m.group(1))
+            op = m.group(2) or '='
+            raw = m.group(3).strip()
+            if not raw:
+                try:
+                    raw = input(f"  {knobs[n-1]['name']} "
+                                f"[{knobs[n-1]['value']}] 새 값: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    continue
+                if not raw:
+                    continue
+                op = '='
+            args = [f"{knobs[n-1]['key']}{op}{raw}"]
+        else:
+            expanded = expand_alias(line, cfg)
+            if re.search(r'(\+=|-=|=)', expanded):
+                args = [expanded]
+        if not args:
+            print(f"  {C['dim']}예:  1 3.0   2 +=0.1   cap=4{C['off']}")
+            continue
+        if force:
+            args = ['--force'] + args
+        try:
+            main(args)
+        except SystemExit:
+            pass
+
+
 # ---------- 메인 ----------
 
 def main(argv):
@@ -577,19 +848,23 @@ def main(argv):
     if '--diff' in argv:
         return do_diff()
     if any(a in ('-h', '--help') for a in argv):
-        os.system(f'sed -n "2,26p" {os.path.join(HERE, "tune.sh")}')
-        return
+        return show_header_help()
+    if any(a in ('i', '-i', '--interactive') for a in argv):
+        return cmd_interactive()
 
     if not os.path.exists(RACE_SCRIPT):
         die(f'race_script.yaml 을 찾을 수 없다: {RACE_SCRIPT}')
 
     cfg = load_cfg()
+    argv = [expand_alias(a, cfg) for a in argv]
     assigns = [a for a in argv if re.search(r'(\+=|-=|=)', a)]
     queries = [a for a in argv if a not in assigns]
 
     # 인자 없음 → 전체 보기
     if not assigns and not queries:
         return show(cfg)
+    if not assigns and queries == ['speed'] and sys.stdin.isatty():
+        return cmd_interactive()
 
     # 조회
     if not assigns:
@@ -597,8 +872,10 @@ def main(argv):
             if q in cfg and isinstance(cfg[q], dict):
                 show(cfg, only=q)
             else:
+                path, fkey = target_file(q)
                 try:
-                    print(get_nested(cfg, q))
+                    src = cfg if path == RACE_SCRIPT else yaml.safe_load(open(path))
+                    print(get_nested(src, fkey))
                 except KeyError:
                     suggest(cfg, q)
                     sys.exit(1)
@@ -666,10 +943,12 @@ def main(argv):
         # 줄 전체를 덮으면 형제 키가 사라지므로 해당 항목만 바꿔 끼운다.
         line_val = new
         if len(fkey.split('.')) >= 3:
-            line_val = merge_flow_map(lm.group(3), fkey.split('.')[2], new)
-            if line_val is None:
-                die(f'{fkey} 는 인라인 딕셔너리 줄이 아니라 자동 수정할 수 없다 '
-                    f'— {os.path.basename(path)} 를 직접 고칠 것')
+            merged = merge_flow_map(lm.group(3), fkey.split('.')[-1], new)
+            if merged is not None:
+                line_val = merged
+            elif lm.group(1).strip() != fkey.split('.')[-1]:
+                die(f'{fkey} 는 모드별 딕셔너리가 아니라 통째로만 바꿀 수 있다 '
+                    f'(./tune.sh limits.grip_util={new})')
         pending.append((path, idx, lm, line_val))
         entries.append({'key': key, 'old': old, 'new': new,
                         'file': path, 'fkey': fkey})
@@ -677,6 +956,9 @@ def main(argv):
     if not pending:
         return
 
+    snap = {p: open(p).read() for p in buffers}
+    with open(BACKUP_JSON, 'w') as f:
+        json.dump(snap, f)
     shutil.copy2(RACE_SCRIPT, BACKUP)
     for path, idx, lm, new in pending:
         buffers[path][idx] = write_value(buffers[path], idx, lm, new)
