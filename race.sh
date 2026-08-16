@@ -15,27 +15,38 @@
 #                              속도만 0. 토픽 통신·RViz 표시·조향 서보 확인용.
 #    ./race.sh <모드> --bag    ★ 주행 중 원시 토픽을 bag 으로 녹화 (분당 약 9MB)
 #                              /scan · odom · IMU · pose · drive. 사후 분석용.
-#                              logs/bags/<시각>_<모드>_<컨트롤러>/ 에 쌓인다
+#                              logs/bags/<시각>_<모드>_<컨트롤러>/ 에 쌓이고,
+#                              Ctrl+C 후 CSV·bag 을 car1/car2 에 커밋·푸시한다.
+#    ./race.sh push-logs       아직 안 올라간 logs/ 를 커밋·푸시 (팀 공유기에서
+#                              푸시가 실패한 뒤, 인터넷 되는 와이파이에서)
 #    ./race.sh check           토픽이 실제로 발행 중인지 표로 확인 (주행 중 별도 터미널)
 #    ./race.sh stop            돌고 있는 스택 전부 정리
-#    ./race.sh savemap <이름>  맵핑 끝난 뒤 맵 저장
+#    ./race.sh savemap <이름>  맵핑 끝난 뒤 맵 저장 (맵핑 창을 끄기 전에)
 #    ./race.sh teleop          키보드 텔레옵만 단독 실행
 #    ./race.sh joy             조이스틱 수동 조종 (브링업 포함)
 #    ./race.sh log <이름>      웨이포인트 기록 (수동주행하며 레이싱라인 녹화)
 #    ./race.sh waypoints [맵]  SLAM 맵에서 레이싱라인 생성 (GUI, 디스플레이 필요)
+#    ./race.sh clean [맵]      SLAM 맵 정제 (빛살 제거). 화면 없이 대화형
+#    ./race.sh line [맵] [옵션]  ★ 레이싱라인 생성 (최소곡률 QP, 자동)
+#                              예) ./race.sh line 0815_clean --apex-extra 0.5
 #    ./race.sh waypoints-kappa [맵]  위와 동일 + 조향각 물리한계(곡률) 제약
 #                              → <맵>_wp_kappa.csv 로 따로 저장, 랩타임 비교용
 #    ./race.sh waypoints-tumftm [맵]  TUMFTM 최소곡률(IQP) QP 최적화 (비-GUI, 자동)
 #                              → <맵>_wp_tumftm.csv 로 따로 저장, 랩타임 비교용
 #    ./race.sh curvprobe       곡률-속도 캘리브레이션 리그 (slip과 별개 도구)
 #    ./race.sh steertrim       조향 중립값 자동 캘리브레이션 (IMU 기반, 전/후진 반복)
-#    ./race.sh savepose        ★ 지금 AMCL 위치를 초기 추정으로 저장
-#                              RViz "2D Pose Estimate" 로 맵과 스캔을 맞춘 뒤 실행하면
-#                              다음 실행부터 그 위치에서 시작 (맵-스캔 어긋남 해소)
+#    ./race.sh savepose        ★ 지금 AMCL 위치를 출발점으로 저장 (init_* + start_*)
+#                              savemap 이 맵 원점으로 이미 넣어두므로,
+#                              **출발 자리를 옮길 때만** 쓰면 됩니다
+#                              맵핑 중이 아니라 ./race.sh box (주행 스택) 위에서.
+#                              새 맵이면 RViz 2D Pose Estimate 로 맞춘 뒤 1회.
 #
-#  게인 튜닝은 ./tune.sh — race_script.yaml 을 열지 않고 값만 바꾼다.
-#    ./tune.sh                       현재 값 보기
-#    ./tune.sh stanley.gain=1.2      설정 → 다음 ./race.sh 부터 적용 (재빌드 불필요)
+#  게인 튜닝은 ./tune.sh — yaml 을 열지 않고 값만 바꾼다. 설명: ./tune.sh -h
+#    ./tune.sh i                     속도 대화형. η q1/q2/race 는 모드마다 따로
+#                                    (./race.sh q1 → q1 만, ./race.sh race → race 만)
+#    ./tune.sh cap=3                 전 모드 공통 천장
+#    ./tune.sh q1=0.6                ./race.sh q1 전용. q2= / race= 도 됨
+#    ./tune.sh stanley.gain=1.2      다음 ./race.sh 부터 적용 (재빌드 불필요)
 # ============================================================
 set -e
 
@@ -194,6 +205,34 @@ kill_stack () {
     echo "[race.sh] 정리 완료"
 }
 
+print_mapping_howto () {
+    # mapping / mapping-joy 기동 시 터미널에 띄우는 순서. 자세한 설명은
+    # JETSON_COMMANDS.md 「권장 절차」.
+    # ★ savemap 이 출발점(init_* + start_*)을 맵 원점으로 저장한다 (2026-08-14).
+    local how=$1
+    echo ""
+    echo ">>> ★ 차를 **출발선에 놓고** SLAM 을 시작하세요."
+    echo ">>>   맵 원점(0,0,0) = 지금 이 자리 = 출발점입니다. savemap 이 그대로 저장합니다."
+    echo ">>>   여기서 시작하지 않으면 나중에 ./race.sh savepose 로 따로 맞춰야 합니다."
+    echo ">>>"
+    echo ">>> $how로 천천히 트랙 1~2바퀴."
+    echo ">>>"
+    echo ">>> 순서 — 이 창은 끄지 말 것 (먼저 Ctrl+C 하면 /map 이 사라져 저장 실패)"
+    echo ">>>   1) 이 창: 주행"
+    echo ">>>   2) 다른 터미널:  ./race.sh savemap <새이름>"
+    echo ">>>   3) 저장 확인 후 이 창에서 Ctrl+C"
+    echo ">>>   4) ./race.sh clean <새이름>           ← 빛살 제거 (<이름>_clean 생성)"
+    echo ">>>   5) race_script.yaml 의 map_name / waypoints 를 _clean 이름으로"
+    echo ">>>   6) ./race.sh waypoints-kappa          ← 라인 생성"
+    echo ">>>   7) 차를 **지금 이 자리**에 두고  ./race.sh box"
+    echo ">>>"
+    echo ">>> ★ 출발점은 savemap 이 맵 원점(=지금 차 자리)으로 자동 저장합니다."
+    echo ">>>   맵핑을 시작한 자리가 곧 출발선이므로 savepose 를 따로 할 필요가 없습니다."
+    echo ">>>   출발 자리를 옮기고 싶을 때만: RViz 2D Pose Estimate 로 맞춘 뒤"
+    echo ">>>   ./race.sh savepose  (맵핑 중이 아니라 AMCL 주행 스택 위에서)."
+    echo ""
+}
+
 # ★ box(bench) 전용 — bringup 의 joy_node/joy_teleop 을 죽인다.
 #   각 컨트롤러가 발행 직전에 속도를 0 으로 못박아도(d4b65f3), 조이스틱은
 #   /teleop 으로 따로 나가고 mux.yaml 우선순위가 teleop:100 vs drive:10 이라
@@ -211,9 +250,53 @@ bench_kill_joy () {
     echo "[race.sh] BENCH — joy_node/joy_teleop 정리 완료 (조이스틱 입력 무시)"
 }
 
+# logs/ (CSV + bag) 를 현재 브랜치에 커밋하고 푸시한다. 코드 WIP 는 안 건드린다.
+commit_logs () {
+    cd "$SCRIPT_DIR" || return 0
+    git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+    local br; br=$(git rev-parse --abbrev-ref HEAD)
+    if [ "$br" = "main" ]; then
+        echo "[race.sh] 로그 git 생략 — 브랜치가 main 입니다. car1/car2 에서 올리세요."
+        return 0
+    fi
+    git add logs/ || true
+    local need_push=0
+    if ! git diff --cached --quiet; then
+        echo "[race.sh] 로그 커밋:"
+        git diff --cached --name-only | sed 's/^/          /'
+        local names
+        names=$(git diff --cached --name-only \
+            | awk -F/ '/^logs\// && NF>=2 {print $2}' \
+            | sort -u | tr '\n' ' ' | sed 's/ *$//')
+        git commit -m "$(cat <<EOF
+logs: ${names:-주행 기록}
+
+EOF
+)" || true
+        need_push=1
+    fi
+    if git rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+        local ahead; ahead=$(git rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0)
+        [ "$ahead" != "0" ] && need_push=1
+    elif [ "$need_push" = "0" ]; then
+        return 0
+    fi
+    [ "$need_push" = "0" ] && return 0
+    echo "[race.sh] 로그 푸시 ($br)…"
+    if git push -u origin HEAD; then
+        echo "[race.sh] 올렸습니다. 노트북에서 git pull origin $br"
+    else
+        echo "[race.sh] 푸시 실패 — 팀 공유기는 GitHub 가 안 됩니다."
+        echo "          인터넷 되는 와이파이에서  ./race.sh push-logs"
+    fi
+}
+
 case "$CMD" in
   stop)
     kill_stack; exit $? ;;
+  push-logs)
+    commit_logs
+    exit 0 ;;
   go)
     # 출발 게이트 해제 (mission.start_gate: true 일 때).
     # 같은 터미널에서 Enter 를 못 쓰는 경우(tmux·jetson.sh 원격 등) 용.
@@ -264,6 +347,8 @@ case "$CMD" in
         echo "    2) 주행으로 트랙 한 바퀴"
         echo "    3) 터미널B:  ./race.sh savemap $NAME  ← A를 끄기 전에!"
         echo "    4) 저장 확인 후 터미널A 에서 Ctrl+C"
+        echo "    5) clean → yaml map_name 바꾼 뒤 waypoints-kappa → box"
+        echo "       출발점은 savemap 이 맵 원점으로 자동 저장합니다 (savepose 불필요)."
         exit 1
     fi
 
@@ -279,7 +364,41 @@ case "$CMD" in
     # install 쪽에도 복사 (rebuild 없이 바로 사용)
     INSTALL_MAPS="$WS/install/race_stack/share/race_stack/maps"
     [ -d "$INSTALL_MAPS" ] && cp "$PKG_SHARE_MAPS/$NAME".* "$INSTALL_MAPS/" || true
-    echo "[race.sh] 완료. race_script.yaml의 map_name을 '$NAME'으로 바꾸세요."
+    # ── 출발점을 맵 원점으로 자동 설정 ────────────────────────────────
+    #
+    # ★ SLAM 의 map 프레임 원점 (0,0,0) 은 **맵핑을 시작한 순간의 차 자리**다.
+    #   slam_toolbox 가 첫 스캔을 원점에 놓고 시작하기 때문이다. 즉 차를 출발선에
+    #   놓고 맵핑을 시작했다면 출발점은 이미 (0,0,0) 으로 정해져 있다.
+    #   실측으로도 확인했다 — 0813-1_clean 은 (0,0) 이 벽에서 0.51m,
+    #   0814-1_clean 은 0.70m 로 둘 다 트랙 한복판이다.
+    #
+    # ★ 왜 자동으로 넣나 — 2026-08-14 에 맵만 바꾸고 이 좌표를 안 고쳐서
+    #   **옛 좌표가 벽 속**이 됐고 AMCL 이 위치를 아예 못 잡았다. 게다가
+    #   auto_localize 의 탐색 범위가 ±0.5m 라 원리적으로 못 찾는 상태였다.
+    #   출발선(mission.start_*)도 같이 벽 속이라 랩도 안 세어졌다.
+    #   맵을 만든 그 자리에서 같이 써 두면 이 사고가 구조적으로 안 난다.
+    #
+    #   출발 위치를 옮기고 싶을 때만 ./race.sh savepose 를 쓰면 된다.
+    echo "[race.sh] 출발점을 맵 원점(=맵핑 시작 시 차 자리)으로 설정합니다"
+    if "$SCRIPT_DIR/tune.sh" localization.init_x=0.0 localization.init_y=0.0 \
+                             localization.init_yaw=0.0 \
+                             mission.start_x=0.0 mission.start_y=0.0 >/dev/null; then
+        echo "[race.sh]   localization.init_x/y/yaw = 0, 0, 0"
+        echo "[race.sh]   mission.start_x/y         = 0, 0"
+    else
+        echo "[race.sh] ⚠ 좌표 저장 실패 — 손으로 넣거나 ./race.sh savepose 를 쓰세요."
+    fi
+
+    echo "[race.sh] 완료. race_script.yaml 의 map_name 을 '$NAME' 으로 바꾸세요."
+    echo "[race.sh] 다음:"
+    echo "          1) 맵핑 창에서 Ctrl+C"
+    echo "          2) ./race.sh clean $NAME              ← 빛살 제거"
+    echo "          3) yaml 의 map_name / waypoints 를 '${NAME}_clean' 으로"
+    echo "          4) ./race.sh waypoints-kappa"
+    echo "          5) 차를 **맵핑 시작한 그 자리**에 두고 ./race.sh box"
+    echo "             → 출발점은 이미 저장됐으니 savepose 가 필요 없습니다."
+    echo "          ※ 출발 위치를 옮기고 싶을 때만 RViz 2D Pose Estimate 로 맞춘 뒤"
+    echo "            ./race.sh savepose (AMCL 스택이 떠 있어야 합니다)."
     exit 0 ;;
   teleop)
     exec ros2 run race_stack keyboard_teleop --ros-args -p max_speed:=$(get_yaml speed.mapping_max) ;;
@@ -332,6 +451,50 @@ case "$CMD" in
   log)
     NAME=${2:?웨이포인트 이름을 주세요: ./race.sh log my_track_wp}
     exec ros2 run race_stack waypoint_logger --ros-args -p output:="$PKG_SHARE_WP/$NAME.csv" ;;
+  clean)
+    # SLAM 원본 맵에서 **트랙 경계 틈으로 새어 나간 가는 빛살**을 지운다.
+    #   빛살 폭 1~3px   /  트랙 폭 20px 이상  →  opening 반경 하나로 갈린다
+    #
+    # ★ clean_map.py(GUI 폴리곤)와 같은 일을 하되 **디스플레이가 필요 없다.**
+    #   대회장·SSH 에서 쓸 수 있는 쪽이 이것이다. 맵을 목록에서 고르고, 결과
+    #   수치를 보고 반경을 바꿔가며 되풀이한 뒤 저장한다.
+    #   맞는 반경은 트랙마다 다르므로 <맵>_clean_preview.png(빨강=지워진 영역)를
+    #   반드시 눈으로 확인할 것.
+    NAME=${2:-}
+    if [ -n "$NAME" ]; then
+      exec python3 "$SCRIPT_DIR/src/race_stack/maps/clean_map_auto.py" --map "$NAME"
+    else
+      exec python3 "$SCRIPT_DIR/src/race_stack/maps/clean_map_auto.py"
+    fi ;;
+  line)
+    # ★ 레이싱라인 생성기 (TUMFTM 최소곡률 QP + 재선형화 반복).
+    #
+    #   waypoints-kappa 와의 차이 — 둘 다 파체이카는 **안 쓴다** (마찰원만 쓴다).
+    #     waypoints-kappa : 사람이 GUI 로 경로를 스케치 → 후보 매칭 → 랩타임 최적화
+    #     line(gen_raceline): 맵에서 자동으로 최소곡률 QP. 사람이 안 그린다
+    #
+    #   0814-1_clean 실측 비교 (같은 맵·같은 물리, η=1.0):
+    #       kappa      길이 26.60m  R_min 1.021  코너여유 0.749  랩 8.75s
+    #       line       길이 24.77m  R_min 1.079  코너여유 0.550  랩 7.52s
+    #     라인이 짧고 곡률이 낮아 1.2초 빠르지만 벽에 더 붙는다.
+    #     --apex-extra(기본 0.40)가 코너 안쪽에만 여유를 되돌려 준다.
+    #
+    #   ※ setup.py entry point 대신 python3 -m 으로 부른다 — setup.py 를 건드리면
+    #     colcon build 가 필요한데, 이건 맵 도구라 재빌드 없이 바로 써야 한다.
+    #     MAPS_DIR/WP_DIR 이 __file__ 기준이라 실행 위치와 무관하다.
+    #   ★★ PYTHONPATH 를 repo 로 못박는다. 안 그러면 `python3 -m` 이
+    #     **colcon build 디렉토리의 사본**을 집는다:
+    #         맵 이미지 없음: ~/f1tenth_ws/build/race_stack/maps/0814-1_clean.pgm
+    #     MAPS_DIR 은 __file__ 기준이라, 어느 race_stack 을 import 했느냐가
+    #     그대로 맵 경로가 된다. 이 저장소가 이미 겪은 "colcon prefix 그림자"
+    #     와 같은 종류다 — 옛 사본이 조용히 실행되는 쪽이 더 위험하다.
+    NAME=${2:-}
+    export PYTHONPATH="$SCRIPT_DIR/src/race_stack:${PYTHONPATH:-}"
+    if [ -n "$NAME" ]; then
+      exec python3 -m race_stack.gen_raceline --map "$NAME" "${@:3}"
+    else
+      exec python3 -m race_stack.gen_raceline "${@:2}"
+    fi ;;
   waypoints)
     NAME=${2:-}
     if [ -n "$NAME" ]; then
@@ -341,6 +504,8 @@ case "$CMD" in
     fi ;;
   waypoints-kappa)
     # gen_waypoints 와 동일하되 조향각 물리 한계(곡률) 제약이 들어간 버전.
+    # vehicle overlay 의 wheelbase/max_steer 를 읽고, 한계의 85% 만 써서
+    # 라인 R_min 이 차 R_min 과 같아지는 일을 막는다 (추종 오차만큼 안쪽은 κ 증가).
     # 결과는 <맵이름>_wp_kappa.csv 로 따로 저장되어 기존 결과와 랩타임 비교 가능.
     NAME=${2:-}
     if [ -n "$NAME" ]; then
@@ -416,15 +581,24 @@ print(f'[race.sh] 현재 AMCL 위치: ({t.x:.3f}, {t.y:.3f})  '
 node.destroy_node(); rclpy.shutdown()
 
 # tune.py 로 기록 — 주석·정렬이 보존되고 변경 이력도 남는다
+# ★ mission.start_x/y 도 같이 쓴다 (2026-08-14 추가).
+#   예전엔 init_* 만 써서, 맵을 바꾼 뒤 **출발선이 옛 좌표(벽 속)에 남아**
+#   위치는 잡아도 랩이 하나도 안 세어졌다. 둘은 같은 "출발 자리" 를 가리키는
+#   값이므로 따로 두면 반드시 어긋난다.
 r = subprocess.run([f'{script_dir}/tune.sh',
                     f'localization.init_x={t.x:.4f}',
                     f'localization.init_y={t.y:.4f}',
-                    f'localization.init_yaw={yaw:.4f}'])
+                    f'localization.init_yaw={yaw:.4f}',
+                    f'mission.start_x={t.x:.4f}',
+                    f'mission.start_y={t.y:.4f}'])
 if r.returncode != 0:
     print('[race.sh] 저장 실패 — 위 [tune] 메시지를 확인하세요.', flush=True)
     sys.exit(1)
 PYEOF
-    echo "[race.sh] 저장 완료 — 다음 실행부터 이 위치로 시작합니다"
+    echo "[race.sh] 저장 완료 — init_x/y/yaw 와 mission.start_x/y 를 함께 갱신했습니다"
+    echo "[race.sh]   같은 맵이면 매번 2D Pose Estimate 를 찍을 필요 없습니다."
+    echo "[race.sh]   ※ 맵을 새로 뜨면 savemap 이 출발점을 맵 원점으로 자동 저장하므로"
+    echo "[race.sh]     savepose 는 **출발 자리를 옮길 때만** 쓰면 됩니다."
     exit 0 ;;
   "" ) MODE=$(get_yaml mode); CTRL="" ;;
   mapping|mapping-joy) MODE=$CMD; CTRL="" ;;
@@ -442,6 +616,7 @@ PYEOF
     echo "[race.sh] ★ BENCH 모드 — 속도 0 강제. 바퀴는 돌지 않고 조향만 동작합니다."
     echo "[race.sh]   각 컨트롤러 기동 로그에 'BENCH 모드' 경고가 보이는지 확인하세요."
     echo "[race.sh]   ⚠ 그 줄이 없으면 즉시 Ctrl+C — 속도 강제가 안 걸린 것입니다."
+    echo "[race.sh]   새 맵 정렬: 노트북 ./rviz.sh → 2D Pose Estimate → ./race.sh savepose"
     ;;
   q1|q2|q3|race)
     MODE=$CMD
@@ -535,7 +710,25 @@ elif [ "$MODE" = "mapping-joy" ]; then
     BRIDGE="$SCRIPT_DIR/js_joy_bridge.py"
     if [ -f "$BRIDGE" ]; then
         echo "[race.sh] js_joy_bridge → $JS_DEV  (SDL joy_node 대신, 혼자 주행 방지)"
-        python3 "$BRIDGE" "$JS_DEV" &
+        python3 "$BRIDGE" "$JS_DEV" &#    ./race.sh savemap <이름>  맵핑 끝난 뒤 맵 저장
+#    ./race.sh savepose        ★ 지금 AMCL 위치를 출발점으로 저장
+#                              (savemap 이 맵 원점으로 이미 넣어두므로,
+#                               출발 자리를 옮길 때만 쓰면 됩니다)
+#                              RViz "2D Pose Estimate" 로 맵과 스캔을 맞춘 뒤 실행하면
+#                              다음 실행부터 그 위치에서 시작 (맵-스캔 어긋남 해소)
+    echo "[race.sh] 완료. race_script.yaml의 map_name을 '$NAME'으로 바꾸세요."
+    echo ""
+    echo ">>> 키보드로 천천히 트랙 1~2바퀴 돌면서 맵을 만드세요."
+    echo ">>> ★ 이 창을 끄지 말고, 다른 터미널에서 저장하세요:"
+    echo ">>>       ./race.sh savemap <맵이름>"
+    echo ">>> ★ 저장이 끝난 뒤에 이 창에서 Ctrl+C  (먼저 끄면 /map이 사라져 저장 실패)"
+    echo ""
+    echo ""
+    echo ">>> 조이스틱으로 천천히 트랙 1~2바퀴 돌면서 맵을 만드세요."
+    echo ">>> ★ 이 창을 끄지 말고, 다른 터미널에서 저장하세요:"
+    echo ">>>       ./race.sh savemap <맵이름>"
+    echo ">>> ★ 저장이 끝난 뒤에 이 창에서 Ctrl+C  (먼저 끄면 /map이 사라져 저장 실패)"
+    echo ""
         JOY_PID=$!
     else
         echo "[race.sh] js_joy_bridge 없음 — joy_node device_id=0"
@@ -570,17 +763,27 @@ elif [ "$RECORD_BAG" = "1" ]; then
     mkdir -p "$(dirname "$BAG_DIR")"
     echo "[race.sh] ★ bag 녹화: $BAG_DIR"
     echo "[race.sh]   /scan 이 1081빔 33.5Hz 라 분당 약 9MB 쌓입니다."
+    echo "[race.sh]   회피 판정용 /frenet/{offset,status,speed_scale} 도 함께 녹화합니다."
     # ★ /scan_deskewed 도 반드시 넣는다. deskew 를 켜면 AMCL 이 보는 건 그쪽이라,
     #   /scan 만 녹화하면 **AMCL 의 실제 입력이 bag 에 없다** — 사후에 deskew 가
     #   도움이 됐는지 해가 됐는지 판정할 수가 없다 (2026-08-10 에 실제로 겪었다).
     #   토픽이 없으면 rosbag2 는 그냥 건너뛰므로 꺼져 있어도 무해하다.
+    # ★ 회피 결과(/frenet/*)도 넣는다 (2026-08-15).
+    #   회피 오프셋 d 는 driven_path.csv 에 안 남는다. 그래서 사후에
+    #   "회피가 된 건가, 라인만 따라간 건가" 를 판정할 방법이 없었다 —
+    #   라인 이탈량(CTE)으로 대신 재려다 틀린 결론을 냈다. 콘이 라인에서
+    #   30cm 옆이면 15cm 만 비켜도 충분히 피하는데, 그걸 "회피 없음" 으로 읽었다.
+    #   offset=지령 d, status=0평상/1회피/2막힘/3추월금지, speed_scale=감속배율.
+    #   토픽이 없으면 rosbag2 는 건너뛰므로 q1/q3 에서도 무해하다.
     ros2 bag record -o "$BAG_DIR" \
         /scan /scan_deskewed /odom /odom_imu /amcl_pose /drive /sensors/imu/raw \
         /commands/servo/position /race/enabled /diagnostics \
-        /particle_cloud >/dev/null 2>&1 &
+        /particle_cloud \
+        /frenet/offset /frenet/status /frenet/speed_scale \
+        /obstacle /overtake_zone >/dev/null 2>&1 &
     BAG_PID=$!
-    # SIGINT 로 곱게 닫고, 안 죽으면 3초 뒤 강제 종료
-    trap 'kill -INT $BAG_PID 2>/dev/null; ( sleep 3; kill -9 $BAG_PID 2>/dev/null ) & wait $BAG_PID 2>/dev/null' EXIT INT TERM
+    # SIGINT 로 곱게 닫고, 안 죽으면 3초 뒤 강제 종료. 닫힌 bag 을 git 에 올린다.
+    trap 'kill -INT $BAG_PID 2>/dev/null; ( sleep 3; kill -9 $BAG_PID 2>/dev/null ) & wait $BAG_PID 2>/dev/null; commit_logs' EXIT INT TERM
 
     ros2 launch race_stack race.launch.py mode:=$MODE \
         ${CTRL:+controller:=$CTRL} ${BENCH:+bench:=true} || true
@@ -588,7 +791,7 @@ elif [ "$RECORD_BAG" = "1" ]; then
     kill -INT $BAG_PID 2>/dev/null || true
     wait $BAG_PID 2>/dev/null || true
     echo "[race.sh] bag 저장 완료: $BAG_DIR  ($(du -sh "$BAG_DIR" 2>/dev/null | cut -f1))"
-    echo "[race.sh]   ※ logs/ 는 .gitignore 다 — 공유하려면 따로 옮길 것"
+    commit_logs
 elif [ -n "${BENCH:-}" ]; then
     # bench 는 컨트롤러 속도를 0 으로 못박지만(각 컨트롤러의 발행 직전), bringup 이
     # 함께 띄우는 joy_node+joy_teleop 은 /teleop 으로 따로 나가 그 경로를 우회한다.
@@ -600,6 +803,8 @@ elif [ -n "${BENCH:-}" ]; then
     bench_kill_joy
     wait $LAUNCH_PID
 else
-    exec ros2 launch race_stack race.launch.py mode:=$MODE \
-        ${CTRL:+controller:=$CTRL}
+    # exec 하면 셸이 교체돼 Ctrl+C 뒤 로그 커밋을 못 한다.
+    trap commit_logs EXIT
+    ros2 launch race_stack race.launch.py mode:=$MODE \
+        ${CTRL:+controller:=$CTRL} || true
 fi

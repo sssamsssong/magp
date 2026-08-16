@@ -22,6 +22,7 @@ import cv2
 from PIL import Image
 from scipy.interpolate import CubicSpline, interp1d
 from scipy.spatial import cKDTree
+import scipy.ndimage as ndimage
 import osqp
 import scipy.sparse as sp
 
@@ -60,7 +61,7 @@ WP_DIR   = os.path.join(_PKG_DIR, 'waypoints')
 # 1. 맵 → 트랙 경계 추출
 # ══════════════════════════════════════════════════════════════════════════════
 def extract_reftrack(map_name: str, safety_m: float, n_cl: int = 300,
-                     return_bounds: bool = False):
+                     return_bounds: bool = False, gap_fill: float = 0.05):
     """
     pgm 맵에서 centerline + 트랙 폭을 추출한다.
     반환: [N, 4] = [x, y, w_right, w_left] (미터)
@@ -88,7 +89,36 @@ def extract_reftrack(map_name: str, safety_m: float, n_cl: int = 300,
         y = (h - np.asarray(py, float)) * res + origin[1]
         return x, y
 
-    free = (img > 128).astype(np.uint8) * 255
+    free_b = img > 128
+
+    # ── 벽의 틈 메우기 ────────────────────────────────────────────────
+    #
+    # ★ 트랙 경계에 작은 틈이 있으면 라이다가 그리로 새어 나가 맵에 통로가
+    #   생긴다. 그러면 "가장 큰 자유공간 성분" 이 **샌 통로까지 포함**하고,
+    #   윤곽이 그 통로를 따라 들어갔다 나오면서 중심선이 벽에 붙는다.
+    #
+    #   2026-08-14 실측 (0815_clean) — 이걸 안 하면:
+    #       복도 최소폭(능선)  0.070m   ← 실제 벽이 아니라 **샌 통로의 능선**
+    #       중심선 최소 여유   0.098m   (차 반폭 0.155m 미달 → 라인 생성 실패)
+    #     벽을 5cm(1px) 메우면:
+    #       복도 최소폭        0.750m   자유 픽셀 변화는 −24px 뿐
+    #     즉 침식이 아니라 **틈만 정확히 막는다.**
+    #
+    #   ★ border_value=1 이 필수다. 기본값(0)이면 맵 밖을 자유공간으로 보고
+    #     **테두리의 벽 채움을 침식한다** — 실제로 자유 픽셀이 20817→22853 으로
+    #     늘어 트랙이 통째로 넓어졌다. 맵 밖은 벽이다.
+    if gap_fill > 0.0:
+        r_px = max(1, int(round(gap_fill / res)))
+        kern = np.zeros((2 * r_px + 1, 2 * r_px + 1), bool)
+        yy, xx = np.ogrid[-r_px:r_px + 1, -r_px:r_px + 1]
+        kern[(yy * yy + xx * xx) <= r_px * r_px] = True
+        wall = ndimage.binary_closing(~free_b, structure=kern, border_value=1)
+        n_filled = int(free_b.sum()) - int((~wall).sum())   # + = 자유가 줄었다(=틈이 막혔다)
+        free_b = ~wall
+        print(f'  벽 틈 메움: {gap_fill:.2f}m({r_px}px) — 자유 {-n_filled:+d}px '
+              f'{"(틈만 막힘)" if abs(n_filled) < 500 else "⚠ 변화가 크다 — 침식 의심"}')
+
+    free = free_b.astype(np.uint8) * 255
     n_lbl, labels, stats, _ = cv2.connectedComponentsWithStats(free)
     largest = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
     track_mask = (labels == largest).astype(np.uint8) * 255
@@ -146,27 +176,51 @@ def extract_reftrack(map_name: str, safety_m: float, n_cl: int = 300,
     cx_s, cy_s = splev(u, tck)
     cl = np.column_stack([cx_s, cy_s])
 
-    # ── 중심선 재중심화 (2026-08-10) ──────────────────────────────────
+    # ── 중심선 재중심화 ───────────────────────────────────────────────
+    #
     # 위 중심선은 "바깥 점마다 가장 가까운 안쪽 점과의 중점" 이다. 두 경계가
     # 나란하면 맞지만, 코너에서 안쪽 경계가 휘어 달아나면 중점이 바깥벽 쪽으로
     # 밀린다. fun_clean 실측: s=2.7m 에서 우 0.159m / 좌 0.903m (치우침 70%).
-    # 전체 폭은 1.06m 로 넉넉한데 중심선이 벽에서 0.159m 라, 차 반폭(0.155)을
-    # 빼면 어떤 라인을 그려도 그 근처는 여유가 2cm 다 → QP 가 해를 못 찾는다.
     #
-    # 각 점을 법선 방향으로 (d_inner − d_outer)/2 만큼 밀어 양쪽 거리를 맞춘다.
-    # 몇 번 반복하면 수렴한다 (medial axis 로 가는 고정점 반복).
-    for _ in range(12):
-        do_, _ = tree_outer.query(cl)
-        di_, _ = tree_inner.query(cl)
-        shift = (di_ - do_) * 0.5
-        if np.max(np.abs(shift)) < 1e-3:
-            break
-        # 접선 → 법선 (왼쪽). 닫힌 경로라 roll 로 중심차분
+    # ★★ 2026-08-14 재작성 — 예전 방식은 **거리 기준이 틀렸다.**
+    #   `shift = (d_inner − d_outer)/2` 로 밀었는데, d_inner 는 "인필드 윤곽점
+    #   까지의 거리" 다. 인필드가 트랙을 고르게 감싸면 맞지만, 한쪽으로 치우쳐
+    #   있으면 그 구간에서 d_inner 가 엉뚱하게 커진다(0815_clean 실측 5.68m).
+    #   그러면 shift 가 2.5m 씩 튀고, 5점 스무딩이 그걸 도로 끌어당겨
+    #   **중심선이 바깥벽에서 2cm 인 채로 굳는다.**
+    #     0815_clean: 중심선 최소 여유 0.019m ← 차 반폭 0.155m 미달 → 라인 실패
+    #     0814-1_clean 이 되던 건 인필드가 고르게 감싸 우연히 맞아떨어져서다.
+    #
+    #   이제 **거리변환**을 쓴다 — "어느 벽이든 가장 가까운 벽까지" 라
+    #   윤곽을 안팎으로 나눌 필요가 없다. 법선 방향으로만 훑어 가장 먼 점을
+    #   고르므로 점 순서도 보존된다 (자유 이동은 능선을 따라 뭉친다).
+    dist_m = cv2.distanceTransform(track_mask, cv2.DIST_L2, 5) * res
+
+    def dist_at(pts):
+        cxp = (pts[:, 0] - origin[0]) / res
+        ryp = h - (pts[:, 1] - origin[1]) / res
+        jj = np.clip(np.round(cxp).astype(int), 0, w - 1)
+        ii = np.clip(np.round(ryp).astype(int), 0, h - 1)
+        return dist_m[ii, jj]
+
+    span = np.linspace(-0.30, 0.30, 25)      # 한 번에 ±30cm 안에서만 찾는다
+    for _ in range(20):
         tx = np.roll(cl[:, 0], -1) - np.roll(cl[:, 0], 1)
         ty = np.roll(cl[:, 1], -1) - np.roll(cl[:, 1], 1)
         tn = np.maximum(np.hypot(tx, ty), 1e-9)
-        nx, ny = -ty / tn, tx / tn          # 왼쪽 = inner 쪽(CCW)
-        cl = cl + np.column_stack([nx, ny]) * shift[:, None]
+        nx, ny = -ty / tn, tx / tn
+        # 법선 위 여러 지점의 벽거리를 재서 가장 먼 곳으로
+        best_t = np.zeros(len(cl))
+        best_d = dist_at(cl)
+        for t in span:
+            cand = cl + np.column_stack([nx, ny]) * t
+            dcand = dist_at(cand)
+            upd = dcand > best_d
+            best_d = np.where(upd, dcand, best_d)
+            best_t = np.where(upd, t, best_t)
+        if np.max(np.abs(best_t)) < 1e-3:
+            break
+        cl = cl + np.column_stack([nx, ny]) * best_t[:, None]
         # 매 스텝 가볍게 다듬어 지그재그를 막는다
         k = np.ones(5) / 5
         for c in (0, 1):
@@ -522,23 +576,100 @@ def eval_spline_dense(nodes: np.ndarray, stepsize: float, n_sub: int = 40):
     return rl, el, ki, total
 
 
+def signed_curvature(line: np.ndarray, smooth_m: float = 0.5) -> np.ndarray:
+    """닫힌 폴리라인의 **부호 있는** 곡률 [1/m]. 세 점 원(Menger)으로 잰다.
+
+    부호 규약을 calc_splines 의 법선(오른쪽 방향)에 맞춘다:
+        +  오른쪽으로 돈다  → 코너 안쪽이 **오른쪽**(바깥 경계 쪽)
+        −  왼쪽으로 돈다    → 코너 안쪽이 **왼쪽**(안쪽 경계 쪽)
+
+    세 점 곡률은 점 간격이 촘촘하면 잡음이 크므로 호길이 smooth_m 만큼
+    이동평균한다. 안 하면 직선 구간에서도 곡률이 튀어 여유가 들쭉날쭉해진다.
+    """
+    p = np.asarray(line, float)[:, :2]
+    a, b, c = np.roll(p, 1, axis=0), p, np.roll(p, -1, axis=0)
+    v1, v2 = b - a, c - b
+    cross = v1[:, 0] * v2[:, 1] - v1[:, 1] * v2[:, 0]      # + = 좌회전(CCW)
+    l1 = np.linalg.norm(v1, axis=1)
+    l2 = np.linalg.norm(v2, axis=1)
+    l3 = np.linalg.norm(c - a, axis=1)
+    k = 2.0 * cross / np.maximum(l1 * l2 * l3, 1e-12)
+    k = -k                                                  # 법선(오른쪽)에 맞춤
+    ds = float(np.median(l1)) or 0.1
+    n = max(1, int(round(smooth_m / max(ds, 1e-6))) | 1)     # 홀수
+    if n > 1:                                               # 순환 이동평균
+        pad = np.r_[k[-(n // 2):], k, k[:n // 2]]
+        k = np.convolve(pad, np.ones(n) / n, 'valid')[:len(p)]
+    return k
+
+
+def apex_safety(line: np.ndarray, safety_m: float,
+                apex_extra: float, apex_kappa: float):
+    """코너 **안쪽에만** 여유를 더 준다 → (오른쪽 여유, 왼쪽 여유).
+
+    ★ 왜 균일한 --safety 로는 부족한가 (2026-08-14)
+      --safety 는 전 구간을 똑같이 좁힌다. 그런데 **추종 오차는 코너에 몰린다** —
+      실측(08/13~14, 5.3㎧): 직선 0.16m / 완만 0.23m / 코너 0.39~0.55m.
+      직선까지 같이 좁히면 랩타임만 잃고 정작 필요한 곳은 여전히 모자란다.
+
+    ★ 왜 안쪽만인가
+      코너에서 벽에 붙는 곳은 **안쪽 정점(apex)** 이다. 바깥은 그대로 두어야
+      아웃-인-아웃 진입이 살아 있어 반경을 크게 쓸 수 있다. 양쪽을 다 좁히면
+      라인이 코너 한복판에 갇혀 R 이 작아지고, 그러면 더 느려진다.
+
+    여유는 곡률에 비례해 매끄럽게 는다 (계단이면 그 지점에서 라인이 꺾인다):
+        extra = apex_extra · clip(|κ| / apex_kappa, 0, 1)
+    apex_kappa 는 "이 곡률이면 여유를 다 준다" 는 기준이고, 기본은 1/r_min —
+    즉 라인이 낼 수 있는 가장 조인 코너에서 최대 여유가 된다.
+
+    ★ 기본 0.40m 의 근거 (0814-1_clean, mu 0.42, safety 0.30 고정)
+
+        apex   코너여유   −차반폭   R_min    랩(η=1.0)
+        0      0.360     0.190    1.125    7.61s
+        0.20   0.500     0.330    1.180    7.77s
+        0.40   0.550     0.380    1.079    7.77s     ← 기본
+
+      코너 여유가 0.360 → 0.550m (+53%) 인데 랩은 0.16s 만 든다.
+      비교: 균일한 --safety 를 0.30→0.45 로 올리면 0.400m 에 0.17s —
+      **같은 비용에 훨씬 적게 번다.** 손해가 코너에만 국한되기 때문이다.
+
+    ※ 그래도 아직 부족하다 — 실측 코너 추종오차가 0.39~0.55m 라 여유 0.38m 와
+      거의 같다. 추종 오차를 0.2m 대로 줄인 뒤에야 이 라인으로 갈아탈 수 있다.
+      그전까지는 gen_waypoints_kappa 라인(코너 여유 0.579m)이 안전하다.
+    """
+    if apex_extra <= 0.0:
+        return safety_m, safety_m
+    k = signed_curvature(line)
+    f = np.clip(np.abs(k) / max(apex_kappa, 1e-6), 0.0, 1.0)
+    extra = apex_extra * f
+    #   k > 0  오른쪽으로 돎 → 안쪽이 오른쪽 → 오른쪽 여유를 늘린다
+    return (safety_m + np.where(k > 0, extra, 0.0),
+            safety_m + np.where(k < 0, extra, 0.0))
+
+
 def track_widths(line: np.ndarray, outer: np.ndarray, inner: np.ndarray,
-                 safety_m: float, min_w: float = 0.05):
+                 safety_m, min_w: float = 0.05, safety_l=None):
     """임의의 라인에서 좌우 트랙 폭을 **경계에서 다시 잰다**.
 
     반복 최적화가 매 스텝 라인을 옮기므로, 폭을 α 로 더하고 빼는 근사만 쓰면
     오차가 누적돼 라인이 조용히 트랙 밖으로 샌다. 매번 실측하면 그 경로가 없다.
     right = outer(바깥 경계), left = inner — 중심선이 CCW 라 바깥이 오른쪽이다.
+
+    safety_m 은 스칼라도 배열도 된다. 배열이면 점마다 다른 여유 (apex_safety).
+    safety_l 을 주면 좌우를 따로 쓴다.
     """
     d_o, _ = cKDTree(outer).query(line)
     d_i, _ = cKDTree(inner).query(line)
-    return (np.maximum(d_o - safety_m, min_w),
-            np.maximum(d_i - safety_m, min_w))
+    s_r = safety_m
+    s_l = safety_m if safety_l is None else safety_l
+    return (np.maximum(d_o - s_r, min_w),
+            np.maximum(d_i - s_l, min_w))
 
 
 def optimize_raceline(reftrack, outer, inner, *, w_veh, r_min, stepsize,
                       out_step, safety_m, iters=12, step_limit=0.15,
-                      wall_clear=0.06, tol=0.995):
+                      wall_clear=0.06, tol=0.995,
+                      apex_extra=0.0, apex_kappa=None):
     """재선형화 반복 최소곡률 최적화 (TUMFTM iqp 에 해당).
 
     ★ 한 번만 푸는 게 왜 안 되나 ─────────────────────────────────────────
@@ -586,7 +717,11 @@ def optimize_raceline(reftrack, outer, inner, *, w_veh, r_min, stepsize,
             best = (r_act, nodes.copy(), rl, el, kap, total, clear)
 
         # 다음 반복의 기준선 = 방금 옮긴 라인 (폭은 경계에서 다시 잰다)
-        w_r2, w_l2 = track_widths(nodes, outer, inner, safety_m)
+        #   ★ 여유는 **방금 나온 라인의 곡률**로 다시 계산한다. 반복이 진행되며
+        #     코너가 어디인지가 바뀌므로, 처음 중심선 곡률로 고정하면 어긋난다.
+        s_r, s_l = apex_safety(nodes, safety_m, apex_extra,
+                               apex_kappa if apex_kappa else 1.0 / max(r_min, 1e-6))
+        w_r2, w_l2 = track_widths(nodes, outer, inner, s_r, safety_l=s_l)
         ref = np.column_stack([nodes, w_r2, w_l2])
 
         if np.abs(alpha).max() < 1e-3:
@@ -594,8 +729,31 @@ def optimize_raceline(reftrack, outer, inner, *, w_veh, r_min, stepsize,
             break
 
     if best is None:
+        # ★ 안내를 나누는 이유 (2026-08-14)
+        #   원인이 둘인데 처방이 정반대다. 예전엔 무조건 "--safety 를 올려라" 라고
+        #   해서 헛다리를 짚게 만들었다 — 0815_clean 에서 safety 0.15/0.20/0.25/0.35
+        #   를 다 시도해도 전부 실패했다. 중심선 자체가 차폭보다 좁은 곳을 지나면
+        #   QP 가 할 수 있는 일이 없기 때문이다.
+        cl_room = float(min(track_widths(reftrack[:, :2], outer, inner,
+                                         safety_m=0.0, min_w=0.0)[0].min(),
+                            track_widths(reftrack[:, :2], outer, inner,
+                                         safety_m=0.0, min_w=0.0)[1].min()))
+        if cl_room < w_veh / 2.0 + wall_clear:
+            raise RuntimeError(
+                f'optimize_raceline: 벽 여유 {wall_clear:.3f}m 를 만족하는 해가 없다.\n'
+                f'  ★ 원인은 QP 가 아니라 **중심선**이다 — 중심선의 최소 벽 여유가\n'
+                f'    {cl_room:.3f}m 로, 필요한 {w_veh/2.0 + wall_clear:.3f}m'
+                f' (차 반폭 {w_veh/2.0:.3f} + 여유 {wall_clear:.3f}) 에 못 미친다.\n'
+                f'    중심선조차 못 지나는 목이 있으면 --safety 를 어떻게 줘도 안 된다.\n'
+                f'  → 맵을 확인할 것. 흔한 원인 두 가지:\n'
+                f'     · 벽에 틈이 있어 라이다가 새어 나갔다 → --gapfill 을 올린다\n'
+                f'       (기본 0.05m. 틈이 크면 0.10~0.15)\n'
+                f'     · 그 자리에 실제로 뭔가 놓여 있었다 → 치우고 다시 맵핑\n'
+                f'  → 급하면 --wallclear 를 낮춰 통과시킬 수는 있으나, 그만큼 차가\n'
+                f'    벽에 가까이 붙는다는 뜻이다.')
         raise RuntimeError(
             f'optimize_raceline: 벽 여유 {wall_clear:.3f}m 를 만족하는 해가 없다.\n'
+            f'  중심선은 {cl_room:.3f}m 로 충분하니 **QP 가 코너를 너무 파고든 것**이다.\n'
             f'  → **--safety 를 올릴 것** (예: 0.35). safety 는 QP 가 쓸 수 있는\n'
             f'     폭을 좁혀 라인을 중앙에 붙인다 = 벽 여유가 늘어난다.\n'
             f'     직관과 반대라 2026-08-10 에 이 메시지가 "줄이라" 고 잘못\n'
@@ -656,7 +814,43 @@ def calc_vel_profile(kappa:    np.ndarray,
 # ══════════════════════════════════════════════════════════════════════════════
 # 7. 오버레이 PNG 저장
 # ══════════════════════════════════════════════════════════════════════════════
-def save_overlay(map_name, raceline, v, wp_path):
+def _overtake_zone_for(map_name, raceline, args, gap_fill):
+    """오버레이에 그릴 추월 가능 구간. 실패하면 None (그림만 빠진다).
+
+    ★ 주행(frenet_planner)과 **같은 함수**를 쓴다 (obstacle_avoid.overtake_zone).
+      두 벌로 두면 그림과 실제가 갈리고, 그건 "그림은 되는데 차는 안 피한다"
+      로 나타나 디버깅이 샌다.
+    """
+    try:
+        from race_stack.obstacle_avoid import overtake_zone
+        import yaml as _y
+        cfg = _y.safe_load(open(os.path.join(MAPS_DIR, map_name + '.yaml')))
+        res = float(cfg['resolution']); ox, oy = cfg['origin'][:2]
+        img = None
+        for ext in ('.pgm', '.png'):
+            q = os.path.join(MAPS_DIR, map_name + ext)
+            if os.path.exists(q):
+                img = np.array(Image.open(q).convert('L')); break
+        if img is None:
+            return None
+        h, w = img.shape
+        free_b = img > 128
+        if gap_fill > 0.0:                       # 주행 쪽과 같은 전처리
+            r_px = max(1, int(round(gap_fill / res)))
+            yy, xx = np.ogrid[-r_px:r_px + 1, -r_px:r_px + 1]
+            kern = (yy * yy + xx * xx) <= r_px * r_px
+            free_b = ~ndimage.binary_closing(~free_b, structure=kern, border_value=1)
+        dist = cv2.distanceTransform(free_b.astype(np.uint8), cv2.DIST_L2, 5) * res
+        jj = np.clip(((raceline[:, 0] - ox) / res).astype(int), 0, w - 1)
+        ii = np.clip((h - (raceline[:, 1] - oy) / res).astype(int), 0, h - 1)
+        return overtake_zone(raceline, dist[ii, jj],
+                             args.ot_width, args.ot_exit_pad, args.ot_min_len)
+    except Exception as e:
+        print(f'  추월구간 계산 생략: {e}')
+        return None
+
+
+def save_overlay(map_name, raceline, v, wp_path, ot=None):
     try:
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -697,9 +891,25 @@ def save_overlay(map_name, raceline, v, wp_path):
         lc.set_array(v_ext)
         ax.add_collection(lc)
         ax.plot(px[0], py[0], 'b*', ms=15, zorder=6)
+
+        # ── 추월 가능 구간 (1대1) ────────────────────────────────────
+        #   주행 중 로그에만 뜨면 "트랙 어디가 추월 구간인지" 를 눈으로 못 본다.
+        #   라인을 만들 때 같이 그려두면 그 자리에서 검수할 수 있다.
+        #   계산은 obstacle_avoid.overtake_zone — **주행과 같은 함수**다.
+        ot_txt = ''
+        if ot is not None and ot.any():
+            oz = np.append(ot, ot[0])
+            seg_ot = segs[oz[:-1] & oz[1:]]
+            if len(seg_ot):
+                ax.add_collection(LineCollection(
+                    seg_ot, colors='#00bfff', linewidth=7.0, zorder=4, alpha=0.55))
+                ot_txt = f'   |  overtake zone {100*ot.mean():.0f}%'
+        elif ot is not None:
+            ot_txt = '   |  overtake zone 0%'
+
         fig.colorbar(lc, ax=ax, label='speed (m/s)', fraction=0.03, pad=0.02)
         ax.set_title(f'{map_name}  —  {len(raceline)}pts '
-                     f'({v.min():.1f}~{v.max():.1f} m/s)', fontsize=10)
+                     f'({v.min():.1f}~{v.max():.1f} m/s){ot_txt}', fontsize=10)
 
         out = os.path.splitext(wp_path)[0] + '.png'
         fig.tight_layout()
@@ -742,7 +952,7 @@ def gui_draw_raceline(map_name: str, args) -> tuple | None:
     ymin, ymax = origin[1], origin[1] + h_img * res
 
     # ── 트랙 경계 ──
-    reftrack = extract_reftrack(map_name, safety_m=args.safety)
+    reftrack = extract_reftrack(map_name, safety_m=args.safety, gap_fill=args.gapfill)
     cl = reftrack[:, :2]
     path_cl = np.vstack([cl, cl[0]])
     _, _, _, nv = calc_splines(path_cl)
@@ -769,10 +979,10 @@ def gui_draw_raceline(map_name: str, args) -> tuple | None:
               cmap='gray', alpha=0.75)
     ax.set_aspect('equal')
 
-    ax.plot(bnd_r[:, 0], bnd_r[:, 1], color='orange', lw=1.2, alpha=0.7, label='우측 한계')
-    ax.plot(bnd_l[:, 0], bnd_l[:, 1], color='cyan',   lw=1.2, alpha=0.7, label='좌측 한계')
+    ax.plot(bnd_r[:, 0], bnd_r[:, 1], color='orange', lw=1.2, alpha=0.7, label='right bound')
+    ax.plot(bnd_l[:, 0], bnd_l[:, 1], color='cyan',   lw=1.2, alpha=0.7, label='left bound')
     cl_cl = np.vstack([cl, cl[0]])
-    ax.plot(cl_cl[:, 0], cl_cl[:, 1], 'b--', lw=0.8, alpha=0.35, label='중심선')
+    ax.plot(cl_cl[:, 0], cl_cl[:, 1], 'b--', lw=0.8, alpha=0.35, label='centerline')
 
     pal = ['red', 'lime', 'magenta', 'yellow', 'deepskyblue']
     for i, (cname, cpts) in enumerate(candidates.items()):
@@ -782,8 +992,8 @@ def gui_draw_raceline(map_name: str, args) -> tuple | None:
 
     ax.legend(loc='upper right', fontsize=7, framealpha=0.6)
     ax.set_title(
-        f'{map_name}  ─  좌클릭: 점 추가  |  우클릭/u: 언두  |  '
-        f'd: 초기화  |  Enter: 확정  |  q: 취소',
+        f'{map_name}  —  L-click: add  |  R-click/u: undo  |  '
+        f'd: clear  |  Enter: confirm  |  q: cancel',
         fontsize=9)
 
     # 현재 그린 경로 표시
@@ -842,7 +1052,7 @@ def gui_draw_raceline(map_name: str, args) -> tuple | None:
 
     pts = state['pts']
     if len(pts) < 4:
-        print('  점이 부족합니다 (최소 4개 필요). 취소됨.')
+        print('  not enough points (need at least 4). cancelled.')
         return None
 
     # ── 스플라인 피팅 ──
@@ -918,6 +1128,22 @@ def main():
     p.add_argument('--steplimit', type=float, default=0.15,
                    help='반복 1회당 최대 횡이동 (m) — 신뢰영역')
     p.add_argument('--iters',  type=int, default=12, help='재선형화 반복 횟수')
+    p.add_argument('--gapfill', type=float, default=0.05,
+                   help='트랙 벽의 틈을 이만큼까지 메운다 [m] (기본 0.05). '
+                        '틈으로 라이다가 새면 "가장 큰 자유공간"이 샌 통로까지 '
+                        '포함해 중심선이 벽에 붙는다. 0=끔')
+    p.add_argument('--ot-width', type=float, default=1.10, dest='ot_width',
+                   help='추월 가능 구간 판정 폭 [m] — 오버레이 표시용. '
+                        '주행 값은 race_script.yaml frenet.ot_width 다')
+    p.add_argument('--ot-exit-pad', type=float, default=2.50, dest='ot_exit_pad')
+    p.add_argument('--ot-min-len',  type=float, default=2.00, dest='ot_min_len')
+    p.add_argument('--apex-extra', type=float, default=0.40, dest='apex_extra',
+                   help='코너 안쪽에만 더 줄 여유 [m]. 0=끔 (기본 0.40). '
+                        '추종 오차가 코너에 몰리므로(실측 직선 0.16 vs 코너 0.39~0.55m) '
+                        '균일한 --safety 보다 여기에 주는 편이 훨씬 싸다 — '
+                        '0814-1_clean 실측: 코너 여유 0.360→0.550m 에 랩 +0.16s')
+    p.add_argument('--apex-kappa', type=float, default=0.0, dest='apex_kappa',
+                   help='이 곡률[1/m]에서 --apex-extra 를 다 준다 (0=자동: 1/rmin)')
     p.add_argument('--wallclear', type=float, default=0.18,
                    help='벽까지 최소 여유 (m, 차폭 제외). ★ 실측 추종오차보다 커야 '
                         '한다 — 2026-08-09 CTE p95 가 η0.5 에서 0.217m, η1.0 에서 '
@@ -930,11 +1156,10 @@ def main():
     if args.map:
         map_name = args.map
     else:
-        maps = sorted(set(
-            f.rsplit('.', 1)[0]
-            for f in os.listdir(MAPS_DIR)
-            if f.endswith(('.pgm', '.png'))
-        ))
+        # ★ .pgm 이 있는 것만 맵이다. maps/ 에는 미리보기 PNG 도 같이 사는데
+        #   (clean_map_auto 의 <맵>_clean_preview.png), 그걸 목록에 올리면
+        #   고를 수 있는 것처럼 보이고 고르면 죽는다.
+        maps = sorted(f[:-4] for f in os.listdir(MAPS_DIR) if f.endswith('.pgm'))
         print('\n사용 가능한 맵:')
         for i, m in enumerate(maps, 1):
             print(f'  {i}. {m}')
@@ -975,7 +1200,8 @@ def main():
             for (x, y), vi in zip(raceline, v):
                 w.writerow([f'{x:.4f}', f'{y:.4f}', f'{vi:.4f}'])
         print(f'  저장: {len(raceline)}pts → {wp_path}')
-        save_overlay(map_name, raceline, v, wp_path)
+        save_overlay(map_name, raceline, v, wp_path,
+                     _overtake_zone_for(map_name, raceline, args, args.gapfill))
         print(f'\n완료!  race_script.yaml → waypoints: {out_name}')
         return
 
@@ -985,11 +1211,12 @@ def main():
     out_name = args.out or f'{map_name}_map_wp'
     wp_path  = os.path.join(WP_DIR, out_name + '.csv')
 
-    print(f'\n맵: {map_name}  vmax={args.vmax}  wveh={args.wveh}  safety={args.safety}')
+    print(f'\n맵: {map_name}  vmax={args.vmax}  wveh={args.wveh}  '
+          f'safety={args.safety}  apex_extra={args.apex_extra}  mu={args.mu}')
 
     print('\n[1] 트랙 경계 추출...')
     reftrack, outer_w, inner_w = extract_reftrack(
-        map_name, safety_m=args.safety, return_bounds=True)
+        map_name, safety_m=args.safety, return_bounds=True, gap_fill=args.gapfill)
 
     print(f'\n[2~4] 재선형화 반복 최소곡률 최적화 '
           f'(격자 {args.gridstep}m, 스텝한계 {args.steplimit}m, 최대 {args.iters}회)...')
@@ -998,6 +1225,8 @@ def main():
         w_veh=args.wveh, r_min=args.rmin,
         stepsize=args.gridstep, out_step=args.step,
         safety_m=args.safety, iters=args.iters, step_limit=args.steplimit,
+        apex_extra=args.apex_extra,
+        apex_kappa=(args.apex_kappa if args.apex_kappa > 0 else None),
         wall_clear=args.wallclear)
 
     print(f'\n[5] 결과: {len(raceline)}pts  길이={total:.2f}m  '
@@ -1035,7 +1264,11 @@ def main():
             w.writerow([f'{x:.4f}', f'{y:.4f}', f'{vi:.4f}'])
     print(f'  웨이포인트: {len(raceline)}pts → {wp_path}')
 
-    save_overlay(map_name, raceline, v, wp_path)
+    ot = _overtake_zone_for(map_name, raceline, args, args.gapfill)
+    if ot is not None:
+        print(f'  추월 가능 구간: {100*ot.mean():.0f}% '
+              f'(폭≥{args.ot_width:.2f}m, 끝에서 {args.ot_exit_pad:.1f}m 잘라냄)')
+    save_overlay(map_name, raceline, v, wp_path, ot)
 
     print('\n완료! 다음 단계:')
     print(f'  race_script.yaml → waypoints: {out_name}')

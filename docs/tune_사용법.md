@@ -18,6 +18,23 @@
 
 ---
 
+## 속도만 빠르게 바꾸기 (SSH)
+
+젯슨에 들어가서:
+
+```bash
+cd ~/yax
+./tune.sh i          # 번호 고르고 값 입력 → 즉시 yaml 에 저장
+./tune.sh -h         # q1/q2/race 가 각각 언제 먹는지 설명
+./tune.sh cap=3      # hard_cap 만 (0 = 끔). 모든 모드 공통
+./tune.sh q1+=0.1    # ./race.sh q1 전용. q2 / race 속도는 안 변함
+./tune.sh race=0.6   # ./race.sh race 전용
+```
+
+`grip_util` 은 차량 파일(`config/vehicle_car*.yaml`)로 가고, `hard_cap` 은 `race_script.yaml` 로 간다. 대화형이 알아서 고른다. 다음 `./race.sh` 부터 적용.
+
+---
+
 ## 튜닝 루프
 
 ```bash
@@ -50,6 +67,8 @@ ssh jetson "cd ~/yax && ./tune.sh stanley.ff_gain+=0.3"
 
 | 명령 | 설명 |
 |---|---|
+| `./tune.sh i` | ★ 속도 대화형 (hard_cap / grip_util). 번호 고르고 값 입력, 즉시 저장 |
+| `./tune.sh cap=3` | hard_cap 별칭. `q1=` `eta+=` 도 됨 |
 | `./tune.sh status` | ★ 현재 튜닝 상태 (아래 참조) |
 | `./tune.sh` | 설정값 전체 보기 (권장 범위 포함) |
 | `./tune.sh stanley` | 한 섹션만 보기 |

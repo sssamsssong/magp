@@ -59,7 +59,8 @@ from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import Bool, ColorRGBA, Float64
 
-from race_stack.speed_profile import solve_profile, LaunchLimiter
+from race_stack.speed_profile import (
+    solve_profile, LaunchLimiter, preview_speed, steer_speed_limit)
 from visualization_msgs.msg import Marker
 
 from race_stack.stanley_controller import _REPO_ROOT, _normalize, write_run_config
@@ -187,8 +188,8 @@ class MapController(Node):
         self.declare_parameter('launch_time', 3.0)
 
         # 구동계 지연 [s]. 지령→실측 속도의 상호상관으로 실측한 값(2026-08-09:
-        # 250~290ms). 이만큼 앞의 프로파일 **최솟값**을 미리 지령해 감속을
-        # 앞당긴다. 0 = 끔. 자세한 이유는 _profile_speed 참고.
+        # 250~290ms, 고속에선 410ms). _profile_speed 가 이 지연 **과** 제동거리
+        # 중 긴 쪽을 본다. 0 = 지연항만 끔 (제동거리 미리보기는 a_brk 로 남는다).
         self.declare_parameter('speed_lag',   0.25)
 
         # ★ 박스 위 벤치 모드. true 면 **발행 직전에 속도를 0 으로 못박는다**
@@ -261,6 +262,8 @@ class MapController(Node):
 
         wp_file = self.get_parameter('waypoint_file').value
         self._wp_ds = 0.1
+        self._a_acc = 0.0
+        self._a_brk = 0.0
         self.wp = self._load_waypoints(wp_file)
         if self.wp is None:
             self.get_logger().error(
@@ -276,7 +279,6 @@ class MapController(Node):
 
         # ── 주행 상태 ───────────────────────────────────────────────────
         self.enabled = False    # ★ mission_manager 의 /race/enabled 를 받아야 켜진다
-        self._a_acc  = 0.0      # 프로파일이 실제로 쓴 가속 상한 (기동 시 채워진다)
         self._launch = LaunchLimiter()   # 출발 직후 가속 제한 (휠 스핀 방지)
         self.pos = None
         self.yaw = 0.0
@@ -320,9 +322,16 @@ class MapController(Node):
         self._fr_rx_t   = None    # 마지막 수신 시각 (타임아웃 판정)
         self._fr_shift  = 0.0     # 실제로 적용 중인 값 (램프됨)
         self._fr_warned = False
+        self._fr_spd    = 1.0     # 속도 스케일 (1대1). 타임아웃이면 1.0 으로 복귀
+        self._fr_spd_t  = None
         if bool(self.p('frenet_enabled')):
             self.create_subscription(Float64, '/frenet/offset',
                                      self._frenet_cb, 10)
+            # ★ 1대1 — 통로가 좁으면 줄이고 넓으면 안 줄인다. 프로파일 **위로는
+            #   절대 안 올린다** (그건 마찰원을 넘는 것이다). 발행이 끊기면
+            #   1.0 으로 돌아간다 — 오프셋과 같은 타임아웃 폴백 규약.
+            self.create_subscription(Float64, '/frenet/speed_scale',
+                                     self._frenet_spd_cb, 10)
 
         # 제어·발행을 50Hz 로 고정한다. AMCL 콜백에 걸어두면 주기가 들쭉날쭉하고
         # (2.5cm 이동마다) 정지 상태에서는 아예 돌지 않는다.
@@ -413,6 +422,7 @@ class MapController(Node):
             self.get_logger().warn("a_brake 는 폐기됐다 — a_lon_brk 를 쓸 것.")
 
         self._a_acc = float(info['a_acc'])   # 출발 제한이 여기로 복귀한다
+        self._a_brk = float(info['a_brk'])   # 제동 미리보기
         self.get_logger().info(
             f"속도 프로파일 η={info['eta']:.2f}  예산 {info['a_g']:.2f}㎧² "
             f"(가속 {info['a_acc']:.2f} / 제동 {info['a_brk']:.2f})")
@@ -440,28 +450,15 @@ class MapController(Node):
         return v
 
     def _profile_speed(self, near, v):
-        """프로파일에서 지령 속도를 뽑되 **구동계 지연만큼 미리 감속**한다.
+        """프로파일에서 지령 속도를 뽑되 **제동거리와 구동 지연 중 긴 쪽**을 본다.
 
-        2026-08-09 실측 (driven_path.csv 의 speed 와 cmd_v 상호상관):
-        지령→실측 지연이 **250~290ms**. 4.7㎧ 이면 1.2m 를 지나서야 반응한다.
-        헤어핀(s=14m, 프로파일 2.09㎧) 진입에서 실측이 3.30㎧ 로 1.2㎧ 초과했고,
-        그 다음 점(s=16m)에서 라인 바깥으로 0.39m 밀렸다 — 그립이 모자라서가
-        아니라 **감속을 늦게 시작해서**다.
-
-        보정은 감속 방향에만 건다:  앞으로 v·t_lag 만큼의 구간에서 프로파일의
-        **최솟값**을 취한다. 가속까지 앞당기면 코너를 다 빠져나오기 전에 밟게 되어
-        마찰원을 넘는다 — 브레이크는 미리, 액셀은 제때가 맞다.
+        지연만 보면 v·t_lag 앞만 감속한다. 제동거리 v²/(2 a_brk) 가 더 길면
+        그걸 쓴다. a_brk 는 프로파일(오버레이 a_lon_brk, 0 이면 자동) 그대로.
+        가속은 앞당기지 않는다.
         """
-        i = int(near)
-        lag = float(self.p('speed_lag'))
-        if lag <= 0.0 or self._wp_ds <= 0.0:
-            return float(self._v_profile[i])
-        k = int(round(v * lag / self._wp_ds))
-        if k <= 0:
-            return float(self._v_profile[i])
-        n = len(self._v_profile)
-        idx = (np.arange(i, i + k + 1) % n)
-        return float(self._v_profile[idx].min())
+        return preview_speed(
+            self._v_profile, near, v, self._wp_ds,
+            lag=float(self.p('speed_lag')), a_brk=self._a_brk)
 
     def _launch_limit(self, speed, dt):
         """출발 가속 제한. 로직은 speed_profile.LaunchLimiter (컨트롤러 공용).
@@ -501,6 +498,18 @@ class MapController(Node):
         return float(np.interp(clamped, self._pac_Fy_lut, self._pac_alpha_lut))
 
     # ── MAP 조향각 ─────────────────────────────────────────────────────
+    def _frenet_spd_cb(self, msg: Float64):
+        self._fr_spd = float(np.clip(msg.data, 0.2, 1.0))
+        self._fr_spd_t = self.get_clock().now().nanoseconds * 1e-9
+
+    def _frenet_speed_scale(self) -> float:
+        if not bool(self.p('frenet_enabled')) or self._fr_spd_t is None:
+            return 1.0
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if now - self._fr_spd_t > float(self.p('frenet_timeout')):
+            return 1.0
+        return self._fr_spd
+
     def _frenet_cb(self, msg: Float64):
         self._fr_d_cmd = float(msg.data)
         self._fr_rx_t = self.get_clock().now().nanoseconds * 1e-9
@@ -525,6 +534,21 @@ class MapController(Node):
             self.get_logger().warn(
                 '/frenet/offset 끊김 — 레이싱라인으로 복귀한다 (회피 없음)',
                 throttle_duration_sec=2.0)
+
+        # ★★ **한 번도** 못 받은 경우를 따로 경고한다 (2026-08-15).
+        #   예전엔 `_fr_rx_t is not None` 조건 때문에 이 경우가 조용히 지나갔다.
+        #   frenet_planner 가 기동에서 죽으면 오프셋이 아예 안 오는데,
+        #   컨트롤러는 d=0 으로 정상 주행하므로 **로그상 완전히 정상으로 보인다.**
+        #   실제로 그랬다 — 08/15 race 주행에서 planner 가 NameError 로 즉사했고
+        #   차는 레이싱라인만 따라 달렸다. "회피를 전혀 못 한다" 로만 보였고
+        #   원인을 짚을 단서가 로그 어디에도 없었다.
+        #   회피를 켜 놓고 오프셋이 안 오면 그건 항상 고장이다.
+        if self._fr_rx_t is None:
+            self.get_logger().error(
+                '/frenet/offset 을 한 번도 못 받았다 — frenet_planner 가 죽었거나 '
+                '안 떴다. 회피가 전혀 동작하지 않는 상태다. '
+                'ros2 node list 로 frenet_planner 확인할 것',
+                throttle_duration_sec=3.0)
 
         step = float(self.p('frenet_shift_rate')) / 50.0     # _cmd_tick 50Hz
         self._fr_shift += float(np.clip(target - self._fr_shift, -step, step))
@@ -806,7 +830,18 @@ class MapController(Node):
         # 프로파일이 이미 물리(마찰원)와 min_speed·hard_cap 을 다 반영했다.
         # 여기서 다시 max_speed 로 자르면 상한이 부활해 등속 주행이 된다.
         speed = self._profile_speed(near, v)
+        # 1대1 회피 감속 (막히면 줄이고 넓으면 그대로). 출발제한보다 **먼저**
+        # 걸어야 한다 — 뒤에 걸면 출발제한의 적분 상태(_cmd_prev)가 스케일된
+        # 값을 못 보고 다음 틱에서 다시 튄다.
+        speed *= self._frenet_speed_scale()
         speed = self._launch_limit(speed, 0.02)   # 타이머 주기 50Hz
+        # 조향이 포화되면 그 곡률을 마찰 예산 안에서 돌 수 있는 속도로 자른다.
+        v_lock = steer_speed_limit(
+            steer, float(self.p('wheelbase')),
+            float(self.p('mu')) * float(self.p('pac_d')),
+            float(self.p('grip_util')))
+        if v_lock < speed:
+            speed = v_lock
 
         self.get_logger().info(
             f'[MAP] κ={self._curvature[near]:.3f}  '
