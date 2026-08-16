@@ -1116,8 +1116,8 @@ class ObstacleAvoidMixin:
     hold_max_sec = 3.0     # 상한 [s] — 잘못 물리면 영영 안 풀리는 것을 막는다
 
     # 테스트용 하이브리드. yaml 로 끈다 (static_lock / candidate_fb).
-    static_lock  = True    # 정지 장애물: 고른 d 를 지나갈 때까지 고정
-    candidate_fb = True    # 실행가능 후보만 짧은 FB 통과시간으로 고른다
+    static_lock  = False   # 08/15 기준. 켜면 정지 장애물 d 고정
+    candidate_fb = False   # 08/15 기준. 켜면 짧은 FB 통과시간으로 고른다
     fb_horizon   = 5.0     # FB 에 넣을 전방 거리 [m]
     fb_iters     = 2       # solve_profile 반복. 2면 50Hz 에 충분
 

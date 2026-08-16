@@ -146,8 +146,8 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         d('hold_obj_len',  0.50)   # 피할 대상 길이 [m]
         d('hold_margin',   0.30)
         d('hold_max_sec',  3.0)    # 상한 — 잘못 물려 영영 안 풀리는 것 방지
-        d('static_lock',   True)   # 정지 장애물 d 고정. false 면 17후보 매 프레임
-        d('candidate_fb',  True)   # 짧은 FB 통과시간으로 후보 선택
+        d('static_lock',   False)  # 08/15 기준. 켜면 정지 장애물 d 고정
+        d('candidate_fb',  False)  # 08/15 기준. 켜면 짧은 FB 통과시간
         d('fb_horizon',    5.0)    # FB 전방 거리 [m]
         d('fb_iters',      2)
         d('speed_min_scale', 0.45)

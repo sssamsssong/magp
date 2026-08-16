@@ -232,8 +232,8 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self.declare_parameter('frenet_min_room',   0.22)
         self.declare_parameter('frenet_gap_hyst',   0.10)   # 좌우 갈아타기 우세폭
         self.declare_parameter('frenet_debug',      True)   # /frenet_candidates 마커
-        self.declare_parameter('static_lock',       True)
-        self.declare_parameter('candidate_fb',      True)
+        self.declare_parameter('static_lock',       False)
+        self.declare_parameter('candidate_fb',      False)
         self.declare_parameter('fb_horizon',        5.0)
         self.declare_parameter('fb_iters',          2)
         # 라이다 장착 오프셋 (base_link → laser). 격자 점유 판정에 필수.
