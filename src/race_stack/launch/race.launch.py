@@ -557,6 +557,10 @@ def generate_launch_description():
                 'max_steer':     float(pp.get('max_steer', 0.36)),
                 'l1_min':        float(mp.get('l1_min',      0.2725)),
                 'l1_k':          float(mp.get('l1_k',        0.2750)),
+                # 코너에서만 L1 상한 (0 = 끔). 안쪽 파고듦 대책 — 2026-08-16
+                'l1_curv_k':     float(mp.get('l1_curv_k',    1.0)),
+                # 그 상한의 시간 하한 — 없으면 진입에서 조향이 포화돼 바깥으로 밀린다
+                'l1_curv_tmin':  float(mp.get('l1_curv_tmin', 0.50)),
                 'mass':          float(mp.get('mass',        3.74)),
                 'lf':            float(mp.get('lf',          0.15875)),
                 'lr':            float(mp.get('lr',          0.17145)),
@@ -683,12 +687,22 @@ def generate_launch_description():
                     # 있는지" 를 이걸로 안다 (히스테리시스·좌우 유지)
                     'shift_rate':       float(fr.get('shift_rate', 2.0)),
                     # 컨트롤러의 L1 — 회피 완료 거리 계산용. 갈리면 상한이 틀어진다
+                    # ⚠ 2026-08-16 부터 컨트롤러는 코너에서 L1 을 l1_curv_k/|κ| 로
+                    #   자른다(map.l1_curv_k). 플래너는 그 상한을 **안 본다** —
+                    #   즉 코너에서 실제 L1 보다 길게 잡는다. 이동거리
+                    #   1.8·L1/√2 를 과대평가하는 쪽이라 회피 속도상한이 필요보다
+                    #   보수적으로 나오는 것뿐이라 안전 방향이고, 그래서 지금은
+                    #   일부러 안 맞췄다. 코너 회피가 과하게 느리면 여기부터 볼 것.
                     'l1_min':           float(mp.get('l1_min', 1.32)),
                     'l1_k':             float(mp.get('l1_k',   0.75)),
                     'spd_span':         float(fr.get('spd_span',     1.20)),
                     'shift_cap':        bool( fr.get('shift_cap',    True)),
                     'shift_safety':     float(fr.get('shift_safety', 1.25)),
                     'shift_min_v':      float(fr.get('shift_min_v',  0.8)),
+                    # 움직이는 상대는 gap 을 접근속도로 환산 — 2026-08-16
+                    'shift_close_min':  float(fr.get('shift_close_min', 0.30)),
+                    'shift_close_max':  float(fr.get('shift_close_max', 6.0)),
+                    'shift_close_r':    float(fr.get('shift_close_r',   0.60)),
                     'shift_preempt':    bool( fr.get('shift_preempt', True)),
                     'shift_det_m':      float(fr.get('shift_det_m',   2.70)),
                     'shift_brake':      float(fr.get('shift_brake',   0.0)),

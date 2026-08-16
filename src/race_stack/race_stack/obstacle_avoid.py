@@ -1121,6 +1121,10 @@ class ObstacleAvoidMixin:
     shift_rate_ref = 2.0     # 기준선 램프 속도 [m/s] (frenet.shift_rate 와 같게)
     shift_safety   = 1.25    # 여유 배수
     shift_min_v    = 0.8     # 이 아래로는 안 깎는다 [m/s]
+    # ★ 움직이는 상대에게는 gap 을 접근속도로 환산한다 (2026-08-16). 아래 참조.
+    shift_close_min = 0.30   # 접근속도 하한 [m/s] — 증폭 상한 = v/이 값
+    shift_close_max = 6.0    # gap 증폭 배수의 절대 상한
+    shift_close_r   = 0.60   # gap 을 정한 점에서 이 반경 안의 추적만 본다 [m]
     shift_det_m    = 2.70    # 장애물이 **보이기 시작하는** 거리 [m] (실측)
     shift_brake    = 0.0     # 제동 능력 [m/s²]. 0 = μ_eff·g 로 자동
     shift_preempt  = True    # 보이기 전에도 접근속도를 제한할지
@@ -1185,6 +1189,43 @@ class ObstacleAvoidMixin:
                 break                      # v 에 단조증가라 더 볼 것 없다
         return best
 
+    def _closing_stretch(self, v_now, blk_xy):
+        """gap 을 **접근속도 기준**으로 늘리는 배수. 정지 물체면 1.0.
+
+        blk_xy 는 gap 을 정한 **그 점**이다. 트랙 전체가 아니라 그 점 근처의
+        추적만 본다 — 뒤에 남은 클러스터나 반대편의 콘 하나가 배수를 1.0 으로
+        눌러버리면 이 수정이 조용히 아무 일도 안 하게 된다.
+
+        내가 앞의 물체에 실제로 닿기까지 달리는 거리는
+
+            거리 = gap × v_ego / (v_ego − ṡ_opp)
+
+        이다. ṡ_opp = 0 (콘) 이면 배수 1.0 으로 옛 동작 그대로고, 상대가
+        내 속도에 가까우면 배수가 커진다 — 그만큼 옆으로 옮길 시간이 있다.
+
+        ★ 안전 쪽으로만 보수적으로 잡는다:
+          · 앞을 막은 것들 중 **가장 빠른** 게 아니라 **가장 느린** ṡ 를 쓴다.
+            여럿이 섞여 있으면 제일 안 비켜주는 놈이 기준이다.
+          · 추적이 덜 된 것(n < opp_min_obs)이 하나라도 있으면 **1.0** 을
+            준다. 상대차를 정지로 오판하는 것보다 그 반대가 훨씬 싸다.
+          · ṡ 가 opp_min_speed 미만이면 정지로 보고 1.0 (기존 판정과 같은 선).
+          · 접근속도에 하한을 두고(shift_close_min) 배수도 상한
+            (shift_close_max)으로 묶는다. 0 근처에서 나누면 상한이 무한대로
+            튀어 이 안전장치가 통째로 사라진다.
+        """
+        trs = [t for t in (getattr(self, '_opp_tracks', []) or [])
+               if np.hypot(*(np.asarray(t['p'], float) - blk_xy))
+               <= self.shift_close_r]
+        if not trs:
+            return 1.0                       # 막은 게 뭔지 모른다 — 정지로 취급
+        if any(t.get('n', 0) < self.opp_min_obs for t in trs):
+            return 1.0                       # 아직 못 믿는다 — 정지로 취급
+        s_dot = min(float(t.get('s_dot', 0.0)) for t in trs)
+        if s_dot < self.opp_min_speed:
+            return 1.0                       # 정지 장애물 — 옛 동작
+        closing = max(v_now - s_dot, self.shift_close_min)
+        return float(min(v_now / closing, self.shift_close_max))
+
     def _shift_feasible_speed(self, px, py, d_cmd):
         """**옆으로 다 옮길 수 있는** 속도 상한 [m/s]. 제한이 없으면 inf.
 
@@ -1208,14 +1249,47 @@ class ObstacleAvoidMixin:
           를 v 에 대해 푼다. L1 은 현재 속도로 한 번 평가한다(고정점 1스텝).
 
         ※ 감속이 아니라 **상한**이다. 회피가 필요 없으면 inf 라 아무 영향이 없다.
+
+        ★★ 2026-08-16 — gap 을 **접근속도로 환산**한다 (1대1 실차에서 드러남).
+          위 식의 gap 은 "내가 그 지점에 닿기까지 달릴 거리" 라는 뜻이다.
+          정지한 콘이면 맞다. **상대차에는 완전히 틀린다.**
+
+          car2 를 앞세우고 돌린 두 판(20260816_004150 / _004418):
+            · 오프셋은 0.600m 까지 잘 나갔다 (교전 16회 중 7회)
+            · 그런데 |d| ≥ 0.45 인 동안 속도 배율이 **중앙 0.45,
+              0.5 미만인 시간이 100%** — 옆으로 나가는 순간 바닥을 친다
+            · 그래서 접근속도가 −0.14 ~ +0.16㎧. 나란히 8~10초를 달리고 끝
+          팀 보고: "상대가 느리면 잘 하는데, 상대속도가 크지 않으면 그냥
+          뒤에서 속도만 줄이면서 추월을 못했다." 그 고리가 여기다.
+
+          계산해 보면 걸릴 수밖에 없다:
+            v 1.8㎧ → L1 1.35m → rise 1.72m
+            gap 1.5m / 1.25 = 1.20m  →  room = −0.52  →  shift_min_v 강제
+          **상대가 2.15m 안에 들어오면 무조건 바닥이다.**
+
+          실제로 닿기까지 달리는 거리는 gap 이 아니라 gap·v/접근속도 다:
+            gap 1.5m, v 1.8㎧, 접근 0.16㎧  →  16.9m. rise 1.72m 의 열 배다.
+
+          그리고 이건 **자기강화**였다 — 감속하면 접근속도가 더 줄고, 그러면
+          실제 여유는 더 늘어나는데 식이 그걸 모르니 계속 바닥에 머문다.
+          영원히 나란히 달린다.
+
+          ※ 접근속도에 하한(shift_close_min)을 두고 증폭도 상한
+            (shift_close_max)으로 묶는다. s_dot 은 추적 잡음이 섞이는데,
+            0 근처에서 나누면 상한이 무한대로 튀어 **이 안전장치가 통째로
+            무력화된다.** 정지 장애물(추적 없음/ṡ≈0)은 옛 동작 그대로다.
         """
         if not self.shift_cap_on or abs(d_cmd) < 1e-3:
             return float('inf')
         pts = getattr(self, 'on_track_pts', None)
         if pts is None or not len(pts):
             return float('inf')
-        gap = float(np.hypot(pts[:, 0] - px, pts[:, 1] - py).min())
+        dd = np.hypot(pts[:, 0] - px, pts[:, 1] - py)
+        i_blk = int(np.argmin(dd))
+        gap = float(dd[i_blk])
         v_now = max(abs(float(getattr(self, 'speed', 0.0) or 0.0)), 0.5)
+        # 막은 것이 **움직이는 상대**면 실제로 닿기까지 달리는 거리는 gap 보다 길다
+        gap *= self._closing_stretch(v_now, np.asarray(pts[i_blk][:2], float))
         L1 = max(self.shift_l1_min, self.shift_l1_k * v_now)
         rise = 1.8 * L1 / math.sqrt(2.0)
         room = gap / max(self.shift_safety, 1e-3) - rise
