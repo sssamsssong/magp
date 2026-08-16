@@ -198,6 +198,10 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         d('shift_cap',     True)
         d('shift_safety',  1.25)
         d('shift_min_v',   0.8)
+        # 움직이는 상대는 gap 을 접근속도로 환산한다 (2026-08-16)
+        d('shift_close_min', 0.30)
+        d('shift_close_max', 6.0)
+        d('shift_close_r',   0.60)
         # 장애물이 **보이기 전에** 거는 접근속도 상한.
         #   검출 거리는 하드웨어가 정한다(실측 2.7m). 남는 시간은 속도에
         #   반비례하므로, 보인 뒤에 깎으면 제동거리가 모자란다.
@@ -234,6 +238,9 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.shift_cap_on   = bool( p('shift_cap'))
         self.shift_safety   = float(p('shift_safety'))
         self.shift_min_v    = float(p('shift_min_v'))
+        self.shift_close_min = float(p('shift_close_min'))
+        self.shift_close_max = float(p('shift_close_max'))
+        self.shift_close_r   = float(p('shift_close_r'))
         self.shift_preempt  = bool( p('shift_preempt'))
         self.shift_det_m    = float(p('shift_det_m'))
         self.shift_brake    = float(p('shift_brake'))
