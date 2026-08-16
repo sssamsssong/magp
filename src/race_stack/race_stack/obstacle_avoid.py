@@ -468,7 +468,7 @@ class ObstacleAvoidMixin:
         ttc_sec, ttc_score = self._candidate_ttc(d, px, py)
 
         trav = None
-        n_obs_now = int(len(getattr(self, 'on_track_pts', ()) or ()))
+        n_obs_now = self._n_on_track()
         if (bool(getattr(self, 'candidate_fb', False))
                 and (n_obs_now > 0 or abs(float(self._shift_cur)) > 0.05)):
             trav = self._candidate_fb_times(cands, feasible)
@@ -542,7 +542,7 @@ class ObstacleAvoidMixin:
         self._fr_best_d = self._update_hold(d_raw)
         self._fr_n_cand = int(N)
         self._fr_n_valid = int(np.count_nonzero(feasible))
-        self._fr_n_obs = int(len(getattr(self, 'on_track_pts', ()) or ()))
+        self._fr_n_obs = self._n_on_track()
         self._set_planner_mode(d_raw, float(self._fr_best_d),
                                self._fr_n_valid)
         self._fr_v_ref = float(v_ref)
@@ -1173,11 +1173,29 @@ class ObstacleAvoidMixin:
             return True
         trs = [t for t in (getattr(self, '_opp_tracks', []) or [])
                if t.get('n', 0) >= int(getattr(self, 'opp_min_obs', 3) or 3)]
-        n_pts = len(getattr(self, 'on_track_pts', ()) or ())
+        n_pts = self._n_on_track()
         if not trs:
             return n_pts > 0
         vmin = float(getattr(self, 'opp_min_speed', 0.5) or 0.5)
         return all(abs(float(t.get('s_dot', 0.0))) < vmin for t in trs)
+
+    def _n_on_track(self) -> int:
+        """트랙 안에서 검출된 점 개수.
+
+        ★ `getattr(self, 'on_track_pts', ()) or ()` 로 쓰면 안 된다 (2026-08-16).
+          on_track_pts 는 **numpy 배열**이라(np.zeros((0,2)) 또는 np.asarray)
+          `or` 가 bool(배열) 을 부르고, 원소가 2개 이상이면 numpy 가
+          ValueError: truth value of an array ... is ambiguous 를 던진다.
+          shape (1,2) 도 원소 2개라 **장애물 하나만 잡혀도** 터진다.
+
+          2026-08-17 실차에서 이걸로 죽었다: q2 주행 255초 내내 /frenet/* 가
+          한 건도 안 나갔다. 노드가 뜨자마자 첫 장애물에서 예외 → 타이머
+          콜백이 죽어 executor 종료. 차는 d=0 으로 멀쩡히 달리므로
+          **로그만 봐서는 정상으로 보인다** — 이 저장소가 반복해 맞는 모양이다
+          (08/09 bench, 08/13 race 미검출, 08/15 Marker 미import).
+        """
+        pts = getattr(self, 'on_track_pts', None)
+        return 0 if pts is None else int(len(pts))
 
     def _apply_static_lock(self, d, feasible, d_raw, best):
         """정지 장애물에서 고른 d 를 고정한다. (d_cmd, best_index).
@@ -1186,7 +1204,7 @@ class ObstacleAvoidMixin:
         FOV 손실용이고, 이쪽은 **아직 보이는 동안** 도 같은 d 를 유지한다.
         잠긴 후보가 더 이상 실행가능이 아니거나 장애물이 사라지면 푼다.
         """
-        n_obs = len(getattr(self, 'on_track_pts', ()) or ())
+        n_obs = self._n_on_track()
         lock = getattr(self, '_lock_d', None)
         lost = int(getattr(self, '_lock_lost', 0) or 0)
         if not bool(getattr(self, 'static_lock', False)):
