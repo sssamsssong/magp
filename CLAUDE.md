@@ -42,7 +42,7 @@ config/.vehicle_overlay.yaml    race_script.yaml 위에 덮을 값  .gitignore
 | `tire` | `mu`, `pac_b/c/d/e` |
 | `tuning` | `l1_min`, `l1_k`, `steer_alpha`, `slip_gain`, `speed_lag`, `a_lon_*`, `grip_util` |
 | `joystick` | `steer_invert`, `speed_invert`, `device`, `axis_*`, `btn_*` |
-| `network` | `domain_id` (1호차 `57` / 2호차 `77`), `peers` (젯슨 IP) |
+| `network` | `domain_id` (1호차 `57` / 2호차 `77`), `peers` (젯슨 IP — 1호차 `.57` / 2호차 `.129`) |
 
 `race_script.yaml` 의 나머지(알고리즘·안전·회피·계측)는 **그대로 공용**입니다.
 이게 핵심입니다 — 한쪽에서 고친 알고리즘이 자동으로 양쪽에 흐릅니다.
@@ -88,7 +88,7 @@ Claude 와 대화하는 동안은 차가 공유기에 붙어 있지 않고 주�
 
 ```
 launch.log 가 이걸로 도배된다:
-  ddsi_udp_conn_write to udp/192.168.50.77:7480 failed with retcode -1
+  ddsi_udp_conn_write to udp/192.168.50.129:7480 failed with retcode -1
 ```
 
 2026-08-10 실제로 겪었습니다 — 공유기에서 `./race.sh joy` 를 띄운 뒤 공용
@@ -101,19 +101,27 @@ launch.log 가 이걸로 도배된다:
 
 ## 두 차를 같은 공유기에서 동시에 돌릴 때
 
-차마다 **`ROS_DOMAIN_ID` 가 다릅니다** (1호차 `57` / 2호차 `77` — 젯슨 IP 끝자리와 같게).
+차마다 **`ROS_DOMAIN_ID` 가 다릅니다** (1호차 `57` / 2호차 `77`).
 도메인이 다르면 멀티캐스트 그룹과 포트 대역 자체가 달라 `/scan`·`/map`·`/tf` 가
 절대 안 섞이고 노드 이름 충돌도 없습니다. 원본은
 `config/vehicle_car*.yaml` 의 `network.domain_id` 이고, 젯슨에서는 `race.sh` 가
 `.car` 를 보고 자동으로 export 합니다.
 
+> ⚠️ **도메인 번호 ≠ IP 끝자리** (2026-08-16 부터). 원래는 같게 맞췄는데 2호차가
+> 무선랜카드를 바꿔 IP 가 `.77` → `.129` 가 되면서 규칙이 깨졌습니다.
+> **도메인은 `77` 그대로 둡니다** — 도메인을 바꾸면 젯슨과 노트북이 **동시에**
+> 갱신될 때까지 통신이 0 이 됩니다. 도메인은 IP 와 무관한 식별자라 맞출 이유가 없습니다.
+
 **노트북에서는 붙을 차를 골라야 합니다:**
 
 ```bash
-./rviz.sh 77      # 2호차 (젯슨 IP 끝자리 — 권장)
+./rviz.sh car2    # 2호차 — ★ IP 가 바뀌어도 안 깨지므로 이쪽을 권장
+./rviz.sh 129     # 2호차 (젯슨 IP 끝자리. 도메인 77 이 아니다)
 ./rviz.sh 57      # 1호차
-./rviz.sh car2    # 차 이름도 됨
 ```
+
+⚠️ 인자는 **IP 끝자리**로 차량 파일의 `network.peers` 를 뒤져 찾습니다. 그래서
+2호차는 `./rviz.sh 77` 이 이제 `끝자리 77 을 가진 차량 파일이 없습니다` 로 실패합니다.
 
 노트북 두 대가 각각 다른 차에 붙어도 됩니다.
 
