@@ -820,7 +820,7 @@ frenet:
 
   # ══ 테스트 하이브리드 (A/B 스위치) ════════════════════════════════
   #   끄면 예전 17후보 + v_curve 선택으로 돌아간다. 재빌드 없이 yaml 만.
-  static_lock:   true    # 정지(콘)면 고른 d 를 지나갈 때까지 고정.
+  static_lock:   false   # 정지(콘)면 고른 d 를 지나갈 때까지 고정.
                          # false = 매 프레임 17후보 재선택 (좌우 뒤집힐 수 있음)
   candidate_fb:  true    # 실행가능 후보만 짧은 FB 통과시간 T 로 고른다.
                          # false = 예전 v_curve + w_offset 비용
