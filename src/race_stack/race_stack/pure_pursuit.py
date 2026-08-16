@@ -37,6 +37,8 @@ from ackermann_msgs.msg import AckermannDriveStamped
 
 from race_stack.stanley_controller import (_load_map, _world_to_img, _REPO_ROOT,
                                           write_run_config)
+from race_stack.speed_profile import (
+    solve_profile, preview_speed, curvature_from_path)
 
 
 # ★ /race/enabled 는 mission_manager 가 **래치(TRANSIENT_LOCAL)** 로 발행한다.
@@ -70,6 +72,21 @@ class PurePursuit(Node):
         self.declare_parameter('wheelbase', 0.33)
         self.declare_parameter('max_steer', 0.36)
         self.declare_parameter('curvature_slowdown', 1.5)
+        # MAP 과 같은 속도·같은 L 로 A/B 하기 위한 스위치. yaml 로 끈다.
+        self.declare_parameter('use_profile', True)
+        self.declare_parameter('adaptive_ld', True)
+        self.declare_parameter('l1_min', 1.4983)
+        self.declare_parameter('l1_k', 0.75)
+        self.declare_parameter('l1_kappa', 0.0)
+        self.declare_parameter('grip_util', 0.6)
+        self.declare_parameter('mu', 0.348)
+        self.declare_parameter('pac_d', 1.15)
+        self.declare_parameter('lf', 0.1757)
+        self.declare_parameter('lr', 0.1441)
+        self.declare_parameter('a_lon_acc', 0.0)
+        self.declare_parameter('a_lon_brk', 0.0)
+        self.declare_parameter('hard_cap', 0.0)
+        self.declare_parameter('speed_lag', 0.25)
 
         # ── Q2 장애물 회피 (옵션) ────────────────────────────────────────
         # ★ Stanley 의 wall_avoid_enabled 와 같은 방식 — yaml 값 하나로 on/off.
@@ -108,9 +125,15 @@ class PurePursuit(Node):
 
         # 평균 점 간격 — 장애물 회피의 전방경로 예측(_predicted_track_path)에 쓴다.
         self._wp_ds = 0.1
+        self._v_profile = None
+        self._kappa = None
+        self._a_brk = 0.0
         if self.waypoints is not None and len(self.waypoints) > 5:
             w = self.waypoints[:, :2]
             self._wp_ds = float(np.mean(np.hypot(*(np.roll(w, -1, axis=0) - w).T)))
+            self._kappa = curvature_from_path(self.waypoints[:, 0],
+                                             self.waypoints[:, 1])
+            self._build_speed_profile()
 
         self.enabled = False   # ★ mission_manager 의 /race/enabled(래치)를 받아야 켜진다.
         #   True 로 두면 그 값이 도착하기 전 한 틱이라도 먼저 나가버린다.
@@ -172,10 +195,37 @@ class PurePursuit(Node):
 
         self.get_logger().info(
             f'PurePursuit ready (obstacle_avoid='
-            f'{"on" if self.obs_on else "off"})')
+            f'{"on" if self.obs_on else "off"}'
+            f' profile={"on" if self._v_profile is not None else "off"}'
+            f' adaptive_ld={bool(self.p("adaptive_ld"))})')
 
     def p(self, name):
         return self.get_parameter(name).value
+
+    def _build_speed_profile(self):
+        """MAP 과 같은 solve_profile. use_profile=false 면 CSV 속도를 쓴다."""
+        if not bool(self.p('use_profile')) or self.waypoints is None:
+            return
+        try:
+            v, info = solve_profile(
+                self.waypoints[:, 0], self.waypoints[:, 1], self.waypoints[:, 2],
+                mu_eff=float(self.p('mu')) * float(self.p('pac_d')),
+                grip_util=float(self.p('grip_util')),
+                lf=float(self.p('lf')), lr=float(self.p('lr')),
+                v_min=float(self.p('min_speed')),
+                a_lon_acc=float(self.p('a_lon_acc')),
+                a_lon_brk=float(self.p('a_lon_brk')),
+                hard_cap=float(self.p('hard_cap')),
+                curvature=self._kappa)
+        except Exception as e:
+            self.get_logger().warn(f'solve_profile 실패({e}) → CSV 속도')
+            return
+        self._v_profile = v
+        self._a_brk = float(info.get('a_brk', 0.0) or 0.0)
+        self.get_logger().info(
+            f"PP 속도 프로파일 η={info['eta']:.2f}  "
+            f"v {info['v_min']:.2f}~{info['v_max']:.2f}㎧  "
+            f"랩 {info['lap_time']:.1f}s")
 
     # ── Q2 장애물 회피 초기화 (맵 + 경계 폴리곤 로드, 트랙 마스크 사전계산) ──
     def _init_obstacle_avoid(self):
@@ -280,13 +330,21 @@ class PurePursuit(Node):
                 (now - self._last_pose_t).nanoseconds * 1e-9, 0.0, 0.5))
         self._last_pose_t = now
 
-        # 속도 비례 lookahead
-        L = self.p('lookahead') + self.p('lookahead_speed_gain') * self.last_speed
-
-        # 가장 가까운 웨이포인트부터 앞으로 진행하며 lookahead 지점 탐색
+        # 가장 가까운 웨이포인트
         d = np.hypot(self.waypoints[:, 0] - px, self.waypoints[:, 1] - py)
         nearest = int(np.argmin(d))
         n = len(self.waypoints)
+        v_now = max(float(self.speed or 0.0), 0.0)
+
+        if bool(self.p('adaptive_ld')):
+            L = max(float(self.p('l1_min')), float(self.p('l1_k')) * v_now)
+            kap = 0.0 if self._kappa is None else abs(float(self._kappa[nearest]))
+            L = L / (1.0 + float(self.p('l1_kappa')) * kap)
+        else:
+            L = (self.p('lookahead')
+                 + self.p('lookahead_speed_gain') * self.last_speed)
+
+        # 가장 가까운 웨이포인트부터 앞으로 진행하며 lookahead 지점 탐색
         target = None
         for k in range(n):
             i = (nearest + k) % n
@@ -318,15 +376,20 @@ class PurePursuit(Node):
             steer = math.atan(self.p('wheelbase') * curvature)
         steer = float(np.clip(steer, -self.p('max_steer'), self.p('max_steer')))
 
-        # 속도: 웨이포인트에 speed 열이 있으면 그 값, 없으면 곡률 기반 감속
-        if tv > 0:
+        # 속도: MAP 과 같은 프로파일이 있으면 그걸, 없으면 CSV / 곡률 감속
+        if self._v_profile is not None:
+            speed = preview_speed(
+                self._v_profile, nearest, v_now, self._wp_ds,
+                lag=float(self.p('speed_lag')), a_brk=self._a_brk)
+        elif tv > 0:
             speed = min(tv, self.p('max_speed'))
         else:
             speed = self.p('max_speed') / (1.0 + self.p('curvature_slowdown')
                                            * abs(curvature))
         if obs_decel_active:
             speed *= self.p('obstacle_decel')
-        speed = float(np.clip(speed, self.p('min_speed'), self.p('max_speed')))
+        cap = float(self.p('hard_cap') or 0.0) or float(self.p('max_speed'))
+        speed = float(np.clip(speed, self.p('min_speed'), cap))
         self.last_speed = speed
 
         self._cmd = (steer, speed)   # 발행은 _cmd_tick(20Hz)이 담당

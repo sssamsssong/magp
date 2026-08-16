@@ -8,7 +8,10 @@
 고른다. 로직은 `obstacle_avoid.ObstacleAvoidMixin`.
 
     발행:  /frenet/offset   Float64   ← 계약. 컨트롤러가 소비한다
-           /frenet/status   Float64   진단용 (0=평상, 1=회피중, 2=가능후보없음)
+           /frenet/status   Float64   0=TRACK 1=AVOID_STATIC 2=BLOCKED
+                                      3=FOLLOW 4=RECOVER 5=OVERTAKE
+           /frenet/speed_scale Float64
+           /frenet/diag     Float64MultiArray  로그용 (driven_path.csv 와 같은 열)
            /frenet_candidates          RViz 마커
            /obstacle                   RViz 장애물 점
 
@@ -38,6 +41,7 @@ d=0(레이싱라인)으로 돌아가야 한다. 이 저장소의 /slip/steer_lim
 """
 import math
 import os
+import time
 from collections import deque
 
 import numpy as np
@@ -49,10 +53,12 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from geometry_msgs.msg import Point, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Float64
+from std_msgs.msg import Float64, Float64MultiArray
 from visualization_msgs.msg import Marker, MarkerArray
 
-from race_stack.obstacle_avoid import ObstacleAvoidMixin, _load_map
+from race_stack.obstacle_avoid import (
+    ObstacleAvoidMixin, _load_map, pack_frenet_diag, PLANNER_MODE_NAME,
+    BLOCKED, FOLLOW)
 
 LATCHED_IN = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
@@ -140,6 +146,10 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         d('hold_obj_len',  0.50)   # 피할 대상 길이 [m]
         d('hold_margin',   0.30)
         d('hold_max_sec',  3.0)    # 상한 — 잘못 물려 영영 안 풀리는 것 방지
+        d('static_lock',   True)   # 정지 장애물 d 고정. false 면 17후보 매 프레임
+        d('candidate_fb',  True)   # 짧은 FB 통과시간으로 후보 선택
+        d('fb_horizon',    5.0)    # FB 전방 거리 [m]
+        d('fb_iters',      2)
         d('speed_min_scale', 0.45)
         d('speed_room_ref',  0.45)  # speed_scale_mode=room 일 때만
         d('speed_scale_mode', 'vmax')  # vmax | room (ablation baseline)
@@ -283,8 +293,14 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.hold_obj_len = float(p('hold_obj_len'))
         self.hold_margin  = float(p('hold_margin'))
         self.hold_max_sec = float(p('hold_max_sec'))
+        self.static_lock  = bool( p('static_lock'))
+        self.candidate_fb = bool( p('candidate_fb'))
+        self.fb_horizon   = float(p('fb_horizon'))
+        self.fb_iters     = int(  p('fb_iters'))
         self._hold_until = 0.0
         self._hold_d = 0.0
+        self._lock_d = None
+        self._lock_lost = 0
         self._now_sec = 0.0
         self._ot_allowed = True
         self._follow_gap = float('inf')
@@ -345,6 +361,7 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.off_pub = self.create_publisher(Float64, '/frenet/offset', 10)
         self.spd_pub = self.create_publisher(Float64, '/frenet/speed_scale', 10)
         self.st_pub  = self.create_publisher(Float64, '/frenet/status', 10)
+        self.diag_pub = self.create_publisher(Float64MultiArray, '/frenet/diag', 10)
         # 추월 가능 구간 — 래치로 한 번만 낸다 (기동 시 정해지고 안 바뀐다).
         #   RViz 에서 "지금 여기가 추월 구간인가" 를 눈으로 봐야 로그 없이도
         #   판단이 된다. 오버레이 PNG 와 **같은 함수**로 계산한 결과다.
@@ -424,6 +441,7 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
             return
         # 유지 로직이 쓰는 현재 시각 (믹스인은 노드가 아니라 clock 이 없다)
         self._now_sec = self.get_clock().now().nanoseconds * 1e-9
+        t0 = time.perf_counter()
         d = self._frenet_select(float(self.pos[0]), float(self.pos[1]), self.yaw)
         m = Float64();  m.data = float(d);  self.off_pub.publish(m)
         s = Float64();  s.data = float(self._fr_status);  self.st_pub.publish(s)
@@ -431,9 +449,12 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         # ── 속도 스케일 ──────────────────────────────────────────────
         #   vmax: 고른 후보 v_max / 라인 프로파일 (기본).
         #   room: 옛 통로너비 선형 — path 선택 ablation 의 baseline 속도.
+        #   BLOCKED 만 최저속도. FOLLOW 는 추종 법칙이 정한다 (status>=2 로
+        #   묶이면 추월금지 구간에서 항상 기어간다).
         v_ref = max(float(getattr(self, '_fr_v_ref', 0.0) or 0.0), 1e-3)
         vmax = float(getattr(self, '_fr_vmax', 0.0) or 0.0)
-        if self._fr_status >= 2.0:
+        mode = int(getattr(self, '_fr_mode', 0) or 0)
+        if mode == BLOCKED:
             scale = self.sp_min_scale
         elif self.sp_mode == 'room':
             r = float(np.clip(self._fr_gap_room / self.sp_room_ref, 0.0, 1.0))
@@ -455,14 +476,15 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
             scale = min(scale, float(np.clip(acap / v_ref, self.sp_min_scale, 1.0)))
 
         # ★ 추월 금지 구간이면 상대 뒤를 따라간다 — 옆으로 못 푸니 종으로 푼다.
-        #   둘 중 **작은 쪽**을 쓴다. 통로가 좁아서 줄여야 하는데 추종이 1.0 을
-        #   주면 안 되고, 그 반대도 마찬가지다.
-        # status 3(추월금지)이면 추종 법칙이 속도를 정한다. status 2(막힘)와
-        # 달리 "지나갈 곳이 없다" 가 아니라 "지금은 안 나간다" 이므로 따로 둔다.
-        if self.ot_zone_on and not getattr(self, '_ot_allowed', True):
+        if mode == FOLLOW or (self.ot_zone_on and not getattr(self, '_ot_allowed', True)):
             scale = min(scale, self._follow_scale(float(self.pos[0]),
                                                   float(self.pos[1])))
         sc = Float64();  sc.data = float(scale);  self.spd_pub.publish(sc)
+
+        ms = (time.perf_counter() - t0) * 1e3
+        diag = self.frenet_diag_dict(scale, ms)
+        arr = Float64MultiArray(); arr.data = pack_frenet_diag(diag)
+        self.diag_pub.publish(arr)
 
         # ★ 컨트롤러가 실제로 옮기고 있는 위치를 여기서도 따라간다.
         #   예전엔 _shift_cur 이 **영원히 0** 이었다. 그러면
@@ -473,21 +495,20 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         step = self._shift_rate * self._dt
         self._shift_cur += float(np.clip(d - self._shift_cur, -step, step))
 
-        ttc = float(getattr(self, '_fr_ttc', 1e9))
+        ttc = float(diag.get('min_ttc', 1e9))
         ttc_s = 'inf' if ttc >= 1e8 else f'{ttc:.2f}s'
         self.get_logger().info(
-            f'[frenet] d={d:+.2f}m  room={self._fr_gap_room:.2f}  '
-            f'kappa={float(getattr(self, "_fr_kappa", 0.0)):.2f}  '
-            f'vmax={vmax:.2f}/{v_ref:.2f}  '
-            f'speed_score={float(getattr(self, "_fr_speed_score", 0.0)):.2f}  '
-            f'ttc={ttc_s}({float(getattr(self, "_fr_ttc_score", 0.0)):.2f})  '
-            f'cost={float(getattr(self, "_fr_cost", 0.0)):.2f}  '
-            f'속도×{scale:.2f}'
+            f'[frenet] {PLANNER_MODE_NAME.get(mode, mode)}  '
+            f'd={d:+.2f}m  n_valid={int(diag["n_valid"])}/{int(diag["n_candidates"])}  '
+            f'n_obs={int(diag["n_obs"])}  '
+            f'vmax={vmax:.2f}/{v_ref:.2f}  ttc={ttc_s}  '
+            f'{ms:.1f}ms  속도×{scale:.2f}'
             + ('' if not self.ot_zone_on else
                ('  [추월가능]' if getattr(self, '_ot_allowed', True)
                 else f'  [추월금지 추종 gap={self._follow_gap:.2f}m]'))
             + (f'  동적 {self._opp_moving}개' if self._opp_moving else '')
-            + ('  ★막힘' if self._fr_status >= 2.0 else ''),
+            + ('' if getattr(self, '_lock_d', None) is None else
+               f'  lock={self._lock_d:+.2f}m'),
             throttle_duration_sec=0.5)
 
     def _load_waypoints(self, path: str):

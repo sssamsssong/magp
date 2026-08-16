@@ -14,7 +14,10 @@
 logs/<YYYYmmdd_HHMMSS>_<mode>_<controller>/
   ├── gains.yaml        그 주행 시점의 race_script.yaml 전체 스냅샷
   │                     (게인 6종 + speed 섹션 + map_name/waypoints 필드 포함)
-  └── driven_path.csv   실주행 경로: t(초), x, y, speed  (0.1m 이상 이동 시마다 기록)
+  └── driven_path.csv   실주행 경로. 0.1m 이동마다 1행.
+                        기본: t, x, y, speed(실측), steer, cmd_v, yaw, near
+                        2026-08-16~: loc_residual + Frenet diag
+                        (selected_d, speed_scale, planner_status, n_valid, …)
 ```
 
 `<controller>` 는 실제로 그 주행에 쓰인 컨트롤러다 — `mode`(q1/q2/q3/race)만으론
@@ -39,6 +42,21 @@ q2 를 stanley 로 돌렸는지 pure_pursuit(+장애물회피)로 돌렸는지 �
 50Hz 제어 루프 안에서 매 포인트를 디스크에 쓰지 않는다 — 메모리에만 쌓아두고
 (`self._trail_log`, 최대 3000점), 노드 종료(`Ctrl+C`/모드 전환 시 재시작) 시
 `save_run_log()`에서 한 번에 파일로 flush한다. 즉 조향 제어 타이밍에는 영향 없음.
+
+## 회피 실패 가를 때 (2026-08-16~)
+
+`planner_status`: 0=TRACK 1=AVOID_STATIC 2=BLOCKED 3=FOLLOW 4=RECOVER 5=OVERTAKE
+
+(옛 이름: 0=NORMAL 1=AVOID 4=RETURN. 숫자는 0–4 가 같고 5=OVERTAKE 가 추가됨)
+
+| 증상 | 볼 열 |
+|---|---|
+| 검출 안 됨 | `n_obs=0` |
+| 검출됐는데 후보 없음 | `n_valid=0` → hard constraint |
+| 후보는 있는데 d=0 | `n_valid>0` 이고 `selected_d≈0` → cost / FOLLOW |
+| d≠0 인데 차가 안 움직임 | `selected_d` vs 실제 CTE → controller / ramp |
+| 속도만 깎임 | `speed_scale` |
+| 위치추정이 같이 흔들림 | `loc_residual` (게이트가 아님. 상관만 본다) |
 
 ## 사용 예 — 게인 비교
 
