@@ -1368,6 +1368,12 @@ class ObstacleAvoidMixin:
     shift_rate_ref = 2.0     # 기준선 램프 속도 [m/s] (frenet.shift_rate 와 같게)
     shift_safety   = 1.25    # 여유 배수
     shift_min_v    = 0.8     # 이 아래로는 안 깎는다 [m/s]
+    # 남은 이동량이 이보다 작으면 "다 옮겼다" 로 보고 상한을 푼다 [m] (2026-08-17)
+    shift_done     = 0.05
+    # ★ 움직이는 상대에게는 gap 을 접근속도로 환산한다 (2026-08-16). 아래 참조.
+    shift_close_min = 0.30   # 접근속도 하한 [m/s] — 증폭 상한 = v/이 값
+    shift_close_max = 6.0    # gap 증폭 배수의 절대 상한
+    shift_close_r   = 0.60   # gap 을 정한 점에서 이 반경 안의 추적만 본다 [m]
     shift_det_m    = 2.70    # 장애물이 **보이기 시작하는** 거리 [m] (실측)
     shift_brake    = 0.0     # 제동 능력 [m/s²]. 0 = μ_eff·g 로 자동
     shift_preempt  = True    # 보이기 전에도 접근속도를 제한할지
@@ -1456,7 +1462,28 @@ class ObstacleAvoidMixin:
 
         ※ 감속이 아니라 **상한**이다. 회피가 필요 없으면 inf 라 아무 영향이 없다.
         """
-        if not self.shift_cap_on or abs(d_cmd) < 1e-3:
+        # ★★ 2026-08-17 — **남은** 이동량으로 건다 (실차 q2 에서 드러남).
+        #   이 상한의 뜻은 "옆으로 다 옮길 시간을 벌어라" 다. 그런데 판정에
+        #   목표 오프셋 |d_cmd| 를 통째로 써서, **이미 다 옮긴 뒤에도** 계속
+        #   걸려 있었다. 옮기고 나면 그 차선은 이미 비어 있으니 늦출 이유가 없다.
+        #
+        #   실측(20260817_005738 / _005431, q2):
+        #     배율이 정확히 바닥(0.45)인 시간 = 주행 중 55% / 65%
+        #     |d|>0.05 인 시간 91% / 89%,  TRACK(깨끗)은 7% / 3% 뿐
+        #     모드별  AVOID_STATIC 60% 배율 0.45  ↔  OVERTAKE 24% 배율 1.00
+        #   팀 보고 "장애물이 있을 때 확 멈췄다가 잘 가고" — 그 진동이 이것이다.
+        #
+        #   왜 상시로 걸렸나: v 1.8㎧ 면 rise = 1.8·L1/√2 = 1.72m 라
+        #   gap < 1.25×1.72 = 2.15m 이면 무조건 shift_min_v 다. 그런데 **콘은
+        #   2.7m 안에서야 보인다**(스캔 평면 11cm 한계). 즉 콘을 보는 거의
+        #   모든 순간이 곧 바닥이었다. 여기에 static_lock(4d45353)이 d 를
+        #   잠가 두니 바닥이 풀리지도 않았다.
+        #
+        #   → 남은 이동량 rem = |d_cmd − _shift_cur| 로 판정한다.
+        #     옮기는 중이면 08/15 설계 그대로 걸리고, 다 옮겼으면 풀린다.
+        #     목표가 바뀌면 rem 이 다시 커져 저절로 다시 걸린다.
+        rem = abs(float(d_cmd) - float(getattr(self, '_shift_cur', 0.0) or 0.0))
+        if not self.shift_cap_on or abs(d_cmd) < 1e-3 or rem < self.shift_done:
             return float('inf')
         pts = getattr(self, 'on_track_pts', None)
         if pts is None or not len(pts):
@@ -1468,7 +1495,7 @@ class ObstacleAvoidMixin:
         room = gap / max(self.shift_safety, 1e-3) - rise
         if room <= 0.0:
             return self.shift_min_v          # 이미 늦었다 — 최대한 줄인다
-        v_cap = room * self.shift_rate_ref / abs(d_cmd)
+        v_cap = room * self.shift_rate_ref / rem
         return max(v_cap, self.shift_min_v)
 
     def _follow_scale(self, px, py):
