@@ -1243,19 +1243,31 @@ class ObstacleAvoidMixin:
             #     · 부호는 유지한다 (뒤집힘 방지 — 원래 목적)
             #     · 크기는 줄지 않게만 하고 **커지는 건 허용한다** (래칫)
             #   해소되며 작은 후보가 실행불가가 되면 선택이 저절로 커진다.
+            #   ⚠ 2026-08-17 두 번째 시도 — **래칫은 틀렸다.** 크기를 줄지
+            #     않게 하니 오프셋이 커지기만 하고 안 돌아왔다. 벽 오검출로
+            #     n_obs 가 계속 >0 이라 잠금이 풀리지도 않는다.
+            #       실차 20260817_013016 vs 앞 판 005738:
+            #         |d|≥0.55 인 시간   0% → 23%
+            #         TRACK(깨끗)      6.6% → 0.5%
+            #         CTE p90        0.738 → 1.746m  (최대 2.003m)
+            #     팀 보고 "그냥 박고 맵대로 안 움직였다". 10초 만에 중단.
+            #
+            #   목적은 **좌우 뒤집힘을 막는 것** 하나다. 그러니 부호가 뒤집힌
+            #   선택만 거부하고, 크기와 라인 복귀(d=0)는 손대지 않는다.
+            #   가까워지며 작은 후보가 실행불가가 되면 선택이 저절로 커진다 —
+            #   그게 원래 동작이고 08/15 에는 0.60m 까지 잘 나갔다.
             sgn = 1.0 if float(lock) >= 0.0 else -1.0
-            same = (feasible & (d * sgn > 1e-9)
-                    & (np.abs(d) >= abs(float(lock)) - 1e-9))
-            if np.any(same):
-                if (bool(feasible[best]) and d[best] * sgn > 1e-9
-                        and abs(d[best]) >= abs(float(lock)) - 1e-9):
-                    i = int(best)          # 이미 같은 쪽이고 더 크다 — 그대로
-                else:
-                    idx = np.where(same)[0]
-                    i = int(idx[np.argmin(np.abs(d[idx]))])   # 같은 쪽 최소 이동
-                self._lock_d = float(d[i])                    # 래칫
-                return float(d[i]), i
-            self._lock_d = None
+            if bool(feasible[best]) and d[best] * sgn >= -1e-9:
+                i = int(best)                      # 같은 쪽이거나 0 — 그대로
+            else:
+                cand = np.where(feasible & (d * sgn >= -1e-9))[0]
+                if len(cand) == 0:
+                    self._lock_d = None
+                    return float(d_raw), int(best)
+                i = int(cand[np.argmin(np.abs(d[cand] - d[best]))])
+            # 라인으로 돌아왔으면 잠금을 푼다 (안 그러면 영영 못 돌아온다)
+            self._lock_d = float(d[i]) if abs(float(d[i])) > 0.05 else None
+            return float(d[i]), i
         if abs(float(d_raw)) > 0.05:
             self._lock_d = float(d_raw)
         return float(d_raw), int(best)
