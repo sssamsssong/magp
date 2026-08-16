@@ -202,6 +202,8 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         d('shift_close_min', 0.30)
         d('shift_close_max', 6.0)
         d('shift_close_r',   0.60)
+        # 남은 이동량이 이보다 작으면 상한을 푼다 (2026-08-17)
+        d('shift_done',      0.05)
         # 장애물이 **보이기 전에** 거는 접근속도 상한.
         #   검출 거리는 하드웨어가 정한다(실측 2.7m). 남는 시간은 속도에
         #   반비례하므로, 보인 뒤에 깎으면 제동거리가 모자란다.
@@ -241,6 +243,7 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.shift_close_min = float(p('shift_close_min'))
         self.shift_close_max = float(p('shift_close_max'))
         self.shift_close_r   = float(p('shift_close_r'))
+        self.shift_done      = float(p('shift_done'))
         self.shift_preempt  = bool( p('shift_preempt'))
         self.shift_det_m    = float(p('shift_det_m'))
         self.shift_brake    = float(p('shift_brake'))

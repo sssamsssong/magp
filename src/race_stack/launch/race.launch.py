@@ -724,6 +724,7 @@ def generate_launch_description():
                     'shift_close_min':  float(fr.get('shift_close_min', 0.30)),
                     'shift_close_max':  float(fr.get('shift_close_max', 6.0)),
                     'shift_close_r':    float(fr.get('shift_close_r',   0.60)),
+                    'shift_done':       float(fr.get('shift_done',      0.05)),
                     'shift_preempt':    bool( fr.get('shift_preempt', True)),
                     'shift_det_m':      float(fr.get('shift_det_m',   2.70)),
                     'shift_brake':      float(fr.get('shift_brake',   0.0)),
