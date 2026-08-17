@@ -76,6 +76,10 @@ class JoystickTeleop(Node):
         self.declare_parameter('trigger_expo',     1.0)    # 1.0 = 완전 선형
         self.declare_parameter('steer_deadzone',   0.08)
         self.declare_parameter('arm_on_neutral',   True)
+        # /joy 가 이만큼 끊기면 속도 0 을 계속 발행한다 (0 = 끔).
+        # 0.3s = 조이 20~50Hz 기준 6~15 프레임. 무선 순간 끊김에는 안 걸리고
+        # 진짜 단절에는 확실히 걸리는 값이다.
+        self.declare_parameter('joy_timeout',      0.3)
         self.declare_parameter('debug',            False)
         self.declare_parameter('max_speed',        1.0)
         self.declare_parameter('max_steer',        0.36)
@@ -164,6 +168,30 @@ class JoystickTeleop(Node):
         self.create_subscription(AckermannDriveStamped, '/drive',
                                  self._drive_cb, 10)
         self.create_timer(1.0, self._check_auto)
+
+        # ── /joy 워치독 ────────────────────────────────────────────────
+        # ★★ 2026-08-17 — 하루에 세 번 "혼자 직진" 이 났다. 구조가 같다:
+        #     ① 맵핑 중 bringup joy_teleop 이 살아 있는 창에서 트리거를 건드림
+        #     ② 조이스틱 USB 를 주행 중에 뽑음
+        #     ③ 무선 수신기가 끊김
+        #   셋 다 **/joy 가 끊기는 것**이고, 그러면 이 노드는 발행을 멈춘다.
+        #   그런데 VESC 는 새 명령이 없으면 **마지막 속도를 무한히 유지**한다.
+        #   ackermann_mux 의 0.2초 타임아웃도 소용없다 — mux 가 채널을 내려도
+        #   이미 나간 erpm 은 VESC 안에 남아 있기 때문이다.
+        #
+        #   그래서 "안 보내는 것" 으로는 못 세운다. **0 을 계속 보내야** 선다.
+        #   /joy 가 joy_timeout 보다 오래 끊기면 20Hz 로 속도 0 을 쏜다.
+        #   조향은 마지막 값을 유지한다 — 급조향이 더 위험하다.
+        #
+        #   ※ 이 노드가 통째로 죽는 경우는 못 막는다. 그건 race.sh 의
+        #     kill_bringup_joy 와 mux 타임아웃의 영역이다. 여기서 막는 것은
+        #     "노드는 살아 있는데 입력만 끊긴" 가장 흔한 경우다.
+        self.joy_timeout = float(p('joy_timeout'))
+        self._last_joy = None      # 첫 /joy 를 받기 전에는 워치독을 안 건다
+        self._wd_fired = False
+        self._wd_steer = 0.0
+        if self.joy_timeout > 0.0:
+            self.create_timer(0.05, self._joy_watchdog)
 
         self.get_logger().info(
             f'JoystickTeleop ready  [현재: {"자율" if self.auto_mode else "수동"} 모드]\n'
@@ -263,6 +291,7 @@ class JoystickTeleop(Node):
         return min(mag, 1.0) * (1.0 if raw > 0 else -1.0)
 
     def _joy_cb(self, msg: Joy):
+        self._last_joy = self.get_clock().now().nanoseconds * 1e-9
         # ── 모드 토글 (LB 상승 엣지) ──────────────────────────────
         lb = len(msg.buttons) > self.btn_tog and bool(msg.buttons[self.btn_tog])
         if lb and not self.prev_lb:
@@ -386,7 +415,27 @@ class JoystickTeleop(Node):
                 f'조향 상한 오버라이드 {math.degrees(v):.1f}° '
                 f'(스틱 끝까지 = 이 각도)')
 
+    def _joy_watchdog(self):
+        """/joy 가 끊기면 속도 0 을 계속 쏜다. 위 __init__ 주석이 이유다."""
+        if self._last_joy is None:
+            return                      # 아직 한 번도 안 받았다 — 정상 기동 중
+        gap = self.get_clock().now().nanoseconds * 1e-9 - self._last_joy
+        if gap < self.joy_timeout:
+            if self._wd_fired:
+                self._wd_fired = False
+                self.get_logger().info(f'/joy 복구 ({gap*1000:.0f}ms) — 조종 재개')
+            return
+        if not self._wd_fired:
+            self._wd_fired = True
+            self.armed = False          # 복구 시 트리거 중립을 다시 확인시킨다
+            self.get_logger().error(
+                f'/joy 가 {gap:.2f}s 끊겼다 — **속도 0 강제**. '
+                f'조이스틱 연결·배터리를 확인하세요. '
+                f'(보내지 않는 것으로는 안 선다: VESC 는 마지막 명령을 유지한다)')
+        self._publish(self._wd_steer, 0.0)
+
     def _publish(self, steer: float, speed: float):
+        self._wd_steer = float(steer)   # 워치독이 유지할 마지막 조향
         msg = AckermannDriveStamped()
         msg.header.stamp         = self.get_clock().now().to_msg()
         msg.drive.steering_angle = steer

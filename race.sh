@@ -250,6 +250,28 @@ bench_kill_joy () {
     echo "[race.sh] BENCH — joy_node/joy_teleop 정리 완료 (조이스틱 입력 무시)"
 }
 
+# bringup 이 띄우는 SDL joy_node + joy_teleop 을 **기동 창 내내** 지운다.
+#
+# ★ 2026-08-17 사고: 맵핑 중 스로틀을 한 번 눌렀는데 차가 계속 직진했다.
+#   로그 타임라인이 원인을 그대로 보여준다:
+#       +0.80s  bringup 이 joy_node + joy_teleop 을 띄움
+#       +0.99s  joy_node 가 F710 을 엶
+#        ⋮      ← 이 6.5초 동안 bringup 의 joy_teleop 이 /teleop 을 쏜다
+#       +7.52s  joy_teleop 강제종료   ← 예전 pkill 위치 (sleep 5 뒤라 늦었다)
+#   그 창에서 트리거를 건드리면 F710 기본 매핑(축1×scale5)으로 주행 명령이 나가고,
+#   곧바로 joy_teleop 이 죽어 **VESC 에 마지막 명령이 얼어붙는다.** VESC 는 새
+#   명령이 없으면 마지막 속도를 무한히 유지하므로 차가 안 선다.
+#
+# 한 번만 죽이면 안 된다 — launch 가 언제 그 둘을 띄울지 모르므로 창 전체를 덮는다.
+# joystick_teleop(race_stack) 과 js_joy_bridge 는 패턴이 달라 안 죽는다.
+kill_bringup_joy () {
+    for _ in $(seq 1 20); do        # 0.4s × 20 = 8초. sleep 5 + 여유를 덮는다
+        pkill -9 -f '[j]oy_node'   2>/dev/null || true
+        pkill -9 -f '[j]oy_teleop' 2>/dev/null || true
+        sleep 0.4
+    done
+}
+
 # logs/ (CSV + bag) 를 현재 브랜치에 커밋하고 푸시한다. 코드 WIP 는 안 건드린다.
 commit_logs () {
     cd "$SCRIPT_DIR" || return 0
@@ -669,6 +691,10 @@ elif [ "$MODE" = "mapping-joy" ]; then
     # SLAM 맵핑 + 조이스틱: 브링업+slam_toolbox 백그라운드, joy는 별도 실행
     ros2 launch race_stack mapping.launch.py &
     LAUNCH_PID=$!
+    # ★ launch 와 **동시에** 시작한다. 예전엔 아래 sleep 5 뒤에 한 번만 pkill 해서
+    #   bringup 의 joy_teleop 이 6.5초간 살아 있었다 (위 kill_bringup_joy 주석 참고).
+    kill_bringup_joy &
+    KILLER_PID=$!
     sleep 5
     echo ""
     echo ">>> 조이스틱으로 천천히 트랙 1~2바퀴 돌면서 맵을 만드세요."
@@ -695,9 +721,7 @@ elif [ "$MODE" = "mapping-joy" ]; then
     # 맵핑에서는 항상 안전 잠금 ON (yaml 의 arm_on_neutral:false 도 무시)
     ARM=True
 
-    sleep 1
-    pkill -9 -f '[j]oy_node' 2>/dev/null || true
-    pkill -9 -f '[j]oy_teleop' 2>/dev/null || true
+    # kill_bringup_joy 가 배경에서 계속 지우고 있다. 여기서는 옛 bridge 만 정리한다.
     pkill -9 -f '[j]s_joy_bridge' 2>/dev/null || true
     sleep 0.4
 
@@ -710,25 +734,7 @@ elif [ "$MODE" = "mapping-joy" ]; then
     BRIDGE="$SCRIPT_DIR/js_joy_bridge.py"
     if [ -f "$BRIDGE" ]; then
         echo "[race.sh] js_joy_bridge → $JS_DEV  (SDL joy_node 대신, 혼자 주행 방지)"
-        python3 "$BRIDGE" "$JS_DEV" &#    ./race.sh savemap <이름>  맵핑 끝난 뒤 맵 저장
-#    ./race.sh savepose        ★ 지금 AMCL 위치를 출발점으로 저장
-#                              (savemap 이 맵 원점으로 이미 넣어두므로,
-#                               출발 자리를 옮길 때만 쓰면 됩니다)
-#                              RViz "2D Pose Estimate" 로 맵과 스캔을 맞춘 뒤 실행하면
-#                              다음 실행부터 그 위치에서 시작 (맵-스캔 어긋남 해소)
-    echo "[race.sh] 완료. race_script.yaml의 map_name을 '$NAME'으로 바꾸세요."
-    echo ""
-    echo ">>> 키보드로 천천히 트랙 1~2바퀴 돌면서 맵을 만드세요."
-    echo ">>> ★ 이 창을 끄지 말고, 다른 터미널에서 저장하세요:"
-    echo ">>>       ./race.sh savemap <맵이름>"
-    echo ">>> ★ 저장이 끝난 뒤에 이 창에서 Ctrl+C  (먼저 끄면 /map이 사라져 저장 실패)"
-    echo ""
-    echo ""
-    echo ">>> 조이스틱으로 천천히 트랙 1~2바퀴 돌면서 맵을 만드세요."
-    echo ">>> ★ 이 창을 끄지 말고, 다른 터미널에서 저장하세요:"
-    echo ">>>       ./race.sh savemap <맵이름>"
-    echo ">>> ★ 저장이 끝난 뒤에 이 창에서 Ctrl+C  (먼저 끄면 /map이 사라져 저장 실패)"
-    echo ""
+        python3 "$BRIDGE" "$JS_DEV" &
         JOY_PID=$!
     else
         echo "[race.sh] js_joy_bridge 없음 — joy_node device_id=0"
