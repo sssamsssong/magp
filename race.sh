@@ -720,6 +720,14 @@ elif [ "$MODE" = "mapping-joy" ]; then
     JOY_DBG=$(get_yaml joystick.debug 2>/dev/null || echo "False")
     # 맵핑에서는 항상 안전 잠금 ON (yaml 의 arm_on_neutral:false 도 무시)
     ARM=True
+    # ★ max_steer 를 반드시 넘긴다. 안 넘기면 joystick_teleop 이 **자기 기본값
+    #   0.36** 을 쓴다 (joystick.launch.py 는 넘기는데 여기만 빠져 있었다).
+    #   이 차의 실제 한계는 0.3173 이라, 스틱을 끝까지 밀면 서보 0.112 를 지령하고
+    #   vesc_driver 가 servo_min 0.15 로 자른다 = **정지 상태에서 풀락에 계속
+    #   밀어붙이는 상태**가 만들어진다. 2026-08-17 로그에 그 clipping 경고가
+    #   50Hz 로 도배돼 있었고, 스톨은 서보를 태우는 가장 흔한 경로다.
+    #   overlay 의 pure_pursuit.max_steer 는 apply_vehicle.py 가 계산해 내려보낸다.
+    MAX_STEER=$(get_yaml pure_pursuit.max_steer 2>/dev/null || echo "0.3173")
 
     # kill_bringup_joy 가 배경에서 계속 지우고 있다. 여기서는 옛 bridge 만 정리한다.
     pkill -9 -f '[j]s_joy_bridge' 2>/dev/null || true
@@ -746,6 +754,7 @@ elif [ "$MODE" = "mapping-joy" ]; then
 
     ros2 run race_stack joystick_teleop --ros-args \
         -p max_speed:="$MAX_SPD" \
+        -p max_steer:="$MAX_STEER" \
         -p axis_steer:="$AX_STEER" \
         -p axis_speed:="$AX_SPEED" \
         -p btn_reverse:="$BTN_REV" \
