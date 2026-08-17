@@ -1227,8 +1227,33 @@ class ObstacleAvoidMixin:
             self._lock_d = None
             return float(d_raw), int(best)
         if lock is not None:
-            i = int(np.argmin(np.abs(d - float(lock))))
-            if bool(feasible[i]):
+            # ★★ 2026-08-17 — **부호만** 잠근다. 예전엔 값을 통째로 잠갔다.
+            #   실차 q2 (20260817_005738 / _005431): 오프셋이 **첫 검출 순간의
+            #   값에 얼어붙었다** — 접근 에피소드 9/14, 13/14 가 첫 값 그대로.
+            #     첫 검출 2.5m 에서 |d|=0.100  →  최근접 0.026m 에서도 0.100
+            #   2.5m 밖에서는 콘이 빔 몇 개만 스쳐 작은 오프셋이 충분해 보인다.
+            #   가까워지며 해소돼도 다시 안 골라서 그 값이 끝까지 간다.
+            #   콘을 비키려면 차 반폭 0.155 + 콘 반경 ~0.1 + 여유 = 0.30m 은
+            #   있어야 하는데 gap<0.4m 에서 |d| 중앙이 0.200 이었고,
+            #   |d|<0.15 인 틱이 35% / 86% 였다. 최소 gap 0.009m — 박았다.
+            #   팀 보고 "감지가 잘 안 되기 시작하면 그냥 냅다 박아버리네".
+            #
+            #   잠금의 원래 목적은 **콘 정면에서 좌우가 뒤집히는 것**을 막는
+            #   것이지 크기를 얼리는 게 아니다. 그래서:
+            #     · 부호는 유지한다 (뒤집힘 방지 — 원래 목적)
+            #     · 크기는 줄지 않게만 하고 **커지는 건 허용한다** (래칫)
+            #   해소되며 작은 후보가 실행불가가 되면 선택이 저절로 커진다.
+            sgn = 1.0 if float(lock) >= 0.0 else -1.0
+            same = (feasible & (d * sgn > 1e-9)
+                    & (np.abs(d) >= abs(float(lock)) - 1e-9))
+            if np.any(same):
+                if (bool(feasible[best]) and d[best] * sgn > 1e-9
+                        and abs(d[best]) >= abs(float(lock)) - 1e-9):
+                    i = int(best)          # 이미 같은 쪽이고 더 크다 — 그대로
+                else:
+                    idx = np.where(same)[0]
+                    i = int(idx[np.argmin(np.abs(d[idx]))])   # 같은 쪽 최소 이동
+                self._lock_d = float(d[i])                    # 래칫
                 return float(d[i]), i
             self._lock_d = None
         if abs(float(d_raw)) > 0.05:
