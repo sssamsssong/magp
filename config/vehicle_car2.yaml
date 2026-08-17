@@ -195,7 +195,18 @@ tuning:
   launch_acc:  0.8
   launch_time: 3.0
   # ★ 첫 주행은 낮게. 캘리브레이션이 다 끝난 뒤 0.1 씩 올리며 한계를 찾는다.
-  grip_util: 0.2
+  #
+  #   2026-08-17: 스칼라(0.2) → **모드별 딕셔너리**로 바꾼다. 값은 그대로다.
+  #   이유는 SSH 에서 못 고쳤기 때문이다 — ./tune.sh q2=0.35 가
+  #     "vehicle_car2.yaml 에 tuning.grip_util.q2 가 없다"
+  #   로 거절했다. tune.py 는 limits.grip_util.* 를 차량 파일의 tuning.grip_util.*
+  #   로 보내는데(VEHICLE_PREFIX), 스칼라에는 모드 키를 못 넣는다.
+  #   딕셔너리로 두면 주행 중 SSH 한 줄로 바꿀 수 있다:
+  #       ./tune.sh q2=0.35        ./tune.sh q1=0.5
+  #
+  #   ※ default 키는 두지 말 것 — 네 모드가 다 있으면 영원히 안 읽히는데 값만
+  #     남아 손대게 된다 (docs/grip_util_shadowing.md).
+  grip_util: {q1: 0.2, q2: 0.35, q3: 0.2, race: 0.2}
 
 joystick:
   # ✅ 2026-08-10 실차 확인: false 가 맞다 (스틱 좌 = 앞바퀴 좌).
