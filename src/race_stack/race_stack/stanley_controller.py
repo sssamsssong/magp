@@ -232,6 +232,10 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self.declare_parameter('frenet_min_room',   0.22)
         self.declare_parameter('frenet_gap_hyst',   0.10)   # 좌우 갈아타기 우세폭
         self.declare_parameter('frenet_debug',      True)   # /frenet_candidates 마커
+        self.declare_parameter('static_lock',       True)
+        self.declare_parameter('candidate_fb',      True)
+        self.declare_parameter('fb_horizon',        5.0)
+        self.declare_parameter('fb_iters',          2)
         # 라이다 장착 오프셋 (base_link → laser). 격자 점유 판정에 필수.
         # ★ f1tenth_stack/launch/bringup_launch.py 의 static_baselink_to_laser
         #   값과 반드시 일치해야 한다 (현재 x=0.27, y=0.0).
@@ -295,6 +299,14 @@ class StanleyController(ObstacleAvoidMixin, Node):
                 '★ BENCH 모드 — 속도를 0 으로 강제한다 (바퀴가 돌지 않는다). '
                 '조향은 정상 동작하므로 박스 위에서 확인할 수 있다.')
         self.min_speed  = p('min_speed')
+        self.mu         = float(p('mu'))
+        self.pac_d      = float(p('pac_d'))
+        self.lf         = float(p('lf'))
+        self.lr         = float(p('lr'))
+        self.grip_util  = float(p('grip_util'))
+        self.a_lon_acc  = float(p('a_lon_acc'))
+        self.a_lon_brk  = float(p('a_lon_brk'))
+        self.hard_cap   = float(p('hard_cap'))
         self.max_steer  = p('max_steer')
         self.gain       = p('stanley_gain')
         self.k_cte      = p('stanley_k')
@@ -330,6 +342,12 @@ class StanleyController(ObstacleAvoidMixin, Node):
         self.fr_clr_cap = float(p('frenet_clear_cap'))
         self.fr_bounds  = bool(p('frenet_bounds'))
         self.fr_debug   = bool(p('frenet_debug'))
+        self.static_lock  = bool(p('static_lock'))
+        self.candidate_fb = bool(p('candidate_fb'))
+        self.fb_horizon   = float(p('fb_horizon'))
+        self.fb_iters     = int(p('fb_iters'))
+        self._lock_d = None
+        self._lock_lost = 0
         # 후보 오프셋 격자 — 0 이 정확히 포함되도록 홀수개를 권장한다
         self.fr_grid    = np.linspace(-self.fr_dmax, self.fr_dmax, self.fr_n)
         self.track_margin = float(p('track_margin'))

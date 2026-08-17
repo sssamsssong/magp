@@ -38,7 +38,7 @@ from geometry_msgs.msg import Point
 from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker, MarkerArray
 
-from race_stack.speed_profile import GRAVITY
+from race_stack.speed_profile import GRAVITY, solve_profile
 
 
 def _load_map(map_yaml_path: str):
@@ -138,6 +138,36 @@ def overtake_zone(xy, room, width, exit_pad, min_len):
     # 0 을 넘어 이어지는 구간은 위 루프가 둘로 나눠 본다. 한 번 더 이어 붙여
     # 판정하면 정확하지만, 짧게 잘리는 쪽이 안전한 방향이라 그대로 둔다.
     return ok
+
+
+# 플래너 모드. /frenet/status 와 driven_path.csv planner_status.
+TRACK, AVOID_STATIC, BLOCKED, FOLLOW, RECOVER, OVERTAKE = 0, 1, 2, 3, 4, 5
+NORMAL, AVOID, RETURN = TRACK, AVOID_STATIC, RECOVER  # 옛 이름
+PLANNER_MODE_NAME = {
+    TRACK: 'TRACK', AVOID_STATIC: 'AVOID_STATIC', BLOCKED: 'BLOCKED',
+    FOLLOW: 'FOLLOW', RECOVER: 'RECOVER', OVERTAKE: 'OVERTAKE',
+}
+
+# /frenet/diag (Float64MultiArray) · driven_path.csv 공통 열. 순서를 바꾸지 말 것.
+FRENET_DIAG_KEYS = (
+    'selected_d', 'speed_scale', 'planner_status', 'ot_allowed',
+    'n_candidates', 'n_valid', 'n_obs', 'min_ttc', 'planning_ms',
+    'opp_id', 'opp_s_dot', 'opp_d_lat', 'opp_vd',
+)
+
+
+def pack_frenet_diag(d: dict) -> list:
+    return [float(d.get(k, float('nan'))) for k in FRENET_DIAG_KEYS]
+
+
+def unpack_frenet_diag(data) -> dict:
+    out = {k: float('nan') for k in FRENET_DIAG_KEYS}
+    for k, v in zip(FRENET_DIAG_KEYS, data or ()):
+        try:
+            out[k] = float(v)
+        except (TypeError, ValueError):
+            out[k] = float('nan')
+    return out
 
 
 # ── 회피 로직 (믹스인) ──────────────────────────────────────────────────────
@@ -437,18 +467,35 @@ class ObstacleAvoidMixin:
         w_ttc = float(getattr(self, 'fr_w_ttc', 0.0) or 0.0)
         ttc_sec, ttc_score = self._candidate_ttc(d, px, py)
 
-        # w_speed=w_ttc=0 이면 cost 벡터가 예전과 같다 (경로 선택 동일).
-        cost = (self.fr_w_off * np.abs(d)
-                + self.fr_w_chg * np.abs(d - self._shift_cur)
-                - self.fr_w_clr * np.minimum(room, self.fr_clr_cap))
-        if w_spd > 0.0:
-            cost = cost - w_spd * speed_score
+        trav = None
+        n_obs_now = int(len(getattr(self, 'on_track_pts', ()) or ()))
+        if (bool(getattr(self, 'candidate_fb', False))
+                and (n_obs_now > 0 or abs(float(self._shift_cur)) > 0.05)):
+            trav = self._candidate_fb_times(cands, feasible)
+            self._fr_trav = trav
+
+        # candidate_fb 켜면 통과시간 + 전환 벌점. w_speed 휴리스틱은 버린다.
+        if trav is not None and np.any(np.isfinite(trav)):
+            t_line = trav[zero_i]
+            if not np.isfinite(t_line) or t_line < 1e-6:
+                t_line = float(np.nanmin(trav))
+            t_line = max(t_line, 1e-6)
+            cost = (trav / t_line
+                    + self.fr_w_chg * np.abs(d - self._shift_cur))
+            cost = np.where(np.isfinite(trav), cost, 1e6)
+        else:
+            cost = (self.fr_w_off * np.abs(d)
+                    + self.fr_w_chg * np.abs(d - self._shift_cur)
+                    - self.fr_w_clr * np.minimum(room, self.fr_clr_cap))
+            if w_spd > 0.0:
+                cost = cost - w_spd * speed_score
         if w_ttc > 0.0:
             cost = cost + w_ttc * ttc_score
         self._fr_costs.append(cost)
         cost_avg = np.mean(np.stack(self._fr_costs), axis=0)
 
         runs = self._runs(feasible)
+        self._fr_blocked = not bool(runs)
         if runs:
             # ── 어느 쪽이 더 넓은가 ────────────────────────────────────
             scores = [float(room[a:b].max()) for a, b in runs]
@@ -463,7 +510,6 @@ class ObstacleAvoidMixin:
             a, b = runs[pick]
             best = a + int(np.argmin(cost_avg[a:b]))
             self._fr_gap_room = scores[pick]
-            self._fr_status = 0.0 if abs(float(d[best])) < 1e-3 else 1.0
         else:
             # 전부 막혔다. 벽·장애물로는 되는 후보가 곡률만 안 되면 라인(d=0)
             # — 안쪽으로 더 파고들면 조향이 안 따라간다. 둘 다 막혔으면 예전처럼
@@ -473,7 +519,6 @@ class ObstacleAvoidMixin:
             else:
                 best = int(np.argmax(room))
             self._fr_gap_room = float(room[best])
-            self._fr_status = 2.0
             self.get_logger().warn(
                 f'[frenet] 통과 가능한 후보 없음 — 최대 여유 {room[best]:.2f}m '
                 f'(요구 {self.fr_min_room:.2f}m), d={d[best]:+.2f}m. '
@@ -487,12 +532,19 @@ class ObstacleAvoidMixin:
         if self.ot_zone_on and not self._ot_allowed and abs(self._shift_cur) <= 0.05:
             best = zero_i
             self._fr_gap_room = float(room[best])
-            self._fr_status = 3.0        # 3 = 추월금지(추종)
 
         # ★ 다 지나갈 때까지 붙잡는다 (상대가 시야에서 사라져도).
         #   d 를 정한 **뒤**에 건다 — 후보 평가를 건드리면 "지금 어디가 비었나"
-        #   판단까지 왜곡된다.
-        self._fr_best_d = self._update_hold(float(d[best]))
+        #   판단까지 왜곡된다. static_lock 은 콘처럼 안 움직이는 대상의 d 를
+        #   프레임마다 다시 고르지 않는다 (좌우 뒤집힘 방지).
+        d_raw = float(d[best])
+        d_raw, best = self._apply_static_lock(d, feasible, d_raw, best)
+        self._fr_best_d = self._update_hold(d_raw)
+        self._fr_n_cand = int(N)
+        self._fr_n_valid = int(np.count_nonzero(feasible))
+        self._fr_n_obs = int(len(getattr(self, 'on_track_pts', ()) or ()))
+        self._set_planner_mode(d_raw, float(self._fr_best_d),
+                               self._fr_n_valid)
         self._fr_v_ref = float(v_ref)
         self._fr_vmax = float(v_cand[best])
         self._fr_kappa = float(kmax_arr[best])
@@ -1009,6 +1061,7 @@ class ObstacleAvoidMixin:
     opp_min_speed = 0.5     # 이보다 느리면 정적 장애물로 본다 [m/s]
     opp_pred_max  = 1.2     # 예측 시간 상한 [s]
     opp_lost_sec  = 0.5     # 이만큼 못 보면 트랙 폐기
+    _next_tid     = 1       # persistent ID. 매칭이 끊기면 새 번호
 
     def _cluster_pts(self, pts, eps):
         """격자 해싱 클러스터링. 이웃 격자까지 합쳐 경계에서 갈라지지 않게 한다.
@@ -1062,6 +1115,108 @@ class ObstacleAvoidMixin:
     hold_margin  = 0.30    # 여유 [m]
     hold_max_sec = 3.0     # 상한 [s] — 잘못 물리면 영영 안 풀리는 것을 막는다
 
+    # 테스트용 하이브리드. yaml 로 끈다 (static_lock / candidate_fb).
+    static_lock  = True    # 정지 장애물: 고른 d 를 지나갈 때까지 고정
+    candidate_fb = True    # 실행가능 후보만 짧은 FB 통과시간으로 고른다
+    fb_horizon   = 5.0     # FB 에 넣을 전방 거리 [m]
+    fb_iters     = 2       # solve_profile 반복. 2면 50Hz 에 충분
+
+    def _horizon_xy(self, xy, horizon):
+        """후보 경로를 전방 horizon [m] 까지만 자른다."""
+        xy = np.asarray(xy, float)
+        if len(xy) < 3:
+            return xy
+        ds = np.hypot(np.diff(xy[:, 0]), np.diff(xy[:, 1]))
+        s = np.concatenate([[0.0], np.cumsum(ds)])
+        m = int(np.searchsorted(s, float(horizon), side='left'))
+        m = int(np.clip(m, 2, len(xy) - 1))
+        return xy[:m + 1]
+
+    def _candidate_fb_times(self, cands, feasible):
+        """실행가능 후보의 짧은 열린 경로 FB 통과시간 [s]. 불가면 inf."""
+        n = len(cands)
+        T = np.full(n, np.inf)
+        horizon = float(getattr(self, 'fb_horizon', 5.0) or 5.0)
+        iters = max(int(getattr(self, 'fb_iters', 2) or 2), 1)
+        mu = float(getattr(self, 'mu', 0.348) or 0.348)
+        pac_d = float(getattr(self, 'pac_d', 1.15) or 1.15)
+        kwargs = dict(
+            mu_eff=mu * pac_d,
+            grip_util=float(getattr(self, 'grip_util', 0.6) or 0.6),
+            lf=float(getattr(self, 'lf', 0.1757) or 0.1757),
+            lr=float(getattr(self, 'lr', 0.1441) or 0.1441),
+            v_min=float(getattr(self, 'min_speed', 0.3) or 0.3),
+            a_lon_acc=float(getattr(self, 'a_lon_acc', 0.0) or 0.0),
+            a_lon_brk=float(getattr(self, 'a_lon_brk', 0.0) or 0.0),
+            hard_cap=float(getattr(self, 'hard_cap', 0.0) or 0.0),
+            closed=False,
+            iters=iters,
+        )
+        for i in range(n):
+            if not bool(feasible[i]):
+                continue
+            xy = self._horizon_xy(cands[i], horizon)
+            if xy is None or len(xy) < 3:
+                continue
+            try:
+                _, info = solve_profile(xy[:, 0], xy[:, 1], None, **kwargs)
+                t = float(info.get('lap_time', np.inf))
+            except Exception:
+                continue
+            if np.isfinite(t) and t > 0.0:
+                T[i] = t
+        return T
+
+    def _is_static_scene(self):
+        """앞에 있는 것이 전부 정지면 True. 성숙 트랙이 없으면 콘으로 본다."""
+        if getattr(self, '_ot_static', False):
+            return True
+        trs = [t for t in (getattr(self, '_opp_tracks', []) or [])
+               if t.get('n', 0) >= int(getattr(self, 'opp_min_obs', 3) or 3)]
+        n_pts = len(getattr(self, 'on_track_pts', ()) or ())
+        if not trs:
+            return n_pts > 0
+        vmin = float(getattr(self, 'opp_min_speed', 0.5) or 0.5)
+        return all(abs(float(t.get('s_dot', 0.0))) < vmin for t in trs)
+
+    def _apply_static_lock(self, d, feasible, d_raw, best):
+        """정지 장애물에서 고른 d 를 고정한다. (d_cmd, best_index).
+
+        17후보를 매 프레임 다시 고르면 콘 정면에서 좌우가 뒤집힌다. hold 는
+        FOV 손실용이고, 이쪽은 **아직 보이는 동안** 도 같은 d 를 유지한다.
+        잠긴 후보가 더 이상 실행가능이 아니거나 장애물이 사라지면 푼다.
+        """
+        n_obs = len(getattr(self, 'on_track_pts', ()) or ())
+        lock = getattr(self, '_lock_d', None)
+        lost = int(getattr(self, '_lock_lost', 0) or 0)
+        if not bool(getattr(self, 'static_lock', False)):
+            self._lock_d = None
+            self._lock_lost = 0
+            return float(d_raw), int(best)
+        if n_obs <= 0:
+            lost += 1
+            self._lock_lost = lost
+            if lost >= 3:
+                self._lock_d = None
+                self._lock_lost = 0
+            elif lock is not None:
+                i = int(np.argmin(np.abs(d - float(lock))))
+                if bool(feasible[i]):
+                    return float(d[i]), i
+            return float(d_raw), int(best)
+        self._lock_lost = 0
+        if not self._is_static_scene():
+            self._lock_d = None
+            return float(d_raw), int(best)
+        if lock is not None:
+            i = int(np.argmin(np.abs(d - float(lock))))
+            if bool(feasible[i]):
+                return float(d[i]), i
+            self._lock_d = None
+        if abs(float(d_raw)) > 0.05:
+            self._lock_d = float(d_raw)
+        return float(d_raw), int(best)
+
     def _update_hold(self, d_cmd):
         """옆으로 나간 뒤 **다 지나갈 때까지** 오프셋을 유지한다.
 
@@ -1110,9 +1265,83 @@ class ObstacleAvoidMixin:
         # 안 보이는데 유지 기간이 남았다 → 방금 옆에 붙은 것이다. 붙잡는다.
         until = float(getattr(self, '_hold_until', 0.0) or 0.0)
         if now < until and abs(float(getattr(self, '_hold_d', 0.0))) > 1e-3:
-            self._fr_status = max(float(getattr(self, '_fr_status', 0.0)), 1.0)
             return float(self._hold_d)
         return d_cmd
+
+    def _set_planner_mode(self, d_raw, d_out, n_valid):
+        """ot_zone / hold / 후보 유무를 한곳에서 모드로 접는다.
+
+        숫자가 흩어져 있으면 조합 버그가 난다 — 예전엔 status>=2 가
+        FOLLOW(3)까지 최저속도로 깎았다.
+        """
+        hold_on = False
+        now = float(getattr(self, '_now_sec', 0.0) or 0.0)
+        until = float(getattr(self, '_hold_until', 0.0) or 0.0)
+        if now < until and abs(float(getattr(self, '_hold_d', 0.0))) > 1e-3:
+            hold_on = True
+        static = self._is_static_scene()
+        locked = getattr(self, '_lock_d', None) is not None
+        if getattr(self, '_fr_blocked', False) or int(n_valid) <= 0:
+            mode = BLOCKED
+        elif self.ot_zone_on and not getattr(self, '_ot_allowed', True):
+            mode = FOLLOW
+        elif hold_on and abs(float(d_raw)) < 0.05 and abs(float(d_out)) >= 0.05:
+            mode = RECOVER
+        elif (static or locked) and abs(float(d_out)) >= 0.05:
+            mode = AVOID_STATIC
+        elif abs(float(d_out)) >= 0.05:
+            mode = OVERTAKE
+        else:
+            mode = TRACK
+        self._fr_status = float(mode)
+        self._fr_mode = int(mode)
+
+    def _lead_opp(self):
+        """전방 가장 가까운 트랙. 없으면 None."""
+        lut = self._s_lut()
+        pos = getattr(self, 'pos', None)
+        if lut is None or pos is None:
+            return None
+        s_ego, _ = self._project_sd(np.asarray(pos, float)[:2], lut)
+        best = None
+        for tr in getattr(self, '_opp_tracks', []) or []:
+            if tr.get('n', 0) < self.opp_min_obs:
+                continue
+            gap = (float(tr.get('s', 0.0)) - s_ego) % lut['L']
+            if gap > 0.5 * lut['L']:
+                continue
+            if best is None or gap < best[0]:
+                best = (gap, tr)
+        return None if best is None else best[1]
+
+    def frenet_diag_dict(self, scale, planning_ms):
+        """로그·/frenet/diag 용 스냅샷. loc_residual 은 컨트롤러가 붙인다."""
+        lead = self._lead_opp()
+        ttc = float(getattr(self, '_fr_ttc', 1e9) or 1e9)
+        if lead is not None:
+            lut = self._s_lut()
+            if lut is not None and self.pos is not None:
+                s_ego, _ = self._project_sd(np.asarray(self.pos, float)[:2], lut)
+                gap = (float(lead.get('s', 0.0)) - s_ego) % lut['L']
+                closing = max(abs(float(getattr(self, 'speed', 0.0) or 0.0))
+                              - float(lead.get('s_dot', 0.0)), 0.1)
+                ttc = min(ttc, gap / closing)
+        nan = float('nan')
+        return {
+            'selected_d':     float(getattr(self, '_fr_best_d', 0.0) or 0.0),
+            'speed_scale':    float(scale),
+            'planner_status': float(getattr(self, '_fr_status', 0.0) or 0.0),
+            'ot_allowed':     1.0 if getattr(self, '_ot_allowed', True) else 0.0,
+            'n_candidates':   float(getattr(self, '_fr_n_cand', 0) or 0),
+            'n_valid':        float(getattr(self, '_fr_n_valid', 0) or 0),
+            'n_obs':          float(getattr(self, '_fr_n_obs', 0) or 0),
+            'min_ttc':        float(ttc),
+            'planning_ms':    float(planning_ms),
+            'opp_id':         float(lead.get('id', 0) if lead else nan),
+            'opp_s_dot':      float(lead.get('s_dot', nan) if lead else nan),
+            'opp_d_lat':      float(lead.get('d_lat', nan) if lead else nan),
+            'opp_vd':         float(lead.get('d_dot', nan) if lead else nan),
+        }
 
     # ── 회피 완료 가능성 속도 상한 ────────────────────────────────────
     shift_cap_on   = True    # 끄면 예전 동작
@@ -1403,21 +1632,28 @@ class ObstacleAvoidMixin:
             if lut is not None:
                 s_now, d_lat = self._project_sd(c, lut)
             if best is None:
-                new.append(dict(p=c, v=np.zeros(2), t=t, n=1, ci=ci,
-                                s=s_now, s_dot=0.0, d_lat=d_lat))
+                tid = int(getattr(self, '_next_tid', 1) or 1)
+                self._next_tid = tid + 1
+                new.append(dict(p=c, v=np.zeros(2), t=t, n=1, ci=ci, id=tid,
+                                s=s_now, s_dot=0.0, d_lat=d_lat, d_dot=0.0))
                 continue
             tr = old[best]; used.add(best)
             dt = t - tr['t']
             v = tr['v'] if dt <= 1e-3 else (
                 self.opp_alpha * tr['v'] + (1.0 - self.opp_alpha) * (c - tr['p']) / dt)
+            d_dot = float(tr.get('d_dot', 0.0))
             if lut is not None and dt > 1e-3:
                 ds = self._wrap_ds(s_now - tr['s'], lut['L'])
                 s_dot = (self.opp_alpha * tr.get('s_dot', 0.0)
                          + (1.0 - self.opp_alpha) * (ds / dt))
+                d_dot = (self.opp_alpha * tr.get('d_dot', 0.0)
+                         + (1.0 - self.opp_alpha)
+                         * ((d_lat - float(tr.get('d_lat', d_lat))) / dt))
             else:
                 s_dot = float(tr.get('s_dot', 0.0))
             new.append(dict(p=c, v=v, t=t, n=tr['n'] + 1, ci=ci,
-                            s=s_now, s_dot=s_dot, d_lat=d_lat))
+                            id=int(tr.get('id', 0) or 0),
+                            s=s_now, s_dot=s_dot, d_lat=d_lat, d_dot=d_dot))
         self._opp_tracks = new
 
         out = [pts]

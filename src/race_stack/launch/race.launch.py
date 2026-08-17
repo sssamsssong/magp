@@ -419,6 +419,18 @@ def generate_launch_description():
                          'wheelbase': float(pp['wheelbase']),
                          'max_steer': float(pp['max_steer']),
                          'curvature_slowdown': float(pp['curvature_slowdown']),
+                         # MAP 과 같은 프로파일·L 로 A/B (yaml 로 끔)
+                         'use_profile': bool(pp.get('use_profile', True)),
+                         'adaptive_ld': bool(pp.get('adaptive_ld', True)),
+                         'l1_min': float(_mp0.get('l1_min', pp.get('l1_min', 1.4983))),
+                         'l1_k':   float(_mp0.get('l1_k',   pp.get('l1_k',   0.75))),
+                         'l1_kappa': float(pp.get('l1_kappa', 0.0)),
+                         'grip_util': grip_util,
+                         'mu': veh['mu'], 'pac_d': veh['pac_d'],
+                         'lf': veh['lf'], 'lr': veh['lr'],
+                         'a_lon_acc': a_lon_acc, 'a_lon_brk': a_lon_brk,
+                         'hard_cap': hard_cap,
+                         'speed_lag': float(_lim.get('speed_lag', 0.25)),
                          # ── Q2 장애물 회피 (옵션) ──────────────────────────
                          # pp.obstacle_avoid_enabled 하나로 껐다/켠다
                          # (race_script.yaml 의 pure_pursuit 절 참조).
@@ -500,6 +512,10 @@ def generate_launch_description():
                 'frenet_clear_cap':  float(fr.get('clear_cap',  0.35)),
                 'frenet_bounds':     bool( fr.get('bounds',     True)),
                 'frenet_debug':      bool( fr.get('debug',      True)),
+                'static_lock':       bool( fr.get('static_lock',  True)),
+                'candidate_fb':      bool( fr.get('candidate_fb', True)),
+                'fb_horizon':        float(fr.get('fb_horizon',   5.0)),
+                'fb_iters':          int(  fr.get('fb_iters',     2)),
                 'odom_topic':        odom_topic,
                 # AMCL 첫 pose 를 받기 전까지의 위치 가정 (AMCL 과 같은 값)
                 'init_x':            float(loc.get('init_x',   0.0)),
@@ -684,6 +700,11 @@ def generate_launch_description():
                     'hold_obj_len':   float(fr.get('hold_obj_len', 0.50)),
                     'hold_margin':    float(fr.get('hold_margin',  0.30)),
                     'hold_max_sec':   float(fr.get('hold_max_sec', 3.0)),
+                    # 테스트 하이브리드 — yaml 로 A/B. 둘 다 기본 켬.
+                    'static_lock':    bool( fr.get('static_lock',  True)),
+                    'candidate_fb':   bool( fr.get('candidate_fb', True)),
+                    'fb_horizon':     float(fr.get('fb_horizon',   5.0)),
+                    'fb_iters':       int(  fr.get('fb_iters',     2)),
                     'speed_min_scale':float(fr.get('speed_min_scale', 0.45)),
                     'speed_room_ref': float(fr.get('speed_room_ref',  0.45)),
                     'speed_scale_mode': str(fr.get('speed_scale_mode', 'vmax')),

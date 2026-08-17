@@ -551,11 +551,18 @@ gap_follower:
 # Pure Pursuit 파라미터 (q1 / q3)
 # ------------------------------------------------------------
 pure_pursuit:
-  lookahead: 1.8            # 전방주시거리 (m). 고속=크게, 저속=작게
-  lookahead_speed_gain: 0.3 # 속도 비례 lookahead 가변 (L = lookahead + gain*v)
+  lookahead: 1.8            # 전방주시거리 (m). adaptive_ld=false 일 때만
+  lookahead_speed_gain: 0.3 # L = lookahead + gain*v. adaptive_ld=false 일 때만
   wheelbase: 0.33           # 축간거리 (m)
   max_steer: 0.36           # 최대 조향각 (rad)
-  curvature_slowdown: 1.5   # 곡률 기반 감속 게인 (클수록 코너에서 많이 감속)
+  curvature_slowdown: 1.5   # use_profile=false 이고 CSV 속도가 없을 때
+
+  # ══ MAP vs PP A/B (테스트, 기본 켬) ════════════════════════════════
+  #   같은 레이싱라인 + 같은 solve_profile 위에서 조향만 갈라진다.
+  #   L 도 map.l1_min / l1_k 를 그대로 쓴다. 끄면 예전 CSV+고정 lookahead.
+  use_profile: true
+  adaptive_ld: true
+  l1_kappa: 0.0             # >0 이면 코너에서 L 을 줄인다. 0 = MAP 과 같은 L
 
   # ★ Q2 장애물 회피 — Stanley 의 wall_avoid.enabled 처럼 이 값 하나로 껐다/켠다.
   #   켜면 Stanley 의 Q2 로직(트랙 경계 마스크 + 예측 통로 판정 + 목표점 좌우
@@ -705,6 +712,15 @@ frenet:
   hold_obj_len:  0.50    # 피할 대상 길이 [m] — 상대차 기준
   hold_margin:   0.30
   hold_max_sec:  3.0     # 상한. 잘못 물려 영영 안 풀리는 것을 막는다
+
+  # ══ 테스트 하이브리드 (A/B 스위치) ════════════════════════════════
+  #   끄면 예전 17후보 + v_curve 선택으로 돌아간다. 재빌드 없이 yaml 만.
+  static_lock:   true    # 정지(콘)면 고른 d 를 지나갈 때까지 고정.
+                         # false = 매 프레임 17후보 재선택 (좌우 뒤집힐 수 있음)
+  candidate_fb:  true    # 실행가능 후보만 짧은 FB 통과시간 T 로 고른다.
+                         # false = 예전 v_curve + w_offset 비용
+  fb_horizon:    5.0     # FB 에 넣는 전방 거리 [m]
+  fb_iters:      2       # solve_profile 반복. 늘리면 정확·느려짐
 
   # ── 속도 판정에 쓸 전방 거리 [m] ──────────────────────────────
   #

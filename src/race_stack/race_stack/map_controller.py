@@ -57,13 +57,14 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry, Path
-from std_msgs.msg import Bool, ColorRGBA, Float64
+from std_msgs.msg import Bool, ColorRGBA, Float32, Float64, Float64MultiArray
 
 from race_stack.speed_profile import (
     solve_profile, LaunchLimiter, preview_speed, steer_speed_limit)
 from visualization_msgs.msg import Marker
 
 from race_stack.stanley_controller import _REPO_ROOT, _normalize, write_run_config
+from race_stack.obstacle_avoid import FRENET_DIAG_KEYS, unpack_frenet_diag
 
 # /race/enabled 는 mission_manager 가 래치(TRANSIENT_LOCAL)로 발행한다.
 # 기본 QoS 로 구독하면 컨트롤러가 8초 뒤에 뜨는 사이 나간 값을 놓쳐서,
@@ -324,6 +325,8 @@ class MapController(Node):
         self._fr_warned = False
         self._fr_spd    = 1.0     # 속도 스케일 (1대1). 타임아웃이면 1.0 으로 복귀
         self._fr_spd_t  = None
+        self._fr_diag   = {k: float('nan') for k in FRENET_DIAG_KEYS}
+        self._loc_residual = float('nan')
         if bool(self.p('frenet_enabled')):
             self.create_subscription(Float64, '/frenet/offset',
                                      self._frenet_cb, 10)
@@ -332,6 +335,10 @@ class MapController(Node):
             #   1.0 으로 돌아간다 — 오프셋과 같은 타임아웃 폴백 규약.
             self.create_subscription(Float64, '/frenet/speed_scale',
                                      self._frenet_spd_cb, 10)
+            self.create_subscription(Float64MultiArray, '/frenet/diag',
+                                     self._frenet_diag_cb, 10)
+        self.create_subscription(Float32, '/loc/residual',
+                                 self._loc_residual_cb, 10)
 
         # 제어·발행을 50Hz 로 고정한다. AMCL 콜백에 걸어두면 주기가 들쭉날쭉하고
         # (2.5cm 이동마다) 정지 상태에서는 아예 돌지 않는다.
@@ -516,6 +523,12 @@ class MapController(Node):
         if self._fr_warned:
             self._fr_warned = False
             self.get_logger().info('frenet 오프셋 수신 재개')
+
+    def _frenet_diag_cb(self, msg: Float64MultiArray):
+        self._fr_diag = unpack_frenet_diag(msg.data)
+
+    def _loc_residual_cb(self, msg: Float32):
+        self._loc_residual = float(msg.data)
 
     def _frenet_shift(self, goal, near):
         """목표점을 경로 법선 방향으로 램프된 오프셋만큼 민다.
@@ -933,8 +946,10 @@ class MapController(Node):
         self._last_trail = (x, y)
         now = self.get_clock().now()
         t = (now - self._run_t0).nanoseconds / 1e9
-        self._trail_log.append((t, x, y, float(speed_meas), float(steer),
-                                float(cmd_v), float(self.yaw), int(near)))
+        self._trail_log.append((
+            t, x, y, float(speed_meas), float(steer),
+            float(cmd_v), float(self.yaw), int(near),
+            dict(self._fr_diag), float(self._loc_residual)))
         if len(self._trail_log) > 3000:
             self._trail_log.pop(0)
 
@@ -964,11 +979,18 @@ class MapController(Node):
                 # steer/cmd_v/yaw 는 2026-08-09 추가 — 진동(제어 루프)과
                 # 속도 추종 지연을 사후에 가리려면 지령 신호가 있어야 한다.
                 # speed = **실측**(odom), cmd_v = **지령**(프로파일). 헷갈리지 말 것.
-                w.writerow(['t', 'x', 'y', 'speed', 'steer', 'cmd_v', 'yaw', 'near'])
+                w.writerow(
+                    ['t', 'x', 'y', 'speed', 'steer', 'cmd_v', 'yaw', 'near',
+                     'loc_residual'] + list(FRENET_DIAG_KEYS))
                 for r in self._trail_log:
-                    w.writerow([f'{r[0]:.3f}', f'{r[1]:.4f}', f'{r[2]:.4f}',
-                                f'{r[3]:.3f}', f'{r[4]:.4f}', f'{r[5]:.3f}',
-                                f'{r[6]:.4f}', r[7]])
+                    t, x, y, spd, st, cv, yaw, near, diag, loc = r
+                    row = [f'{t:.3f}', f'{x:.4f}', f'{y:.4f}',
+                           f'{spd:.3f}', f'{st:.4f}', f'{cv:.3f}',
+                           f'{yaw:.4f}', near, f'{loc:.4f}']
+                    for k in FRENET_DIAG_KEYS:
+                        v = (diag or {}).get(k, float('nan'))
+                        row.append('' if v != v else f'{float(v):.4f}')  # NaN → 빈칸
+                    w.writerow(row)
 
             # ★ race_script.yaml + 차량 오버레이를 함께 남긴다.
             #   오버레이가 빠지면 스냅샷이 조용히 거짓말을 한다 (2026-08-11).
