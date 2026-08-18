@@ -447,6 +447,18 @@ map:
   pac_d:  1.15
   pac_e: -0.5
 
+  # ── 2D 조향 LUT (v, δ) → α_f ──────────────────────────
+  # repo root 기준 상대경로 또는 절대경로.
+  # 비워두면 위 pac_* 1D Pacejka 로 폴백.
+  # car1 LUT (docs/lut_car1/) — mu × pac_D(1.15) = μ_eff:
+  #   mu=0.45 → μ_eff 0.52g  docs/lut_car1/lut_car1_mu0.45.csv
+  #   mu=0.60 → μ_eff 0.69g  docs/lut_car1/lut_car1_mu0.60.csv
+  #   mu=0.70 → μ_eff 0.81g  docs/lut_car1/lut_car1_mu0.70.csv
+  #   mu=0.80 → μ_eff 0.92g  docs/lut_car1/lut_car1_mu0.80.csv  ← 야외 화강석 연습
+  #   mu=0.90 → μ_eff 1.04g  docs/lut_car1/lut_car1_mu0.90.csv
+  #   mu=1.00 → μ_eff 1.15g  docs/lut_car1/lut_car1_mu1.00.csv  ← 우레탄 노면
+  steer_lut: ''
+
   # ── 기타 ────────────────────────────────────────────────
   reverse_check: true       # 첫 pose 때 웨이포인트 진행방향이 차 헤딩과 반대면
                             #   배열을 뒤집는다. 역주행 웨이포인트 방지용
@@ -1259,7 +1271,7 @@ network:
   #   ※ 안 쓰는 IP 가 목록에 있어도 무해하다 — 응답 없는 주소로 인사만 한 번 갈 뿐이다.
   peers:
     - 192.168.50.57         #   1호차 젯슨
-    - 192.168.50.77         #   2호차 젯슨
+    - 192.168.50.129        #   2호차 젯슨
 
 
 # ========================================================================

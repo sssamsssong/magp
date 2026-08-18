@@ -204,6 +204,10 @@ class MapController(Node):
         self.declare_parameter('pac_c',  1.3)
         self.declare_parameter('pac_d',  1.15)
         self.declare_parameter('pac_e', -0.5)
+        # ★ 2D LUT 경로 (repo root 기준 상대경로 또는 절대경로).
+        #   빈 문자열 = 기존 1D Pacejka 폴백.
+        #   예) map.steer_lut: docs/lut_ours/lut_ours_mu0.8.csv
+        self.declare_parameter('steer_lut', '')
 
         # ── 속도 프로파일 ───────────────────────────────────────────────
         # ── 속도 프로파일 ────────────────────────────────────────────────
@@ -338,6 +342,13 @@ class MapController(Node):
             self._curvature = self._compute_curvature()
             self._v_profile = self._compute_speed_profile()
         self._pac_alpha_lut, self._pac_Fy_lut = self._pacejka_lut()
+        self._steer_lut_interp = None
+        self._steer_lut_tree   = None
+        self._steer_lut_pts    = None
+        self._steer_lut_af     = None
+        lut_path = str(self.p('steer_lut')).strip()
+        if lut_path:
+            self._load_steer_lut(lut_path)
 
         # ── 주행 상태 ───────────────────────────────────────────────────
         self.enabled = False    # ★ mission_manager 의 /race/enabled 를 받아야 켜진다
@@ -568,6 +579,42 @@ class MapController(Node):
                                 self._pac_Fy_lut[-1] * 0.99))
         return float(np.interp(clamped, self._pac_Fy_lut, self._pac_alpha_lut))
 
+    def _load_steer_lut(self, path: str):
+        """(v, delta_rad) → alpha_f_rad 2D LUT 로드."""
+        import csv as _csv
+        from scipy.interpolate import LinearNDInterpolator
+        from scipy.spatial import cKDTree
+
+        if not os.path.isabs(path):
+            path = os.path.abspath(os.path.join(_REPO_ROOT, '..', '..', path))
+        if not os.path.exists(path):
+            self.get_logger().error(f'steer_lut 파일 없음: {path} — Pacejka 폴백')
+            return
+
+        rows = list(_csv.DictReader(open(path)))
+        v  = np.array([float(r['v'])           for r in rows])
+        d  = np.array([float(r['delta_rad'])   for r in rows])
+        af = np.array([float(r['alpha_f_deg']) * (math.pi / 180) for r in rows])
+
+        pts = np.column_stack([v, d])
+        self._steer_lut_interp = LinearNDInterpolator(pts, af, fill_value=float('nan'))
+        # 범위 밖 클램핑용 — 빌드 시점에 한 번만
+        self._steer_lut_tree = cKDTree(pts)
+        self._steer_lut_af   = af
+
+        self.get_logger().info(
+            f'조향 2D LUT: {os.path.basename(path)} '
+            f'({len(rows)}pts  v={v.min():.1f}~{v.max():.1f}m/s  '
+            f'δ={math.degrees(d.min()):.1f}~{math.degrees(d.max()):.1f}°)')
+
+    def _steer_lut_lookup(self, v: float, delta_rad: float) -> float:
+        """(v, delta_rad) → alpha_f_rad. 범위 밖이면 최근접점으로 클램핑."""
+        result = float(self._steer_lut_interp([[v, delta_rad]])[0])
+        if math.isnan(result):
+            _, idx = self._steer_lut_tree.query([v, delta_rad])
+            result = float(self._steer_lut_af[idx])
+        return result
+
     # ── MAP 조향각 ─────────────────────────────────────────────────────
     def _frenet_spd_cb(self, msg: Float64):
         self._fr_spd = float(np.clip(msg.data, 0.2, 1.0))
@@ -678,17 +725,21 @@ class MapController(Node):
         bearing = math.atan2(dy, dx) - yaw
         eta = math.atan2(math.sin(bearing), math.cos(bearing))
 
-        # L1 가이던스가 요구하는 횡가속도
-        a_lat = 2.0 * v * v * math.sin(eta) / L1
-
         wb = float(self.p('wheelbase'))
-        mass, lr, mu = float(self.p('mass')), float(self.p('lr')), float(self.p('mu'))
-        Fzf = mass * GRAVITY * lr / wb          # 앞축 수직하중
-        F_yf = mass * a_lat * lr / wb           # 앞축 필요 횡력
-        alpha_f = self._pacejka_inv(F_yf / (mu * Fzf))   # 슬립각 보정
-        alpha_f *= float(self.p('slip_gain'))            # ★ 과조향 억제 (위 주석)
-
         delta_kin = math.atan(wb * 2.0 * math.sin(eta) / max(L1, 1e-3))
+
+        if self._steer_lut_interp is not None:
+            # 2D LUT: (v, delta_kin) → alpha_f  (속도별 비선형 슬립각)
+            alpha_f = self._steer_lut_lookup(v, delta_kin)
+        else:
+            # 기존 1D Pacejka 폴백
+            a_lat = 2.0 * v * v * math.sin(eta) / L1
+            mass, lr, mu = float(self.p('mass')), float(self.p('lr')), float(self.p('mu'))
+            Fzf = mass * GRAVITY * lr / wb
+            F_yf = mass * a_lat * lr / wb
+            alpha_f = self._pacejka_inv(F_yf / (mu * Fzf))
+
+        alpha_f *= float(self.p('slip_gain'))
         max_steer = float(self.p('max_steer'))
         return float(np.clip(delta_kin + alpha_f, -max_steer, max_steer))
 
