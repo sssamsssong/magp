@@ -57,13 +57,14 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import Point, PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry, Path
-from std_msgs.msg import Bool, ColorRGBA, Float64
+from std_msgs.msg import Bool, ColorRGBA, Float32, Float64, Float64MultiArray
 
 from race_stack.speed_profile import (
     solve_profile, LaunchLimiter, preview_speed, steer_speed_limit)
 from visualization_msgs.msg import Marker
 
 from race_stack.stanley_controller import _REPO_ROOT, _normalize, write_run_config
+from race_stack.obstacle_avoid import FRENET_DIAG_KEYS, unpack_frenet_diag
 
 # /race/enabled 는 mission_manager 가 래치(TRANSIENT_LOCAL)로 발행한다.
 # 기본 QoS 로 구독하면 컨트롤러가 8초 뒤에 뜨는 사이 나간 값을 놓쳐서,
@@ -104,6 +105,67 @@ class MapController(Node):
         #   (2026-08-06 실차 저속 시험에서 확인). 그래서 실차 기본값을 키운다.
         self.declare_parameter('l1_min', 0.90)
         self.declare_parameter('l1_k',   0.35)
+
+        # ★ 코너에서만 L1 을 자른다 (2026-08-16).
+        #   증상: 코너에서 라인 안쪽으로 파고든다. 8/11 의 과조향과는 다른 것이다 —
+        #   8/15 주행 29회를 재보니 **곡률비는 1.005 로 정상**인데(즉 도는 반경은
+        #   맞다) 위치만 안쪽으로 +0.088m(방금 q3 는 +0.115m, 코너 표본의 83%)
+        #   치우쳐 있었다. 같은 반경의 원을 11cm 안쪽에서 그리고 있다.
+        #
+        #   원인은 조향 법칙에 **횡오차 항이 없다**는 것이다 (_steer_map 참고).
+        #   순수 L1 유도라 곡선에서 정상편차가 0 으로 수렴하지 않는다. 편차는
+        #   L1 의 제곱에 붙고(L1²/8R 꼴), L1 = l1_k·v 라 **속도의 제곱**으로 큰다:
+        #     v 2.8 → 0.088m   3.5 → 0.138m   4.5 → 0.228m   5.2 → 0.304m
+        #   지금은 라인이 --apex-extra 0.40 으로 코너 안쪽을 미리 띄워 둔 덕에
+        #   벽 여유 최소 0.400m 로 안전하지만, 속도를 올리면 그 여유를 다 먹는다.
+        #
+        #   l1_k 를 그냥 내리면 안 된다 — 그건 2026-08-09 고속 직선 요 진동
+        #   대책으로 0.5837→0.75 로 **올린** 값이다. 편차는 코너에서만 생기니
+        #   코너에서만 줄인다:
+        #     L1 = min( max(l1_min, l1_k·v),  max(l1_min, l1_curv_k/|κ|) )
+        #   κ 는 **현재 위치부터 L1 앞까지의 최대값**을 쓴다. 파고듦은 조준점이
+        #   먼저 코너에 들어가서 차가 일찍 돌기 시작하는 것이라, 코너에 닿은
+        #   뒤에 줄이면 늦다.
+        #
+        #   l1_curv_k 는 곧 **L1/R** 이다. 1.0 이면 조준점이 코너 반경만큼 앞.
+        #   0 = 끔. 하한은 항상 l1_min 이라 위 진동 방어선 아래로는 안 내려간다.
+        #   ⚠ L1 을 줄이면 유도 시상수 L1/v 가 줄어 **루프 지연(실측 290ms)에
+        #     대한 여유가 줄어든다.** 방금 q3 에 재생해 고른 값이 1.0 이다:
+        #       끔  코너 L1 2.06  직선 2.84  L1/v 0.75s(지연의 2.59배)  편차 0.115
+        #       1.0 코너 L1 1.32  직선 2.34  L1/v 0.55s(1.89배)         편차 0.047
+        #       1.2 코너 L1 1.50  직선 2.50  L1/v 0.62s(2.13배)         편차 0.061
+        #     코너에서 좌우로 흔들리면 1.2 → 1.5 로 올릴 것 (끄지 말고).
+        self.declare_parameter('l1_curv_k', 1.0)
+
+        # ★ 상한의 시간 하한 (2026-08-16, 위 상한을 넣은 **다음 주행**에서 나옴).
+        #   증상: 큰 코너는 고쳐졌는데(치우침 +0.206→+0.092) 직선 뒤 바로 들어가는
+        #   타이트한 코너에서 **바깥으로 밀렸다**. 곡률비 0.98→0.79, 치우침
+        #   +0.073→−0.185(최대 −0.448m), 그리고 **조향 포화가 16%→48%**.
+        #   곡률비가 낮은 게 슬립이 아니라 조향각이 모자란 것이었다.
+        #
+        #   원인은 상한이 **진입 구간**에서 너무 세게 물린 것이다.
+        #     delta = atan(2·wb·sinη/L1) + α_f(a_lat = 2v²sinη/L1)
+        #   두 항 모두 1/L1 이라 L1 을 줄이면 조향 요구가 그대로 커지는데,
+        #   그보다 먼저 **선회 시작이 늦어진다**. L1/v 는 전방주시 '시간'이다:
+        #     코너#3 진입 3.25㎧ L1 1.54 → 0.47s (루프지연 290ms 의 1.6배)
+        #     코너#5 진입 3.60㎧ L1 1.37 → 0.38s (1.3배)  ★ 지연만큼만 앞을 본다
+        #   늦게 돌기 시작 → η 가 커짐 → 두 항이 함께 폭발 → max_steer 포화 →
+        #   제어 권한 소멸 → 바깥으로 밀림. 코너#5 가 제일 타이트(κ 0.73)하면서
+        #   진입 속도도 제일 높아 둘이 겹쳤다.
+        #
+        #   l1_curv_k 를 올려 푸는 건 안 된다 — 코너 본체까지 같이 풀려서
+        #   큰 코너의 성과가 되돌아간다 (재생: 1.3 으로 올리면 코너 L1
+        #   1.32→1.71, 치우침 0.092→0.155). 속도가 붙은 진입만 풀어야 한다.
+        #   l1_k 가 원래 시간상수(0.75s)이니 하한도 시간으로 건다.
+        #
+        #   0.50s 는 임의값이 아니다 — 실패한 주행에 재생해서 **코너 본체의
+        #   L1(1.32)을 건드리지 않는 최대값**으로 골랐다:
+        #     tmin   #3진입 #3코너  #5진입 #5코너  진입L1/v  큰코너 치우침
+        #     0.00    1.54   1.32    1.37   1.52    0.34s      0.092  ← 지금(밀림)
+        #     0.50    1.83   1.32    1.99   1.66    0.50s      0.092  ← 성과 유지
+        #     0.55    2.01   1.40    1.78   1.78    0.55s      0.105  ← 깎이기 시작
+        #   0.50s = 루프지연 290ms 의 1.7배. (상한 끔이었을 때 #5 진입은 2.98m)
+        self.declare_parameter('l1_curv_tmin', 0.50)
 
         # ── 차량 동역학 ─────────────────────────────────────────────────
         # ★ mass/lf/lr 은 조향 결과에 영향을 주지 않는다 — F_yf/(mu·Fzf) 를 계산할
@@ -324,6 +386,8 @@ class MapController(Node):
         self._fr_warned = False
         self._fr_spd    = 1.0     # 속도 스케일 (1대1). 타임아웃이면 1.0 으로 복귀
         self._fr_spd_t  = None
+        self._fr_diag   = {k: float('nan') for k in FRENET_DIAG_KEYS}
+        self._loc_residual = float('nan')
         if bool(self.p('frenet_enabled')):
             self.create_subscription(Float64, '/frenet/offset',
                                      self._frenet_cb, 10)
@@ -332,6 +396,10 @@ class MapController(Node):
             #   1.0 으로 돌아간다 — 오프셋과 같은 타임아웃 폴백 규약.
             self.create_subscription(Float64, '/frenet/speed_scale',
                                      self._frenet_spd_cb, 10)
+            self.create_subscription(Float64MultiArray, '/frenet/diag',
+                                     self._frenet_diag_cb, 10)
+        self.create_subscription(Float32, '/loc/residual',
+                                 self._loc_residual_cb, 10)
 
         # 제어·발행을 50Hz 로 고정한다. AMCL 콜백에 걸어두면 주기가 들쭉날쭉하고
         # (2.5cm 이동마다) 정지 상태에서는 아예 돌지 않는다.
@@ -444,8 +512,11 @@ class MapController(Node):
             #   여기가 '+' 로 찍혀 있어서 로그만 보고 L1 을 2배로 오해했다.
             #   바로 위 주석이 "적용된 값은 여기서 확인할 것" 이라고 해놓고
             #   정작 이 줄이 거짓말을 하고 있었다.
-            f"  조향 l1=max({self.p('l1_min'):.3f}, {self.p('l1_k'):.3f}·v)  "
-            f"alpha={a:.3f}(τ{tau*1000:.0f}ms)  slip_gain={self.p('slip_gain'):.2f}  "
+            f"  조향 l1=max({self.p('l1_min'):.3f}, {self.p('l1_k'):.3f}·v)"
+            + (f"→코너상한 max({self.p('l1_curv_tmin'):.2f}·v, "
+               f"{self.p('l1_curv_k'):.2f}/|κ|)  "
+               if float(self.p('l1_curv_k')) > 0.0 else "  (코너상한 끔)  ")
+            + f"alpha={a:.3f}(τ{tau*1000:.0f}ms)  slip_gain={self.p('slip_gain'):.2f}  "
             f"speed_lag={self.p('speed_lag'):.2f}s  max_steer={self.p('max_steer'):.3f}")
         return v
 
@@ -517,6 +588,12 @@ class MapController(Node):
             self._fr_warned = False
             self.get_logger().info('frenet 오프셋 수신 재개')
 
+    def _frenet_diag_cb(self, msg: Float64MultiArray):
+        self._fr_diag = unpack_frenet_diag(msg.data)
+
+    def _loc_residual_cb(self, msg: Float32):
+        self._loc_residual = float(msg.data)
+
     def _frenet_shift(self, goal, near):
         """목표점을 경로 법선 방향으로 램프된 오프셋만큼 민다.
 
@@ -565,9 +642,37 @@ class MapController(Node):
         left = np.array([-tang[1], tang[0]]) / tn
         return goal + self._fr_shift * left
 
-    def _steer_map(self, pos, yaw, goal) -> float:
+    def _l1(self, v) -> float:
+        """전방주시거리. 코너에서는 곡률로 상한을 건다 (선언부 주석 참고).
+
+        ★ 조준점을 찾을 때(_find_lookahead)와 조향을 계산할 때(_steer_map)가
+          **반드시 같은 L1** 이어야 한다. delta = atan(2·wb·sin η / L1) 의 η 는
+          그 L1 로 찍은 점에서 나온 것이라, 둘이 어긋나면 기하가 깨진다.
+          그래서 tick 에서 한 번 구해 두 곳에 넘긴다.
+        """
+        L1 = max(float(self.p('l1_min')), float(self.p('l1_k')) * float(v))
+        ck = float(self.p('l1_curv_k'))
+        # wp 로드 실패 시 _curvature 는 아예 없다 (위 else 절에서만 만든다)
+        kap = getattr(self, '_curvature', None)
+        if ck <= 0.0 or kap is None or self.wp is None or len(self.wp) == 0:
+            return L1
+        n = len(self.wp)
+        # 지금부터 L1 앞까지 — 조준점이 닿는 범위의 최대 곡률
+        span = max(1, int(round(L1 / max(self._wp_ds, 1e-3))))
+        idx = (int(self._near_idx) + np.arange(span + 1)) % n
+        kmax = float(np.max(kap[idx]))
+        if kmax < 1e-4:
+            return L1
+        # 상한은 l1_min 과 **시간 하한** 아래로는 못 내려간다.
+        # 시간 하한이 없으면 진입 구간에서 L1/v 가 루프지연까지 내려가 조향이
+        # 포화된다 (선언부 주석 — 2026-08-16 실차에서 바깥으로 밀렸다).
+        cap = max(float(self.p('l1_min')),
+                  float(self.p('l1_curv_tmin')) * float(v),
+                  ck / kmax)
+        return min(L1, cap)
+
+    def _steer_map(self, pos, yaw, goal, L1) -> float:
         v = max(self.speed, 0.3)
-        L1 = max(float(self.p('l1_min')), float(self.p('l1_k')) * v)
 
         dx, dy = goal[0] - pos[0], goal[1] - pos[1]
         bearing = math.atan2(dy, dx) - yaw
@@ -814,7 +919,7 @@ class MapController(Node):
         self.yaw = yaw
 
         v = max(self.speed, 0.3)
-        L1 = max(float(self.p('l1_min')), float(self.p('l1_k')) * v)
+        L1 = self._l1(v)
 
         goal, near = self._find_lookahead(self.pos, L1, yaw)
         if goal is None:
@@ -822,7 +927,7 @@ class MapController(Node):
             return
 
         goal = self._frenet_shift(goal, near)
-        steer = self._steer_map(self.pos, yaw, goal)
+        steer = self._steer_map(self.pos, yaw, goal, L1)
         a = float(self.p('steer_alpha'))
         steer = a * self._steer_prev + (1.0 - a) * steer
         self._steer_prev = steer
@@ -844,7 +949,7 @@ class MapController(Node):
             speed = v_lock
 
         self.get_logger().info(
-            f'[MAP] κ={self._curvature[near]:.3f}  '
+            f'[MAP] κ={self._curvature[near]:.3f}  L1={L1:.2f}  '
             f'steer={math.degrees(steer):.1f}°  spd={speed:.2f}m/s  '
             f'(실측 {self.speed:.2f})',
             throttle_duration_sec=0.5)
@@ -933,8 +1038,10 @@ class MapController(Node):
         self._last_trail = (x, y)
         now = self.get_clock().now()
         t = (now - self._run_t0).nanoseconds / 1e9
-        self._trail_log.append((t, x, y, float(speed_meas), float(steer),
-                                float(cmd_v), float(self.yaw), int(near)))
+        self._trail_log.append((
+            t, x, y, float(speed_meas), float(steer),
+            float(cmd_v), float(self.yaw), int(near),
+            dict(self._fr_diag), float(self._loc_residual)))
         if len(self._trail_log) > 3000:
             self._trail_log.pop(0)
 
@@ -964,11 +1071,18 @@ class MapController(Node):
                 # steer/cmd_v/yaw 는 2026-08-09 추가 — 진동(제어 루프)과
                 # 속도 추종 지연을 사후에 가리려면 지령 신호가 있어야 한다.
                 # speed = **실측**(odom), cmd_v = **지령**(프로파일). 헷갈리지 말 것.
-                w.writerow(['t', 'x', 'y', 'speed', 'steer', 'cmd_v', 'yaw', 'near'])
+                w.writerow(
+                    ['t', 'x', 'y', 'speed', 'steer', 'cmd_v', 'yaw', 'near',
+                     'loc_residual'] + list(FRENET_DIAG_KEYS))
                 for r in self._trail_log:
-                    w.writerow([f'{r[0]:.3f}', f'{r[1]:.4f}', f'{r[2]:.4f}',
-                                f'{r[3]:.3f}', f'{r[4]:.4f}', f'{r[5]:.3f}',
-                                f'{r[6]:.4f}', r[7]])
+                    t, x, y, spd, st, cv, yaw, near, diag, loc = r
+                    row = [f'{t:.3f}', f'{x:.4f}', f'{y:.4f}',
+                           f'{spd:.3f}', f'{st:.4f}', f'{cv:.3f}',
+                           f'{yaw:.4f}', near, f'{loc:.4f}']
+                    for k in FRENET_DIAG_KEYS:
+                        v = (diag or {}).get(k, float('nan'))
+                        row.append('' if v != v else f'{float(v):.4f}')  # NaN → 빈칸
+                    w.writerow(row)
 
             # ★ race_script.yaml + 차량 오버레이를 함께 남긴다.
             #   오버레이가 빠지면 스냅샷이 조용히 거짓말을 한다 (2026-08-11).
