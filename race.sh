@@ -517,6 +517,18 @@ case "$CMD" in
     else
       exec python3 -m race_stack.gen_raceline "${@:2}"
     fi ;;
+  line2)
+    # 열린 야외 공간용 경로 생성기 (gen_raceline_2).
+    # inner/outer 경계 불필요 — 맵 위에 클릭으로 경유점을 찍으면
+    # 장애물에서 밀어내며 부드럽게 정제한 웨이포인트를 만든다.
+    # 닫힌 루프도 가능: --closed 또는 GUI 에서 c 키 토글.
+    NAME=${2:-}
+    export PYTHONPATH="$SCRIPT_DIR/src/race_stack:${PYTHONPATH:-}"
+    if [ -n "$NAME" ]; then
+      exec python3 -m race_stack.gen_raceline_2 --map "$NAME" "${@:3}"
+    else
+      exec python3 -m race_stack.gen_raceline_2 "${@:2}"
+    fi ;;
   waypoints)
     NAME=${2:-}
     if [ -n "$NAME" ]; then
