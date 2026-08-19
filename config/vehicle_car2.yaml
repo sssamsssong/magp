@@ -206,7 +206,7 @@ tuning:
   #
   #   ※ default 키는 두지 말 것 — 네 모드가 다 있으면 영원히 안 읽히는데 값만
   #     남아 손대게 된다 (docs/grip_util_shadowing.md).
-  grip_util: {q1: 0.2, q2: 0.35, q3: 0.2, race: 0.2}
+  grip_util: {q1: 0.2, q2: 0.5, q3: 0.2, race: 0.2}
 
 joystick:
   # ✅ 2026-08-10 실차 확인: false 가 맞다 (스틱 좌 = 앞바퀴 좌).
