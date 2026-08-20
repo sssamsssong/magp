@@ -10,6 +10,9 @@
 #                              컨트롤러 생략 시 yaml의 controller 값 사용
 #                              (auto | stanley | pure_pursuit | gap_follower | map)
 #                              예: ./race.sh q1 pure_pursuit
+#    ./race.sh 10laprace [컨트롤러]  ★ 1대1 경주 10바퀴 (mode=race, laps=10)
+#                              race 와 완전히 같은 스택이고 바퀴수만 다르다.
+#                              race_script.yaml 은 건드리지 않는다 (laps:= 인자)
 #    ./race.sh box [모드]      ★ 박스 위 벤치 테스트 — 바퀴를 돌리지 않는다.
 #                              실주행과 동일한 스택(맵/AMCL/LiDAR/컨트롤러)을 띄우되
 #                              속도만 0. 토픽 통신·RViz 표시·조향 서보 확인용.
@@ -669,6 +672,23 @@ PYEOF
     echo "[race.sh]   ⚠ 그 줄이 없으면 즉시 Ctrl+C — 속도 강제가 안 걸린 것입니다."
     echo "[race.sh]   새 맵 정렬: 노트북 ./rviz.sh → 2D Pose Estimate → ./race.sh savepose"
     ;;
+  10laprace)
+    # 1대1 경주 10바퀴. race 와 **완전히 같은 스택**이고 바퀴수만 다르다.
+    #
+    # ★ race_script.yaml 의 mission.laps 를 건드리지 않는다. 대회장에서 모드를
+    #   오갈 때마다 파일을 고치면 되돌리는 걸 잊는다 — 이 저장소가 map_name 으로
+    #   이미 겪었다. launch 인자(laps:=)로만 넘겨서 파일은 그대로 둔다.
+    # ★ mode 는 race 그대로다. mode 는 컨트롤러·frenet·ot_zone·grip_util 을
+    #   전부 고르는 값이라, 새 이름을 만들면 그 넷을 다 따라 정의해야 한다.
+    MODE=race
+    LAPS=10
+    CTRL=${2:-}
+    case "$CTRL" in
+      ""|auto|stanley|pure_pursuit|gap_follower|map) ;;
+      * ) echo "알 수 없는 컨트롤러: $CTRL  (auto|stanley|pure_pursuit|gap_follower|map)"; exit 1 ;;
+    esac
+    echo "[race.sh] 1대1 경주 — ${LAPS}바퀴 완주 후 자동 정지 (mode=race)"
+    ;;
   q1|q2|q3|race)
     MODE=$CMD
     CTRL=${2:-}   # 두 번째 인자로 컨트롤러 오버라이드 (yaml 수정 불필요)
@@ -829,7 +849,7 @@ elif [ "$RECORD_BAG" = "1" ]; then
     trap 'kill -INT $BAG_PID 2>/dev/null; ( sleep 3; kill -9 $BAG_PID 2>/dev/null ) & wait $BAG_PID 2>/dev/null; commit_logs' EXIT INT TERM
 
     ros2 launch race_stack race.launch.py mode:=$MODE \
-        ${CTRL:+controller:=$CTRL} ${BENCH:+bench:=true} || true
+        ${CTRL:+controller:=$CTRL} ${BENCH:+bench:=true} ${LAPS:+laps:=$LAPS} || true
 
     kill -INT $BAG_PID 2>/dev/null || true
     wait $BAG_PID 2>/dev/null || true
@@ -840,7 +860,7 @@ elif [ -n "${BENCH:-}" ]; then
     # 함께 띄우는 joy_node+joy_teleop 은 /teleop 으로 따로 나가 그 경로를 우회한다.
     # 그래서 조이스틱 노드 자체를 죽인다 — box 는 조이스틱을 쓸 이유가 없다.
     ros2 launch race_stack race.launch.py mode:=$MODE \
-        ${CTRL:+controller:=$CTRL} bench:=true &
+        ${CTRL:+controller:=$CTRL} bench:=true ${LAPS:+laps:=$LAPS} &
     LAUNCH_PID=$!
     trap "kill $LAUNCH_PID 2>/dev/null; pkill -9 -f '[j]oy_teleop' 2>/dev/null" EXIT
     bench_kill_joy
@@ -849,5 +869,5 @@ else
     # exec 하면 셸이 교체돼 Ctrl+C 뒤 로그 커밋을 못 한다.
     trap commit_logs EXIT
     ros2 launch race_stack race.launch.py mode:=$MODE \
-        ${CTRL:+controller:=$CTRL} || true
+        ${CTRL:+controller:=$CTRL} ${LAPS:+laps:=$LAPS} || true
 fi

@@ -62,6 +62,7 @@ def generate_launch_description():
     mode = cfg['mode']
     controller = cfg.get('controller', 'auto')
     bench = False
+    laps_arg = None      # laps:= 로 넘어오면 mission.laps 를 이긴다
     for a in sys.argv:
         if a.startswith('mode:='):
             mode = a.split(':=')[1]
@@ -69,6 +70,11 @@ def generate_launch_description():
             controller = a.split(':=')[1]
         elif a.startswith('bench:='):
             bench = a.split(':=')[1].lower() in ('true', '1', 'yes')
+        elif a.startswith('laps:='):
+            # ./race.sh 10laprace 처럼 **모드는 그대로 두고 바퀴수만** 바꾸는 경우.
+            # yaml(mission.laps)을 건드리지 않는 게 핵심이다 — 대회장에서 모드를
+            # 오갈 때마다 파일을 고치면 되돌리는 걸 잊는다.
+            laps_arg = int(a.split(':=')[1])
     if mode not in DEFAULT_CONTROLLER:
         raise RuntimeError(f'race.launch.py: 잘못된 mode "{mode}"')
 
@@ -332,6 +338,8 @@ def generate_launch_description():
     m = cfg['mission']
     time_limit = int(m.get('time_limit_sec', 0))
     laps = int(m.get('laps', 0))
+    if laps_arg is not None:
+        laps = laps_arg    # ./race.sh 10laprace → laps:=10. yaml 은 안 건드린다
     if mode == 'q3' and time_limit == 0:
         time_limit = 120   # Q3 규정: 2분
     if bench:
