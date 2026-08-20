@@ -188,7 +188,7 @@ tuning:
   l1_min: 1.20
   # 직선 고속(3.6m/s)에서 L1 2.7m 는 적절하다 — 여기는 건드리지 않는다.
   l1_k:   0.75
-  steer_alpha: 0.555     # ★ 50Hz 루프 기준 시정수 34ms. 주기가 다르면 환산할 것
+  steer_alpha: 0.65      # ★ 50Hz 루프 기준 시정수 34ms. 주기가 다르면 환산할 것
   slip_gain:   0.5
   speed_lag:   0.40
   a_lon_acc:   0.0
@@ -217,7 +217,7 @@ tuning:
   #
   #   ※ default 키는 두지 말 것 — 네 모드가 다 있으면 영원히 안 읽히는데 값만
   #     남아 손대게 된다 (docs/grip_util_shadowing.md).
-  grip_util: {q1: 0.2, q2: 0.75, q3: 0.2, race: 0.2}
+  grip_util: {q1: 0.2, q2: 0.75, q3: 0.2, race: 0.5}
 
 joystick:
   # ✅ 2026-08-10 실차 확인: false 가 맞다 (스틱 좌 = 앞바퀴 좌).
