@@ -2047,7 +2047,19 @@ class ObstacleAvoidMixin:
 
     @property
     def _avoid_active(self) -> bool:
-        """Q2 정적 장애물과 race 1v1 상대 모두 같은 검출기를 쓴다."""
+        """Q2 정적 장애물과 race 1v1 상대 모두 같은 검출기를 쓴다.
+
+        ★ 2026-08-21 — 예선 시퀀서(mode='quali')는 mode 가 'quali' 로 **고정된
+          채** 단계마다 `avoid_enabled` 로 회피를 껐다 켠다. 여기서 mode 만
+          보면 'quali' 는 ('q2','race') 어디에도 안 들어가 스캔 콜백이 첫 줄에서
+          return 해버린다 → Q2 단계에서 avoid_enabled 를 켜도 **장애물이 영원히
+          검출되지 않고 offset 은 0 으로 고정**된다. 2026-08-13 의 race 미검출과
+          똑같이, 노드는 살아 있고 로그도 정상인 침묵형 버그다.
+          그래서 `avoid_enabled` 가 선언된 노드(frenet_planner)에서는 그 값이
+          mode 를 이긴다. 선언 안 된 노드(stanley_controller)는 종전대로.
+        """
+        if self.has_parameter('avoid_enabled'):
+            return bool(self.get_parameter('avoid_enabled').value)
         return self.mode in ('q2', 'race')
 
     def _update_lane_free(self):

@@ -23,7 +23,12 @@ from ament_index_python.packages import get_package_share_directory
 #   빠르지 않고, 회피 후 최적경로로 돌아오지도 않는다. 1대1 은
 #   "레이싱라인 + 동적 회피" 여야 하므로 map + frenet_planner 조합을 쓴다.
 DEFAULT_CONTROLLER = {'q1': 'pure_pursuit', 'q2': 'gap_follower',
-                      'q3': 'pure_pursuit', 'race': 'map'}
+                      'q3': 'pure_pursuit', 'race': 'map',
+                      # 'quali' = Q1→buffer→Q2→buffer→Q3 시퀀서(mission_manager
+                      # 가 단계마다 grip_util/avoid_enabled 를 실시간으로 바꾼다).
+                      # 'buffer' = 단계 사이 저속 이동 랩을 단독으로 테스트할 때.
+                      # 컨트롤러는 항상 'map' — controller: auto 일 때만 의미 있음.
+                      'quali': 'map', 'buffer': 'map'}
 
 # 'map' = MAP(Model-based Adaptive Pure pursuit) 컨트롤러. 트랙 맵(map_name)과
 # 무관한 알고리즘 이름이다 — race_script.yaml 의 [map] 절 참조.
@@ -91,7 +96,11 @@ def generate_launch_description():
     _lim = cfg.get('limits', {})
     _mp0 = cfg.get('map', {})
     _gu  = _lim.get('grip_util', 0.6)
-    grip_util = float(_gu.get(mode, _gu.get('default', 0.6))
+    # ★ 'quali'(예선 시퀀서)는 Q1 에서 시작하므로 launch 시점 기본값도 q1 을
+    #   쓴다 — 실제로는 mission_manager 가 출발 즉시 /set_parameters 로
+    #   단계별 값을 덮어쓰니 이건 그 전 짧은 순간의 폴백일 뿐이다.
+    _gu_mode = 'q1' if mode == 'quali' else mode
+    grip_util = float(_gu.get(_gu_mode, _gu.get('default', 0.6))
                       if isinstance(_gu, dict) else _gu)
     a_lon_acc = float(_lim.get('a_lon_acc', 0.0))
     a_lon_brk = float(_lim.get('a_lon_brk', 0.0))
@@ -342,6 +351,8 @@ def generate_launch_description():
         laps = laps_arg    # ./race.sh 10laprace → laps:=10. yaml 은 안 건드린다
     if mode == 'q3' and time_limit == 0:
         time_limit = 120   # Q3 규정: 2분
+    if mode == 'buffer' and laps == 0:
+        laps = 1           # buffer 단독 실행 시 기본 1랩
     if bench:
         # 자동 정지 없음 — bench 는 사람이 Ctrl+C 로 끝낸다.
         laps = 0
@@ -379,7 +390,21 @@ def generate_launch_description():
                      'start_key':    bool(m.get('start_key',    True)),
                      'start_x': _start_x,
                      'start_y': _start_y,
-                     'start_radius': float(m.get('start_radius', 1.5))}]))
+                     'start_radius': float(m.get('start_radius', 1.5)),
+                     # ── 예선 시퀀서 (mode='quali' 일 때만 의미 있음) ──────
+                     #   grip_util 은 limits.grip_util 의 모드 키를 그대로 쓴다
+                     #   — 여기서 새 숫자를 만들면 단독 ./race.sh q1 과 시퀀서
+                     #   안의 Q1 이 다른 속도로 달리게 된다.
+                     'sequence_enabled':    mode == 'quali',
+                     'seq_grip_util_q1':     float(_gu.get('q1',     0.3) if isinstance(_gu, dict) else _gu),
+                     'seq_grip_util_buffer': float(_gu.get('buffer', 0.15) if isinstance(_gu, dict) else 0.15),
+                     'seq_grip_util_q2':     float(_gu.get('q2',     0.5) if isinstance(_gu, dict) else _gu),
+                     'seq_grip_util_q3':     float(_gu.get('q3',     0.7) if isinstance(_gu, dict) else _gu),
+                     'seq_laps_q1':          int(m.get('seq_laps_q1',     3)),
+                     'seq_laps_buffer':      int(m.get('seq_laps_buffer', 1)),
+                     'seq_laps_q2':          int(m.get('seq_laps_q2',     3)),
+                     'seq_time_q3':          int(m.get('seq_time_q3',     120)),
+                     }]))
 
     # ---------- 4. 안전장치 (AEB) ----------
     s = cfg.get('safety', {})
@@ -652,13 +677,22 @@ def generate_launch_description():
         #   1.8·L1/√2 ≈ 1.15m (L1=0.9m) 를 달려야 하는데, Stanley 기준으로 맞춰둔
         #   0.8m 를 그대로 쓰면 다 피하기 전에 장애물에 닿는다. 경험칙은
         #   **호라이즌 ≥ 2 × L1**. per_controller 에서 덮어쓴다.
-        if bool(fr.get('enabled', True)) and mode in ('q2', 'race'):
+        # ★ 2026-08-21 — mode 로 launch 여부를 가르지 않고 **항상 띄운다.**
+        #   예선 시퀀서(mission_manager)가 한 프로세스 안에서 Q1→Q2→Q3 를
+        #   이어가려면 launch 시점이 아니라 실행 중에 회피를 껐다 켰다 해야
+        #   하는데, ROS2 launch 는 그걸 지원하지 않는다 — 노드는 항상 켜두고
+        #   `avoid_enabled` 파라미터로 토글한다 (frenet_planner.py 참고).
+        #   fr.enabled=False 면 여전히 완전히 안 띄운다 (전체 킬스위치).
+        if bool(fr.get('enabled', True)):
             l1m = float(mp.get('l1_min', 0.90))
             nodes.append(Node(
                 package='race_stack', executable='frenet_planner',
                 name='frenet_planner', output='screen',
                 parameters=[{
                     'mode':          mode,
+                    # 단독 실행(./race.sh q1 등) 시의 기본값. 예선 시퀀서는
+                    # 이 초기값과 무관하게 단계마다 /set_parameters 로 덮는다.
+                    'avoid_enabled': mode in ('q2', 'race'),
                     'waypoints_csv': wp_csv,
                     'map_yaml':      map_yaml,
                     'odom_topic':    odom_topic,

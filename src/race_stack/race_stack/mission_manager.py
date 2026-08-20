@@ -18,6 +18,8 @@ from geometry_msgs.msg import PoseWithCovarianceStamped
 from ackermann_msgs.msg import AckermannDriveStamped
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool, Float32, Int32
+from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
 
 
 class MissionManager(Node):
@@ -25,6 +27,21 @@ class MissionManager(Node):
         super().__init__('mission_manager')
         self.declare_parameter('laps', 0)            # 0 = 무제한
         self.declare_parameter('time_limit_sec', 0)  # 0 = 무제한
+
+        # ── 예선 시퀀스 (2026-08-21, car1 d285065 이식) ────────────────────
+        # Q1→buffer→Q2→buffer→Q3 를 **한 프로세스 안에서** 이어간다. 사람이
+        # 단계마다 다시 눌러줘야 하면 그 자체로 Fully Autonomous(규정 5.5)가
+        # 깨지므로 자동 진행이 필수다. 단계 전환마다 map_controller 의
+        # grip_util 과 frenet_planner 의 avoid_enabled 를 /set_parameters 로 바꾼다.
+        self.declare_parameter('sequence_enabled',    False)
+        self.declare_parameter('seq_grip_util_q1',     0.3)
+        self.declare_parameter('seq_grip_util_buffer', 0.15)
+        self.declare_parameter('seq_grip_util_q2',     0.5)
+        self.declare_parameter('seq_grip_util_q3',     0.7)
+        self.declare_parameter('seq_laps_q1',          3)
+        self.declare_parameter('seq_laps_buffer',      1)
+        self.declare_parameter('seq_laps_q2',          3)
+        self.declare_parameter('seq_time_q3',          120)
         self.declare_parameter('start_x', 0.0)
         self.declare_parameter('start_y', 0.0)
         self.declare_parameter('start_radius', 1.5)
@@ -54,6 +71,42 @@ class MissionManager(Node):
         self.start_time = self.get_clock().now()
         self.finished = False
         self.lap_start = self.start_time
+        # ★ 단계 제한시간 기준. lap_start 와 **반드시 별개**여야 한다 —
+        #   lap_start 는 랩이 끝날 때마다 갱신되므로(개별 랩타임 표시용),
+        #   Q3 처럼 랩이 아니라 시간이 기준인 단계에서 그걸 쓰면 랩이 끝날
+        #   때마다 제한시간이 다시 시작된다.
+        self.stage_start = self.start_time
+
+        # ── 예선 시퀀스 상태 ───────────────────────────────────────────
+        self.seq_enabled = bool(self.p('sequence_enabled'))
+        self.seq = []
+        self.stage_idx = 0
+        self.map_cli = self.fr_cli = None
+        if self.seq_enabled:
+            self.seq = [
+                {'name': 'Q1',      'laps': int(self.p('seq_laps_q1')),
+                 'time_limit': 0, 'grip_util': float(self.p('seq_grip_util_q1')),
+                 'avoid': False},
+                {'name': 'BUFFER1', 'laps': int(self.p('seq_laps_buffer')),
+                 'time_limit': 0, 'grip_util': float(self.p('seq_grip_util_buffer')),
+                 'avoid': False},
+                {'name': 'Q2',      'laps': int(self.p('seq_laps_q2')),
+                 'time_limit': 0, 'grip_util': float(self.p('seq_grip_util_q2')),
+                 'avoid': True},
+                {'name': 'BUFFER2', 'laps': int(self.p('seq_laps_buffer')),
+                 'time_limit': 0, 'grip_util': float(self.p('seq_grip_util_buffer')),
+                 'avoid': False},
+                {'name': 'Q3',      'laps': 0,
+                 'time_limit': int(self.p('seq_time_q3')),
+                 'grip_util': float(self.p('seq_grip_util_q3')),
+                 'avoid': False},
+            ]
+            # map_controller / frenet_planner 가 **항상 떠 있다**고 가정한다
+            # (race.launch.py 가 quali 에서 둘 다 띄운다).
+            self.map_cli = self.create_client(SetParameters,
+                                              '/map_controller/set_parameters')
+            self.fr_cli  = self.create_client(SetParameters,
+                                              '/frenet_planner/set_parameters')
 
         # ── 출발 게이트 상태 ───────────────────────────────────────────
         self.gate = bool(self.p('start_gate'))
@@ -220,6 +273,12 @@ class MissionManager(Node):
         # 랩타임·제한시간은 기동 시각이 아니라 **출발 시각**부터 센다
         self.start_time = self.get_clock().now()
         self.lap_start = self.start_time
+        self.stage_start = self.start_time   # 단계 제한시간 기준 (lap_start 와 별개)
+        if self.seq_enabled and self.seq:
+            self.stage_idx = 0
+            stage = self.seq[0]
+            self.get_logger().info(f'════════ 예선 시퀀스 — {stage["name"]} ════════')
+            self._apply_stage_params(stage)
         if not self._amcl_ok:
             self.get_logger().warn(
                 '⚠ AMCL pose 미수신 상태로 출발합니다 — init_pose 가정으로 달립니다')
@@ -249,7 +308,22 @@ class MissionManager(Node):
 
     def check_time(self):
         tl = self.p('time_limit_sec')
-        if self.finished or not self.started or tl <= 0:
+        if self.finished or not self.started:
+            return
+        if self.seq_enabled and self.seq:
+            stage = self.seq[self.stage_idx]
+            tl = stage['time_limit']
+            if tl <= 0:
+                return                       # 이 단계는 랩 기준이다
+            # ★ lap_start 가 아니라 stage_start 를 쓴다 — lap_start 는 랩이 끝날
+            #   때마다 갱신돼서, Q3 처럼 시간이 기준인 단계에서 그걸 쓰면 랩이
+            #   끝날 때마다 제한시간이 다시 시작된다.
+            elapsed = (self.get_clock().now() - self.stage_start).nanoseconds * 1e-9
+            if elapsed >= tl:
+                self.get_logger().info(f'[{stage["name"]}] 제한시간 {tl}s 도달')
+                self._advance_stage()
+            return
+        if tl <= 0:
             return
         elapsed = (self.get_clock().now() - self.start_time).nanoseconds * 1e-9
         if elapsed >= tl:
@@ -278,10 +352,59 @@ class MissionManager(Node):
             self.lap_start = now
             self.lap_pub.publish(Int32(data=self.lap))
             self.get_logger().info(f'LAP {self.lap} 완료! ({lap_time:.2f}s)')
-            if 0 < self.p('laps') <= self.lap:
+            if self.seq_enabled and self.seq:
+                stage = self.seq[self.stage_idx]
+                if stage['laps'] > 0 and self.lap >= stage['laps']:
+                    self._advance_stage()
+            elif 0 < self.p('laps') <= self.lap:
                 self.get_logger().info('목표 랩수 완주 → 정지')
                 self.finish()
         self.inside = inside_now
+
+    # ── 예선 시퀀스 ──────────────────────────────────────────────────────
+
+    def _advance_stage(self):
+        """현재 단계를 끝내고 다음 단계로. 마지막 단계면 진짜로 정지한다."""
+        self.stage_idx += 1
+        if self.stage_idx >= len(self.seq):
+            self.get_logger().info('예선 시퀀스 전체 완료 → 정지')
+            self.finish()
+            return
+        stage = self.seq[self.stage_idx]
+        self.lap = 0
+        self.armed = False           # 다음 랩을 세기 전에 출발선을 한 번 벗어나야 한다
+        now = self.get_clock().now()
+        self.lap_start = now
+        self.stage_start = now
+        self.get_logger().info(f'════════ 다음 단계 — {stage["name"]} ════════')
+        self._apply_stage_params(stage)
+
+    def _apply_stage_params(self, stage: dict):
+        self._set_remote_param(self.map_cli, 'grip_util', float(stage['grip_util']))
+        self._set_remote_param(self.fr_cli, 'avoid_enabled', bool(stage['avoid']))
+
+    def _set_remote_param(self, cli, name: str, value):
+        """다른 노드에 /set_parameters 로 값을 하나 쏜다 (비동기, 응답 대기 안 함).
+
+        ⚠ 응답을 안 기다리므로 단계 전환 직후 한두 틱은 옛 값으로 달릴 수 있다.
+          기다리면 이 콜백이 블록돼 랩 카운트가 밀리므로 비동기를 택했다.
+        """
+        if cli is None:
+            return
+        if not cli.service_is_ready():
+            self.get_logger().warn(
+                f'{cli.srv_name} 서비스가 아직 안 떠서 {name} 적용을 건너뜀 '
+                f'— 그 노드가 늦게 뜨는지 확인할 것')
+            return
+        if isinstance(value, bool):
+            pv = ParameterValue(type=ParameterType.PARAMETER_BOOL, bool_value=value)
+        else:
+            pv = ParameterValue(type=ParameterType.PARAMETER_DOUBLE,
+                                double_value=float(value))
+        req = SetParameters.Request()
+        req.parameters = [Parameter(name=name, value=pv)]
+        cli.call_async(req)
+        self.get_logger().info(f'{cli.srv_name} {name} → {value}')
 
     def finish(self):
         self.finished = True

@@ -52,6 +52,7 @@ import numpy as np
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.qos import DurabilityPolicy, QoSProfile
 
 from ackermann_msgs.msg import AckermannDriveStamped
@@ -342,6 +343,13 @@ class MapController(Node):
             self._curvature = self._compute_curvature()
             self._v_profile = self._compute_speed_profile()
         self._pac_alpha_lut, self._pac_Fy_lut = self._pacejka_lut()
+
+        # ── grip_util 실시간 재설정 (예선 시퀀서용, 2026-08-21 car1 d285065 이식) ──
+        #   mission_manager 가 Q1→buffer→Q2→buffer→Q3 를 한 프로세스 안에서
+        #   이어가려면 단계마다 grip_util 을 바꿔야 하는데, 이 컨트롤러는 기동 시
+        #   **한 번만** 속도 프로파일을 계산해뒀다. /set_parameters 로 grip_util 이
+        #   오면 그 자리에서 프로파일을 다시 계산한다.
+        self.add_on_set_parameters_callback(self._on_param_change)
         self._steer_lut_interp = None
         self._steer_lut_tree   = None
         self._steer_lut_pts    = None
@@ -479,12 +487,35 @@ class MapController(Node):
         return k
 
     # ── 사전 계산: 역방향 스윕 속도 프로파일 ───────────────────────────
-    def _compute_speed_profile(self):
-        """마찰원 결합 forward-backward. 로직은 speed_profile 모듈 (컨트롤러 공용)."""
+    def _on_param_change(self, params):
+        """/set_parameters 로 grip_util 이 오면 속도 프로파일을 즉시 재계산한다.
+
+        rclpy 는 이 콜백을 파라미터를 **저장하기 전에** 부른다 — 그래서
+        self.p('grip_util') 은 아직 옛 값이고, 새 값은 params 안의 Parameter
+        객체에서 직접 읽어야 한다. (그래서 _compute_speed_profile 이 인자를 받는다)
+        """
+        for prm in params:
+            if prm.name == 'grip_util' and self.wp is not None:
+                new_gu = float(prm.value)
+                old_gu = float(self.p('grip_util'))
+                self._v_profile = self._compute_speed_profile(grip_util=new_gu)
+                self.get_logger().info(
+                    f'grip_util {old_gu:.2f} → {new_gu:.2f} — 속도 프로파일 재계산')
+        return SetParametersResult(successful=True)
+
+    def _compute_speed_profile(self, grip_util=None):
+        """마찰원 결합 forward-backward. 로직은 speed_profile 모듈 (컨트롤러 공용).
+
+        grip_util 을 넘기면 그 값으로 계산한다 — 파라미터 콜백(_on_param_change)이
+        예선 시퀀서의 /set_parameters 로 grip_util 이 바뀐 순간, **아직 저장되기
+        전의** 새 값으로 즉시 재계산하려고 쓴다. rclpy 파라미터 콜백은 값을 저장하기
+        전에 호출되므로 그 시점의 self.p('grip_util') 은 아직 옛 값이다.
+        """
         v, info = solve_profile(
             self.wp[:, 0], self.wp[:, 1], self.wp[:, 2],
             mu_eff=float(self.p('mu')) * float(self.p('pac_d')),
-            grip_util=float(self.p('grip_util')),
+            grip_util=(float(grip_util) if grip_util is not None
+                       else float(self.p('grip_util'))),
             lf=float(self.p('lf')), lr=float(self.p('lr')),
             v_min=float(self.p('min_speed')),
             a_lon_acc=float(self.p('a_lon_acc')),

@@ -58,7 +58,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from race_stack.obstacle_avoid import (
     ObstacleAvoidMixin, _load_map, pack_frenet_diag, PLANNER_MODE_NAME,
-    BLOCKED, FOLLOW)
+    TRACK, BLOCKED, FOLLOW)
 
 LATCHED_IN = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
@@ -75,6 +75,13 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         d('odom_topic',    '/odom')
         d('rate_hz',       50.0)
         d('mode',          'q2')
+        # ★ 2026-08-21 (car1 d285065 이식) — 예선 시퀀서가 한 프로세스 안에서
+        #   Q1→Q2→Q3 를 이어가려면, 이 노드를 mode 로 launch 여부를 가르는 게
+        #   아니라 **항상 띄워두고 이 파라미터로 껐다 켰다** 해야 한다.
+        #   ROS2 launch 만으로는 실행 중에 노드를 새로 띄우고 내릴 수 없다.
+        #   꺼지면 offset=0 · TRACK · speed_scale=1.0 만 내고 계산은 전부 건너뛴다.
+        #   기본값 True 라 ./race.sh q2 / race 단독 실행은 예전과 동일하다.
+        d('avoid_enabled', True)
 
         # 라이다 장착 위치 (base_link 기준)
         d('laser_dx', 0.27)
@@ -448,6 +455,12 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
     # ── 본체 ─────────────────────────────────────────────────────────
     def _tick(self):
         if self.pos is None or self.wps is None:
+            return
+        if not bool(self.get_parameter('avoid_enabled').value):
+            # Q1/Q3/buffer 구간 — 회피 계산을 통째로 건너뛰고 중립값만 낸다.
+            m = Float64();  m.data = 0.0;           self.off_pub.publish(m)
+            s = Float64();  s.data = float(TRACK);  self.st_pub.publish(s)
+            sc = Float64(); sc.data = 1.0;          self.spd_pub.publish(sc)
             return
         # 유지 로직이 쓰는 현재 시각 (믹스인은 노드가 아니라 clock 이 없다)
         self._now_sec = self.get_clock().now().nanoseconds * 1e-9

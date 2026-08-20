@@ -10,6 +10,10 @@
 #                              컨트롤러 생략 시 yaml의 controller 값 사용
 #                              (auto | stanley | pure_pursuit | gap_follower | map)
 #                              예: ./race.sh q1 pure_pursuit
+#    ./race.sh quali           ★ 예선 시퀀서 — Q1→buffer→Q2→buffer→Q3 를
+#                              한 프로세스로 이어간다 (Fully Autonomous 용,
+#                              사람이 단계마다 다시 누를 필요 없음)
+#    ./race.sh buffer          단계 사이 저속 이동 랩만 단독 테스트
 #    ./race.sh 10laprace [컨트롤러]  ★ 1대1 경주 10바퀴 (mode=race, laps=10)
 #                              race 와 완전히 같은 스택이고 바퀴수만 다르다.
 #                              race_script.yaml 은 건드리지 않는다 (laps:= 인자)
@@ -689,7 +693,9 @@ PYEOF
     esac
     echo "[race.sh] 1대1 경주 — ${LAPS}바퀴 완주 후 자동 정지 (mode=race)"
     ;;
-  q1|q2|q3|race)
+  q1|q2|q3|race|quali|buffer)
+    # quali  = Q1→buffer→Q2→buffer→Q3 시퀀서 (mission_manager 가 자동 진행)
+    # buffer = 단계 사이 저속 이동 랩만 단독 테스트할 때
     MODE=$CMD
     CTRL=${2:-}   # 두 번째 인자로 컨트롤러 오버라이드 (yaml 수정 불필요)
     case "$CTRL" in

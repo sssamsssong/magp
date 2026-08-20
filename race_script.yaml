@@ -186,6 +186,7 @@ limits:
                             #     (아래 frenet 절)으로 버는 쪽이 맞다
     q3: 1.0                # 기록 주행
     race: 1.0               # 1대1
+    buffer: 0.15            # 예선 단계 사이 buffer lap — 장애물 설치/제거 중 저속 이동
 
   # 종방향 상한 [㎧²]. 0 = 물리에서 자동 유도:
   #   가속 — 후륜구동이라 후축 하중분율이 한계.  a = a_g · lf/L
@@ -1112,6 +1113,15 @@ mission:
   # ── 출발 게이트 — 스택을 미리 띄우고 신호에 맞춰 출발 ────────
   #    트리거: 터미널 Enter / 조이스틱 버튼 / ./race.sh go
   #    대기 중 AMCL 이 수렴할 시간이 생긴다. 상세: 개발현황.md 08/04
+  # ── 예선 시퀀서 (./race.sh quali, 2026-08-21) ─────────────────────
+  #   Q1→buffer→Q2→buffer→Q3 를 한 프로세스로 이어간다. 사람이 단계마다
+  #   다시 눌러줘야 하면 그 자체로 Fully Autonomous(5.5)가 깨지므로 필수.
+  #   grip_util 은 위 limits.grip_util 의 q1/q2/q3/buffer 값을 그대로 쓴다.
+  seq_laps_q1:     3    # 규정: Q1 3랩
+  seq_laps_buffer: 1    # 규정: 단계 사이 buffer lap 1바퀴
+  seq_laps_q2:     3    # 규정: Q2 3랩
+  seq_time_q3:     120  # 규정: Q3 2분
+
   start_gate: true          # false = 기동 즉시 출발
   start_button: 1           # 조이스틱 출발 버튼 (F710: A=0 B=1 X=2 Y=3)
   start_key: true           # 터미널 Enter 허용
