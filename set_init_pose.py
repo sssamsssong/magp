@@ -145,6 +145,62 @@ def write_values(pairs, dry=False):
     return done
 
 
+
+# ── 대화형 맵 선택 ──────────────────────────────────────────────
+def pick_map_interactive(cur_map, cur_wp):
+    """인자 없이 실행했을 때 맵 목록에서 고르게 한다.
+
+    gen_waypoints_kappa.select_map_interactive 와 같은 규약이다 — 번호나 이름을
+    받고, 그냥 Enter 면 race_script.yaml 의 현재 값을 쓴다.
+    """
+    maps = sorted({f.rsplit('.', 1)[0] for f in os.listdir(MAPS_DIR)
+                   if f.endswith(('.pgm', '.png')) and not f.endswith('_preview.png')})
+    if not maps:
+        sys.exit(f'맵이 없습니다: {MAPS_DIR}\n  ./race.sh savemap <이름> 으로 먼저 저장하세요.')
+
+    # ★ .csv 만 센다. 웨이포인트는 .csv 와 같은 이름의 .png(미리보기)가 쌍으로
+    #   있어서, 확장자만 떼면 같은 이름이 두 번 잡혀 개수가 두 배로 보인다.
+    wps = sorted(f[:-4] for f in os.listdir(WPS_DIR)
+                 if f.endswith('.csv')) if os.path.isdir(WPS_DIR) else []
+
+    print('\n' + '=' * 56)
+    print('  맵 선택   (Enter = 현재 설정 그대로)')
+    print('=' * 56)
+    for i, m in enumerate(maps, 1):
+        mark = ' ←현재' if m == cur_map else ''
+        n = sum(1 for w in wps if w.startswith(m))
+        print(f'  {i:3d}. {m:<28s} 웨이포인트 {n}개{mark}')
+    print('=' * 56)
+
+    while True:
+        v = input(f'맵 번호 또는 이름 [{cur_map or "없음"}]: ').strip()
+        if not v:
+            return cur_map, cur_wp
+        if v.isdigit() and 1 <= int(v) <= len(maps):
+            name = maps[int(v) - 1]
+        elif v in maps:
+            name = v
+        else:
+            print('  그런 맵이 없습니다. 다시.')
+            continue
+        # 그 맵으로 시작하는 웨이포인트를 찾아 준다 — 하나면 자동, 여럿이면 고르게
+        cand = [w for w in wps if w.startswith(name)]
+        if not cand:
+            print(f'  ⚠ {name} 로 시작하는 웨이포인트가 없습니다 (라인 없이 맵만 봅니다)')
+            return name, ''
+        if len(cand) == 1:
+            print(f'  웨이포인트: {cand[0]}')
+            return name, cand[0]
+        print('\n  웨이포인트 선택:')
+        for i, w in enumerate(cand, 1):
+            print(f'    {i:3d}. {w}')
+        while True:
+            v2 = input(f'  번호 [1]: ').strip() or '1'
+            if v2.isdigit() and 1 <= int(v2) <= len(cand):
+                return name, cand[int(v2) - 1]
+            print('    다시.')
+
+
 # ── 그리기 ──────────────────────────────────────────────────────
 def draw(img, res, ox, oy, H, W, wps, poses, title, out, show=False):
     """poses: [(x, y, yaw, color, label), ...] — extent 를 미터로 줘서 축에서 좌표를 바로 읽는다."""
@@ -308,6 +364,15 @@ def main():
                     help='sim.sx/sy/stheta 도 같은 포즈로 갱신')
     ap.add_argument('--out', default='', help='미리보기 PNG 경로')
     args = ap.parse_args()
+
+    # 인자를 하나도 안 줬으면 맵부터 고르게 한다 (--gui 도 자동으로 켠다).
+    # "python3 set_init_pose.py" 만 쳤을 때 바로 쓸 수 있어야 한다.
+    _given = any(v is not None for v in (args.x, args.y, args.px, args.py,
+                                         args.yaw, args.to_x, args.to_y,
+                                         args.to_px, args.to_py, args.wp))
+    if not _given and not args.gui:
+        args.map, args.wp_file = pick_map_interactive(args.map, args.wp_file)
+        args.gui = True
 
     if not args.map:
         sys.exit('맵 이름이 없습니다. --map 을 지정하세요.')

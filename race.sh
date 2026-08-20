@@ -35,6 +35,9 @@
 #                              → <맵>_wp_tumftm.csv 로 따로 저장, 랩타임 비교용
 #    ./race.sh curvprobe       곡률-속도 캘리브레이션 리그 (slip과 별개 도구)
 #    ./race.sh steertrim       조향 중립값 자동 캘리브레이션 (IMU 기반, 전/후진 반복)
+#    ./race.sh start_pos       ★ 맵 띄우고 두 번 클릭해 출발 포즈 지정
+#                              (click1=위치 click2=방향 w=쓰기). 스택 없이 됨
+#                              인자 없으면 맵 목록에서 고른다
 #    ./race.sh savepose        ★ 지금 AMCL 위치를 출발점으로 저장 (init_* + start_*)
 #                              savemap 이 맵 원점으로 이미 넣어두므로,
 #                              **출발 자리를 옮길 때만** 쓰면 됩니다
@@ -556,6 +559,20 @@ case "$CMD" in
     else
       exec ros2 run race_stack gen_raceline_tumftm
     fi ;;
+  start_pos|startpos)
+    # 맵 이미지를 띄우고 **두 번 클릭**해서 출발 포즈를 잡는다.
+    #   click1 = 위치, click2 = 바라볼 방향, w = 쓰기, r = 리셋, q = 종료
+    #
+    # savepose 와의 차이: savepose 는 **주행 스택이 떠 있어야** 하고 지금 AMCL 이
+    # 믿는 위치를 굳힌다. 이건 스택 없이 맵만 보고 찍는다 — 새 맵으로 갈아탈 때 쓴다.
+    #
+    # ★ init_pose 를 잘못 두면 증상이 "초기중 — 남은항목: AMCL pose" 하나뿐이라
+    #   원인이 안 보인다 (amcl.yaml 의 recovery_alpha=0 이라 벽 안에서 못 빠져나온다).
+    #   08-14·08-15 에 두 번 겪었고 둘 다 맵을 바꾸며 좌표를 안 따라 바꾼 것이었다.
+    #
+    # 인자 없이 실행하면 맵 목록에서 고르게 한다.
+    exec python3 "$SCRIPT_DIR/set_init_pose.py" "${@:2}" ;;
+
   savepose)
     # 지금 AMCL 이 믿고 있는 위치를 race_script.yaml 의 초기 추정으로 굳힌다.
     #
