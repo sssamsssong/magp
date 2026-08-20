@@ -151,6 +151,20 @@ def draw(img, res, ox, oy, H, W, wps, poses, title, out, show=False):
     import matplotlib
     if not show:
         matplotlib.use('Agg')
+    else:
+        # ★ SSH 로 들어오면 DISPLAY 가 비어 있어 창을 못 연다. 젯슨에 모니터가
+        #   붙어 있으면 로컬 X 세션이 /tmp/.X11-unix/X<N> 으로 살아 있으므로
+        #   그걸 잡아준다 (rviz.sh 와 같은 방식). 창은 **젯슨 화면**에 뜬다.
+        #   ※ 반드시 pyplot import 전에 해야 한다 — 백엔드가 import 시점에 정해진다.
+        if not os.environ.get('DISPLAY'):
+            import glob
+            for sock in sorted(glob.glob('/tmp/.X11-unix/X*')):
+                os.environ['DISPLAY'] = ':' + os.path.basename(sock)[1:]
+                break
+        if not os.environ.get('DISPLAY'):
+            sys.exit('✗ 젯슨에 그래픽 세션이 없습니다 (DISPLAY 없음, /tmp/.X11-unix 비어 있음).\n'
+                     '  모니터를 연결하거나, --gui 없이 --x/--y/--yaw 로 값을 직접 주세요.')
+        matplotlib.use('TkAgg')
     import matplotlib.pyplot as plt
 
     x0, x1 = ox, ox + W * res
