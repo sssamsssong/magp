@@ -826,7 +826,7 @@ class ObstacleAvoidMixin:
         # 끝까지 자유공간을 못 만난 빔은 판단 근거가 없다 — 0 을 돌려주면
         # (meas < 0 - deficit) 이 항상 거짓이 되어 장애물로 오인하지 않는다.
         return np.where(escaped, exp, 0.0)
-    def _raycast_obstacle_pts(self, msg: LaserScan) -> np.ndarray:
+    def _raycast_obstacle_pts(self, msg: LaserScan, fov_deg: float = None) -> np.ndarray:
         """장애물로 볼 빔만 골라 map 좌표 점으로 돌려준다.
 
         검사 두 가지의 **합집합**이다. 하나로는 못 잡는 영역이 서로 다르다.
@@ -864,7 +864,11 @@ class ObstacleAvoidMixin:
           오차 0.2m 를 빼도 여유가 남는다.
         """
         deficit = float(self.get_parameter('raycast_deficit').value)
-        fov     = math.radians(float(self.get_parameter('raycast_fov_deg').value))
+        # fov_deg 를 넘기면 그 값을 쓴다 — 추월 중 상대차를 옆·후방까지 계속
+        # 추적할 때만 넓게 본다(_track_opp_wide). 회피 후보비용·장애물 판정은
+        # 항상 기본 raycast_fov_deg 그대로다.
+        fov     = math.radians(float(fov_deg if fov_deg is not None
+                                     else self.get_parameter('raycast_fov_deg').value))
         bstep   = math.radians(float(self.get_parameter('raycast_beam_deg').value))
 
         n = len(msg.ranges)
@@ -1113,7 +1117,19 @@ class ObstacleAvoidMixin:
     hold_car_len = 0.50    # 내 차 길이 [m]
     hold_obj_len = 0.50    # 피할 대상 길이 [m] (상대차 기준. 콘이면 훨씬 짧다)
     hold_margin  = 0.30    # 여유 [m]
-    hold_max_sec = 3.0     # 상한 [s] — 잘못 물리면 영영 안 풀리는 것을 막는다
+    # ★★ 2026-08-21 — car1 의 8b0a9ae 를 car2 코드에 맞게 이식.
+    #   2호차↔1호차 실차 추월 테스트에서 나온 문제다: 상대속도가 거의 0인
+    #   "가까스로 추월" 상황에서 **다 지나가기 전에 라인으로 복귀**했다.
+    #   원인이 세 겹이었다 (①②③ 은 아래 _update_hold / _track_opp_wide 참고).
+    hold_closing_min = 0.05   # ① 접근속도 하한 [㎧] — 0 나눗셈 방지용일 뿐.
+                              #   0.2 로 고정돼 있어 실제 접근속도가 그보다 느려도
+                              #   0.2 로 계산해 필요시간을 과소평가했다.
+    hold_max_sec = 5.0     # 상한 [s] — 잘못 물리면 영영 안 풀리는 것을 막는다
+                           #   (①을 낮춘 대신 여기가 막는다. 3.0 → 5.0)
+    hold_lap_frac = 0.0    # >0 이면 "한 바퀴의 이 비율만큼 달리는 시간"도 상한으로
+                           #   같이 건다. 0 = 끔(hold_max_sec 만). 짧은 트랙에서
+                           #   고정 초가 한 바퀴의 큰 몫이 되는 것을 막는 장치다.
+    hold_track_fov_deg = 260.0  # ③ hold 활성 중 상대 추적 전용 화각 [deg]
 
     # 테스트용 하이브리드. yaml 로 끈다 (static_lock / candidate_fb).
     static_lock  = False   # 08/15 기준. 켜면 정지 장애물 d 고정
@@ -1272,6 +1288,85 @@ class ObstacleAvoidMixin:
             self._lock_d = float(d_raw)
         return float(d_raw), int(best)
 
+    def _track_opp_wide(self, msg: LaserScan):
+        """③ 추월 중(hold_on) 상대차가 정면 화각 밖으로 나가도 _opp_tracks 를
+        계속 갱신한다 (2026-08-21, car1 8b0a9ae 이식).
+
+        ★ 왜 필요한가 — 라이다는 base_link 앞 0.27m 에 있고 화각이 ±70° 다.
+          상대가 옆 0.4m 에 있을 때 종방향 거리별로:
+              1.00m →  29°  보임
+              0.60m →  50°  보임
+              0.40m →  72°  ★ 안 보임
+              0.00m → 124°  ★ 안 보임
+          즉 **추월의 마지막 구간에서 상대를 전혀 못 본다.** 그러면 위 ②의
+          "남은 거리/접근속도" 계산이 옆에 붙는 그 순간에 최신값을 못 쓴다.
+
+        회피 후보비용 계산에는 관여하지 않는다 — _predict_obstacles /
+        _classify_obstacles 는 그대로 좁은 화각만 본다. 옆·후방 클러터가 회피
+        판단을 흔들면 안 되기 때문이다.
+
+        같은 틱에 좁은 화각 패스가 이미 갱신한 트랙은 건너뛴다(매칭 두 번 방지).
+        """
+        if not bool(getattr(self, 'hold_on', False)):
+            return
+        tracks = getattr(self, '_opp_tracks', None) or []
+        if not tracks:
+            return          # 갱신할 트랙이 없으면 넓게 볼 이유가 없다 (평상시 비용 절약)
+        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if t <= 0.0:
+            return
+        stale = [tr for tr in tracks if t - tr['t'] > 1e-3]
+        if not stale:
+            return          # 전부 방금 갱신됨
+        pts = self._raycast_obstacle_pts(msg, fov_deg=float(self.hold_track_fov_deg))
+        if len(pts) == 0:
+            return
+        lab, n = self._cluster_pts(pts, self.opp_eps)
+        if n == 0:
+            return
+        cents = [pts[lab == i].mean(axis=0) for i in range(n)]
+        lut = self._s_lut()
+        for tr in stale:
+            best, bd = None, self.opp_gate
+            for c in cents:
+                dd = float(np.hypot(*(c - tr['p'])))
+                if dd < bd:
+                    bd, best = dd, c
+            if best is None:
+                continue
+            dt = t - tr['t']
+            v = (self.opp_alpha * tr['v']
+                 + (1.0 - self.opp_alpha) * (best - tr['p']) / dt)
+            tr['p'] = best
+            tr['v'] = v
+            tr['t'] = t
+            tr['n'] = tr.get('n', 0) + 1
+            if lut is not None:
+                s_now, d_lat = self._project_sd(best, lut)
+                ds = self._wrap_ds(s_now - tr.get('s', s_now), lut['L'])
+                tr['s_dot'] = (self.opp_alpha * tr.get('s_dot', 0.0)
+                               + (1.0 - self.opp_alpha) * (ds / dt))
+                tr['s'] = s_now
+                tr['d_lat'] = d_lat
+
+    def _hold_cap_sec(self, v_ego: float) -> float:
+        """오프셋을 붙들 수 있는 최대 시간 [s].
+
+        고정값(hold_max_sec)과 "한 바퀴의 hold_lap_frac 만큼 달리는 시간" 중
+        짧은 쪽. 랩 길이를 모르거나 hold_lap_frac=0 이면 고정값만 쓴다.
+
+        ★ 왜 랩 비율인가 — 고정 초로 두면 트랙 크기에 따라 뜻이 달라진다.
+          둘레 17.8m 를 1.4㎧ 로 도는 13초 랩에서 5.0s 는 **한 바퀴의 38%** 를
+          오프셋 붙든 채 도는 것이고, 둘레 100m 야외에서는 같은 5.0s 가 20% 다.
+        """
+        cap = float(self.hold_max_sec)
+        frac = float(getattr(self, 'hold_lap_frac', 0.0) or 0.0)
+        if frac > 0.0:
+            lut = self._s_lut()
+            if lut is not None:
+                cap = min(cap, frac * float(lut['L']) / max(abs(v_ego), 0.5))
+        return cap
+
     def _update_hold(self, d_cmd):
         """옆으로 나간 뒤 **다 지나갈 때까지** 오프셋을 유지한다.
 
@@ -1302,18 +1397,41 @@ class ObstacleAvoidMixin:
         need = self.hold_car_len + self.hold_obj_len + self.hold_margin
 
         # 지금 막고 있는 것 중 가장 가까운 것의 접근속도
-        closing, seen = None, False
+        # ★★ ② **남은 종방향 거리**를 같이 센다 (2026-08-21, car1 8b0a9ae 이식).
+        #   예전엔 만료를 need/접근속도 로만 잡았다. need 는 "이미 옆에 붙어 있는"
+        #   대상을 지나치는 데 드는 상대변위라, **아직 앞에 있는** 거리를 하나도
+        #   안 센다. 회피를 일찍 시작할수록 그 거리가 길어지는데 만료는 그대로여서
+        #   다 지나가기 전에 라인으로 복귀한다.  → (남은 거리 + need) / 접근속도.
+        #
+        #   그리고 "이미 지나갔다"고 보고 셈에서 빼는 기준이 사실상 0 이었는데,
+        #   상대가 옆으로 붙는 **추월의 핵심 순간**이 정확히 그 범위다. 한 차 길이
+        #   이상(hold_car_len+hold_obj_len) 뒤까지는 "아직 안 지나갔다"로 본다.
+        pos = getattr(self, 'pos', None)
+        yaw = float(getattr(self, 'yaw', 0.0) or 0.0)
+        fwd = np.array([math.cos(yaw), math.sin(yaw)])
+        v_ego = abs(float(getattr(self, 'speed', 0.0) or 0.0))
+        behind_ok = self.hold_car_len + self.hold_obj_len
+        closing, seen, gap = None, False, 0.0
         for tr in getattr(self, '_opp_tracks', []) or []:
             if tr.get('n', 0) < self.opp_min_obs:
                 continue
+            c = v_ego - float(tr.get('s_dot', 0.0))
+            g = 0.0
+            if pos is not None:
+                rel = np.asarray(tr['p'], float) - np.asarray(pos, float)
+                g = float(rel @ fwd)
+                if g < -behind_ok:
+                    continue               # 한 차 길이 이상 뒤 — 이제 진짜 지나갔다
+                g = max(g, 0.0)
             seen = True
-            c = abs(float(getattr(self, 'speed', 0.0) or 0.0)) - float(tr.get('s_dot', 0.0))
-            closing = c if closing is None else min(closing, c)
+            if closing is None or g < gap:
+                closing, gap = c, g
 
         if abs(d_cmd) > 1e-3 and seen:
             # 회피 중이고 아직 보인다 — 만료 시각을 계속 갱신한다
-            cl = max(closing if closing is not None else 1e-3, 0.2)
-            self._hold_until = now + min(need / cl, self.hold_max_sec)
+            cl = max(closing if closing is not None else 1e-3, self.hold_closing_min)
+            self._hold_until = now + min((gap + need) / cl,
+                                         self._hold_cap_sec(v_ego))
             self._hold_d = float(d_cmd)
             return d_cmd
 
@@ -1971,6 +2089,9 @@ class ObstacleAvoidMixin:
                 self.blocking_pts = []
                 self.free_votes.append(True)
                 self._update_lane_free()
+                # 좁은 화각엔 아무것도 안 걸렸다 — 추월 중이면 상대가 옆으로
+                # 붙었을 가능성이 높은 바로 그 순간이다. 넓은 화각으로 계속 찾는다.
+                self._track_opp_wide(msg)
                 # ★ 장애물이 없어도 **반드시 발행한다.** 안 내면 AMCL 이
                 #   /scan_amcl 을 굶어 위치추정이 통째로 멎는다.
                 self._publish_amcl_scan(msg)
@@ -1980,6 +2101,7 @@ class ObstacleAvoidMixin:
             #   피해야 한다 (_predict_obstacles).
             pts_world = self._predict_obstacles(pts_world, msg)
             self._classify_obstacles(pts_world, 0.0, masked=False)
+            self._track_opp_wide(msg)   # 좁은 화각에서 놓친 다른 트랙이 있으면 보강
             self._publish_amcl_scan(msg)
             return
 
