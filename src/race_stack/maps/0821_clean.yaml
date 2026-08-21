@@ -1,0 +1,10 @@
+free_thresh: 0.25
+image: 0821_clean.pgm
+mode: trinary
+negate: 0
+occupied_thresh: 0.65
+origin:
+- -7.49
+- -5.96
+- 0
+resolution: 0.05
