@@ -9,10 +9,7 @@ Mission Manager — 랩 카운트 + 제한시간 + 자동 정지.
 발행: /race/enabled (Bool, latched), /race/lap (Int32)
 """
 import math
-import os
 import threading
-
-import numpy as np
 
 import rclpy
 from rclpy.node import Node
@@ -31,14 +28,6 @@ class MissionManager(Node):
         self.declare_parameter('laps', 0)            # 0 = 무제한
         self.declare_parameter('time_limit_sec', 0)  # 0 = 무제한
 
-        # ── 랩 판정 방식 (2026-08-22) ────────────────────────────────────
-        #   기본은 **웨이포인트 진행거리**다. 출발선 반경 방식은 차가 원의
-        #   가장자리를 스치면 재진입 순간을 통째로 놓친다 — 실제로 quali 주행
-        #   에서 7바퀴를 돌고 1랩만 세었다 (출발선까지 최소 0.24m, 반경 1.0m
-        #   안에 들어온 /amcl_pose 표본이 7바퀴 통틀어 12개뿐이었다).
-        #   진행거리 방식은 표본율·반경과 무관해서 놓치지 않는다.
-        self.declare_parameter('lap_by_progress', True)
-        self.declare_parameter('waypoints_csv', '')
 
         # ── 예선 시퀀스 (2026-08-21, car1 d285065 이식) ────────────────────
         # Q1→buffer→Q2→buffer→Q3 를 **한 프로세스 안에서** 이어간다. 사람이
@@ -80,15 +69,6 @@ class MissionManager(Node):
         self.lap = 0
         self.inside = True          # 시작 시 출발선 안에 있다고 가정
         self.armed = False          # 한 번 출발선을 벗어나야 카운트 시작
-
-        # ── 진행거리 기반 랩 판정 ───────────────────────────────────────
-        self._wp = None             # (N,2) 웨이포인트
-        self._wp_s = None           # 각 점의 누적 거리
-        self._track_len = 0.0       # 한 바퀴 [m]
-        self._s_prev = None         # 직전 프레임의 s
-        self._s_acc = 0.0           # 이번 랩 진행거리 (부호 있음)
-        if bool(self.p('lap_by_progress')):
-            self._load_waypoints(str(self.p('waypoints_csv')))
         self.start_time = self.get_clock().now()
         self.finished = False
         self.lap_start = self.start_time
@@ -296,7 +276,6 @@ class MissionManager(Node):
         self.start_time = self.get_clock().now()
         self.lap_start = self.start_time
         self.stage_start = self.start_time   # 단계 제한시간 기준 (lap_start 와 별개)
-        self._reset_progress()
         if self.seq_enabled and self.seq:
             self.stage_idx = 0
             stage = self.seq[0]
@@ -353,66 +332,6 @@ class MissionManager(Node):
             self.get_logger().info(f'제한시간 {tl}s 도달 → 정지')
             self.finish()
 
-    # ── 웨이포인트 진행거리 기반 랩 판정 ────────────────────────────────
-
-    def _load_waypoints(self, path: str):
-        """랩 판정용 웨이포인트를 읽는다. 실패하면 조용히 반경 방식으로 남는다."""
-        if not path or not os.path.exists(path):
-            self.get_logger().warn(
-                f'lap_by_progress=true 인데 waypoints_csv 를 못 읽었다 '
-                f'("{path}") — 출발선 반경 방식으로 되돌린다')
-            return
-        try:
-            wp = np.loadtxt(path, delimiter=',', skiprows=1, ndmin=2)[:, :2]
-        except Exception as e:                       # noqa: BLE001
-            self.get_logger().warn(f'웨이포인트 읽기 실패({e}) — 반경 방식 사용')
-            return
-        if len(wp) < 8:
-            self.get_logger().warn('웨이포인트가 너무 적다 — 반경 방식 사용')
-            return
-        seg = np.hypot(*(np.roll(wp, -1, axis=0) - wp).T)
-        self._wp = wp
-        self._wp_s = np.concatenate([[0.0], np.cumsum(seg)[:-1]])
-        self._track_len = float(seg.sum())
-        self.get_logger().info(
-            f'랩 판정 = 웨이포인트 진행거리 ({len(wp)}점, 한 바퀴 '
-            f'{self._track_len:.1f}m) — 출발선 반경과 무관하게 센다')
-
-    def _lap_by_progress(self, x: float, y: float) -> bool:
-        """진행거리를 누적하고, 한 바퀴를 채웠으면 True.
-
-        방향에 무관하다 — |누적| 이 한 바퀴를 넘으면 센다. 역주행으로 맵을
-        거꾸로 도는 경우에도 그대로 동작한다.
-        """
-        i = int(np.argmin((self._wp[:, 0] - x) ** 2 + (self._wp[:, 1] - y) ** 2))
-        s = float(self._wp_s[i])
-        L = self._track_len
-        if self._s_prev is not None:
-            ds = s - self._s_prev
-            if ds < -L / 2:
-                ds += L
-            elif ds > L / 2:
-                ds -= L
-            # 위치추정이 튀면 한 프레임에 몇 미터가 찍힌다 — 그건 버린다.
-            # 정상 주행은 30Hz·6㎧ 라도 0.2m 다.
-            if abs(ds) < 1.0:
-                self._s_acc += ds
-        self._s_prev = s
-        if abs(self._s_acc) >= L:
-            self._s_acc -= math.copysign(L, self._s_acc)
-            return True
-        return False
-
-    def _reset_progress(self):
-        self._s_prev = None
-        self._s_acc = 0.0
-
-    def lap_progress(self) -> float:
-        """이번 랩을 얼마나 돌았나 (0~1). 진행거리 방식일 때만 의미 있다."""
-        if not self._track_len:
-            return 0.0
-        return min(abs(self._s_acc) / self._track_len, 1.0)
-
     def pose_cb(self, msg: PoseWithCovarianceStamped):
         # 대기 중에도 AMCL 상태는 추적한다 (출발 판단 근거)
         c = msg.pose.covariance
@@ -422,17 +341,23 @@ class MissionManager(Node):
         if self.finished or not self.started:
             return
 
-        if self._wp is not None:
-            # ★ 진행거리 방식 (기본). 출발선 반경을 아예 안 본다.
-            done = self._lap_by_progress(px, py)
-        else:
-            # 폴백 — 출발선 반경 재진입. 차가 원의 가장자리를 스치면 놓친다.
-            dx, dy = px - self.p('start_x'), py - self.p('start_y')
-            inside_now = math.hypot(dx, dy) < self.p('start_radius')
-            if not inside_now:
-                self.armed = True
-            done = inside_now and not self.inside and self.armed
-            self.inside = inside_now
+        # 출발선 반경 재진입 = 1랩.
+        #
+        # ★ start_radius 는 **레이싱라인이 원을 실제로 관통**하도록 잡아야 한다.
+        #   2026-08-22 quali 주행에서 7바퀴를 돌고 1랩만 세었다. 원인은 반경
+        #   1.0m 인데 레이싱라인의 출발선까지 최소거리가 1.142m 여서 **라인이
+        #   원에 아예 안 들어왔기** 때문이다. 차가 라인에서 벗어난 순간에만
+        #   원을 스쳤고(7바퀴 통틀어 표본 12개), 재진입 프레임이 통째로
+        #   빠져버렸다. 1.8m 면 라인이 2.30m 길이로 관통한다(3.5㎧ 에서 0.66초,
+        #   /amcl_pose 30Hz 기준 약 20 표본).
+        #   ※ 맵/라인을 바꾸면 이 값을 다시 확인할 것 — 너무 키우면 반대편
+        #     직선이 원에 걸려 가짜 랩이 센다. 0821_clean 은 2.5m 까지 안전.
+        dx, dy = px - self.p('start_x'), py - self.p('start_y')
+        inside_now = math.hypot(dx, dy) < self.p('start_radius')
+        if not inside_now:
+            self.armed = True
+        done = inside_now and not self.inside and self.armed
+        self.inside = inside_now
 
         if not done:
             return
@@ -442,7 +367,7 @@ class MissionManager(Node):
         self.lap_start = now
         self.lap_pub.publish(Int32(data=self.lap))
         self.get_logger().info(
-            f'{self._stage_tag()}LAP {self.lap} 완료! ({lap_time:.2f}s)')
+            f'{self._stage_tag(self.lap)}LAP {self.lap} 완료! ({lap_time:.2f}s)')
         if self.seq_enabled and self.seq:
             stage = self.seq[self.stage_idx]
             if stage['laps'] > 0 and self.lap >= stage['laps']:
@@ -453,13 +378,20 @@ class MissionManager(Node):
 
     # ── 진행 상황 표시 ───────────────────────────────────────────────────
 
-    def _stage_tag(self) -> str:
-        """로그 앞에 붙는 `[Q2 1/3] ` 같은 꼬리표. 시퀀스가 아니면 빈 문자열."""
+    def _stage_tag(self, n: int = None) -> str:
+        """로그 앞에 붙는 `[Q1 1/3] ` 꼬리표. 시퀀스가 아니면 빈 문자열.
+
+        n 을 안 주면 **지금 달리고 있는** 바퀴 번호(= 완주 랩 + 1)를 쓴다.
+        출발 직후가 1/3 이고 3바퀴째를 달릴 때 3/3 이다 — 사람이 트랙을
+        보면서 세는 방식과 같다. 랩 완주 로그만 방금 끝난 바퀴 번호를
+        넘겨 받아 쓴다.
+        """
         if not (self.seq_enabled and self.seq):
             return ''
         st = self.seq[self.stage_idx]
         if st['laps'] > 0:
-            return f"[{st['name']} {self.lap}/{st['laps']}] "
+            cur = self.lap + 1 if n is None else n
+            return f"[{st['name']} {min(cur, st['laps'])}/{st['laps']}] "
         if st['time_limit'] > 0:
             el = (self.get_clock().now() - self.stage_start).nanoseconds * 1e-9
             return f"[{st['name']} {el:.0f}/{st['time_limit']}s] "
@@ -476,11 +408,10 @@ class MissionManager(Node):
         if not (self.seq_enabled and self.seq):
             return
         st = self.seq[self.stage_idx]
-        prog = self.lap_progress()
-        bar = '█' * int(prog * 10) + '·' * (10 - int(prog * 10))
+        el = (self.get_clock().now() - self.lap_start).nanoseconds * 1e-9
         self.get_logger().info(
             f"{self._stage_tag()}단계 {self.stage_idx + 1}/{len(self.seq)}"
-            f"  이번 랩 {bar} {prog * 100:3.0f}%"
+            f"  이번 랩 {el:.1f}s"
             f"  회피 {'ON ' if st['avoid'] else 'off'}"
             f"  grip_util {st['grip_util']:.2f}")
 
@@ -495,8 +426,7 @@ class MissionManager(Node):
             return
         stage = self.seq[self.stage_idx]
         self.lap = 0
-        self.armed = False           # (반경 폴백용) 출발선을 한 번 벗어나야 한다
-        self._reset_progress()       # 진행거리도 새 단계에서 0부터
+        self.armed = False           # 다음 랩 전에 출발선을 한 번 벗어나야 한다
         now = self.get_clock().now()
         self.lap_start = now
         self.stage_start = now
