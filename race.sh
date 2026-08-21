@@ -843,8 +843,14 @@ elif [ "$RECORD_BAG" = "1" ]; then
     #   /frenet/diag 는 bag 재생용.
     #   status: 0=TRACK 1=AVOID_STATIC 2=BLOCKED 3=FOLLOW 4=RECOVER 5=OVERTAKE
     #   토픽이 없으면 rosbag2 는 건너뛰므로 q1/q3 에서도 무해하다.
+    #   /sensors/core = VESC 상태(전류·듀티·전압). 2026-08-21 추가 —
+    #   η=0.85 주행에서 고속 구간 속도가 지령보다 중앙 0.23㎧ 뒤처지기 시작했는데
+    #   이게 **전류 한계**인지 **구동 그립**인지 가릴 방법이 로그에 없었다.
+    #   duty 가 1.0 에 붙으면 전압 한계, current 가 상한(100A)에 붙으면 전류 한계,
+    #   둘 다 여유가 있는데 못 따라가면 뒷바퀴가 미끄러지는 것이다.
     ros2 bag record -o "$BAG_DIR" \
         /scan /scan_deskewed /odom /odom_imu /amcl_pose /drive /sensors/imu/raw \
+        /sensors/core \
         /commands/servo/position /race/enabled /diagnostics \
         /particle_cloud \
         /frenet/offset /frenet/status /frenet/speed_scale /frenet/diag \
