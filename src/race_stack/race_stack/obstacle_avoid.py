@@ -525,11 +525,20 @@ class ObstacleAvoidMixin:
                 f'감속해야 하는 상황이다',
                 throttle_duration_sec=1.0)
 
-        # ── 추월 금지 구간: 라인으로 되돌린다 ────────────────────────
+        # ── 추월 금지 구간: 라인이 뚫려 있을 때만 라인으로 되돌린다 ──────
         #   이미 옆에 나가 있으면(|shift|>0.05) 그대로 둔다 — 구간 경계에서
         #   오프셋을 계단으로 끊으면 조향이 튀고, 지금 상대 옆일 수도 있다.
-        #   대신 종방향으로 푼다 (_follow_scale 이 속도를 상대에 맞춘다).
-        if self.ot_zone_on and not self._ot_allowed and abs(self._shift_cur) <= 0.05:
+        #   ★★ 2026-08-22 — 라인이 **막혔으면** 라인으로 묶지 않는다.
+        #     예전엔 추월 금지 구간이면 무조건 d=0 으로 묶고 _follow_scale 이
+        #     상대(유령 포함) 뒤에서 속도를 0 까지 줄여 정지했다. race 실차
+        #     20260822_004203: 앞에 아무것도 없는데(n_obs=0) 옆(d_lat +0.52)의
+        #     유령을 "정지 상대차"로 추적해 FOLLOW→완전정지. 경기 중 정지는
+        #     규정 5.5(5초 자력정지=FA 실패) 위반이다. 그래서 라인이 막혔으면
+        #     위에서 고른 **가장 넓은 후보로 그냥 넘어간다** (금지 구간이라도).
+        #     라인이 충돌 안전할 때만(추종으로 충분) 라인 유지.
+        if (self.ot_zone_on and not self._ot_allowed
+                and abs(self._shift_cur) <= 0.05
+                and bool(feasible[zero_i])):
             best = zero_i
             self._fr_gap_room = float(room[best])
 
@@ -1801,12 +1810,19 @@ class ObstacleAvoidMixin:
         #   상대가 **멈춰 있으면 쫓을 이유가 없다** — 서야 한다.
         #   서고 나면 회피가 필요한데 금지 구간이면 그것도 못 하므로, 그때는
         #   status 2 로 올려 사람이 알 수 있게 한다 (조용히 서 있지 않도록).
-        lo = self.follow_min if abs(s_dot) >= self.opp_min_speed else 0.0
-        if lo <= 0.0 and v_tgt <= 1e-3:
-            self._fr_status = 2.0               # 정지 장애물 앞 — 막힘
+        # ★★ 2026-08-22 — **경기 중 절대 완전정지하지 않는다** (사용자 지시,
+        #   규정 5.5: 5초 이상 자력 정지 시 FA 실패). 앞을 막은 것이 정지 상대·
+        #   유령이면 _frenet_select 가 이미 가장 넓은 후보로 돌아가게 했으니
+        #   (라인이 막혔을 때 ot_zone 묶기 해제), 여기서는 그 우회를 하며
+        #   기어갈 최소 전진 속도(follow_min)를 절대 밑돌지 않는다.
+        #   예전엔 정지 상대 앞에서 lo=0 으로 떨어뜨려 차를 세웠다 —
+        #   race 20260822_004203 에서 유령을 상대로 그렇게 멈췄다.
+        lo = self.follow_min
+        if abs(s_dot) < self.opp_min_speed and v_tgt <= 1e-3:
+            self._fr_status = 2.0               # 막힘 표시는 남기되(사람이 앎) 서지는 않는다
             self.get_logger().warn(
-                f'[frenet] 정지 장애물 {gap:.2f}m 앞 — 추월 금지 구간이라 '
-                f'옆으로 못 나간다. 정지한다',
+                f'[frenet] 정지 장애물 {gap:.2f}m 앞 — 가장 넓은 쪽으로 '
+                f'기어서 넘어간다 (정지 안 함)',
                 throttle_duration_sec=1.0)
         return float(np.clip(v_tgt / v_prof, lo, 1.0))
 
