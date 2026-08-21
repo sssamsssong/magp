@@ -352,8 +352,9 @@ def generate_launch_description():
     if mode == 'q3' and time_limit == 0:
         # ★ 하드코딩하지 않는다 — 시퀀서(mission.seq_time_q3)와 단독 q3 가
         #   같은 값을 읽어야 규정이 바뀔 때 한 곳만 고치면 된다.
-        #   2026-08-22 규정: Q3 단독 1분.
-        time_limit = int(m.get('seq_time_q3', 60))
+        #   2026-08-22 규정: Q3 단독 1분. 실제 적용값은 규정+15초(75s) —
+        #   근거는 race_script.yaml 의 mission 절 주석 참조.
+        time_limit = int(m.get('seq_time_q3', 75))
     if mode == 'buffer' and laps == 0:
         laps = 1           # buffer 단독 실행 시 기본 1랩
     if bench:
@@ -406,8 +407,8 @@ def generate_launch_description():
                      'seq_laps_q1':          int(m.get('seq_laps_q1',     3)),
                      'seq_laps_buffer':      int(m.get('seq_laps_buffer', 1)),
                      'seq_laps_q2':          int(m.get('seq_laps_q2',     3)),
-                     'seq_time_q3':          int(m.get('seq_time_q3',      60)),
-                     'seq_total_limit':      int(m.get('seq_total_limit', 240)),
+                     'seq_time_q3':          int(m.get('seq_time_q3',      75)),
+                     'seq_total_limit':      int(m.get('seq_total_limit', 255)),
                      }]))
 
     # ---------- 4. 안전장치 (AEB) ----------

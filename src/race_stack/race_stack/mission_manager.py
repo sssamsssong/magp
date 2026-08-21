@@ -42,15 +42,17 @@ class MissionManager(Node):
         self.declare_parameter('seq_laps_q1',          3)
         self.declare_parameter('seq_laps_buffer',      1)
         self.declare_parameter('seq_laps_q2',          3)
-        self.declare_parameter('seq_time_q3',           60)
+        self.declare_parameter('seq_time_q3',           75)
         # ── 대회 규정 (2026-08-22 확인) ──────────────────────────────────
         #   · Q1 출발부터 Q3 종료까지 **총 4분(240s)** 을 넘으면 안 된다
         #   · Q3 **단독으로도 1분(60s)** 을 넘으면 안 된다
+        #   ※ 여기 기본값은 규정 + 15초(255/75)다. race_script.yaml 의
+        #     mission 절 주석에 그렇게 정한 이유가 적혀 있다.
         #   두 제약을 동시에 만족시키려면 Q3 시간을 고정으로 둘 수 없다:
         #       Q3 실제 시간 = min(seq_time_q3, seq_total_limit − 지금까지 경과)
         #   Q1~BUFFER2 가 3분 안에 끝났으면 Q3 는 온전히 1분을 쓰고(총 ≤4분),
         #   3분을 넘겼으면 남은 시간만 써서 총합을 정확히 4분에 맞춘다.
-        self.declare_parameter('seq_total_limit',      240)
+        self.declare_parameter('seq_total_limit',      255)
         self.declare_parameter('start_x', 0.0)
         self.declare_parameter('start_y', 0.0)
         self.declare_parameter('start_radius', 1.5)
