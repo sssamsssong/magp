@@ -404,6 +404,12 @@ def generate_launch_description():
                      'seq_grip_util_buffer': float(_gu.get('buffer', 0.15) if isinstance(_gu, dict) else 0.15),
                      'seq_grip_util_q2':     float(_gu.get('q2',     0.5) if isinstance(_gu, dict) else _gu),
                      'seq_grip_util_q3':     float(_gu.get('q3',     0.7) if isinstance(_gu, dict) else _gu),
+                     # Q3 속도 램프 — limits.grip_util.q3_start 에서 시작해
+                     # 랩마다 seq_grip_step_q3 만큼 올려 q3 에 닿으면 유지.
+                     # q3_start 가 없거나 0 이면 램프 없이 q3 로 바로 간다.
+                     'seq_grip_util_q3_start':
+                         float(_gu.get('q3_start', 0.0) if isinstance(_gu, dict) else 0.0),
+                     'seq_grip_step_q3':     float(m.get('seq_grip_step_q3', 0.1)),
                      'seq_laps_q1':          int(m.get('seq_laps_q1',     3)),
                      'seq_laps_buffer':      int(m.get('seq_laps_buffer', 1)),
                      'seq_laps_q2':          int(m.get('seq_laps_q2',     3)),

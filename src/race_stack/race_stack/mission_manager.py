@@ -39,6 +39,16 @@ class MissionManager(Node):
         self.declare_parameter('seq_grip_util_buffer', 0.15)
         self.declare_parameter('seq_grip_util_q2',     0.5)
         self.declare_parameter('seq_grip_util_q3',     0.7)
+        # ── Q3 속도 램프 ────────────────────────────────────────────────
+        #   Q3 는 기록 주행이라 제일 빠르게 돌고 싶은데, 첫 바퀴부터 목표
+        #   속도로 들어가면 아직 타이어·노면이 안 잡힌 상태라 위험하다.
+        #   q3_start 에서 시작해 **한 바퀴마다 seq_grip_step_q3 만큼** 올려
+        #   목표(seq_grip_util_q3)에 닿으면 그 값으로 계속 돈다.
+        #     예) 목표 0.8, 시작 0.6, 스텝 0.1
+        #         1바퀴 0.6 → 2바퀴 0.7 → 3바퀴 0.8 → 이후 0.8 유지
+        #   0 이거나 목표 이상이면 램프를 안 쓰고 처음부터 목표값으로 간다.
+        self.declare_parameter('seq_grip_util_q3_start', 0.0)
+        self.declare_parameter('seq_grip_step_q3',       0.1)
         self.declare_parameter('seq_laps_q1',          3)
         self.declare_parameter('seq_laps_buffer',      1)
         self.declare_parameter('seq_laps_q2',          3)
@@ -88,6 +98,7 @@ class MissionManager(Node):
         #   때마다 제한시간이 다시 시작된다.
         self.stage_start = self.start_time
         self._stage_limit = 0.0     # 이 단계에 실제로 주어진 시간 [s] (0=랩 기준)
+        self._grip_now = 0.0        # 지금 map_controller 에 걸어둔 grip_util
 
         # ── 예선 시퀀스 상태 ───────────────────────────────────────────
         self.seq_enabled = bool(self.p('sequence_enabled'))
@@ -111,6 +122,8 @@ class MissionManager(Node):
                 {'name': 'Q3',      'laps': 0,
                  'time_limit': int(self.p('seq_time_q3')),
                  'grip_util': float(self.p('seq_grip_util_q3')),
+                 'grip_start': float(self.p('seq_grip_util_q3_start')),
+                 'grip_step':  float(self.p('seq_grip_step_q3')),
                  'avoid': False},
             ]
             # map_controller / frenet_planner 가 **항상 떠 있다**고 가정한다
@@ -399,6 +412,10 @@ class MissionManager(Node):
             stage = self.seq[self.stage_idx]
             if stage['laps'] > 0 and self.lap >= stage['laps']:
                 self._advance_stage()
+            else:
+                # 랩 기준 단계가 아직 안 끝났거나 시간 기준 단계(Q3)면,
+                # 이번 랩을 마친 값으로 속도를 한 칸 올린다.
+                self._stage_lap_ramp()
         elif 0 < self.p('laps') <= self.lap:
             self.get_logger().info('목표 랩수 완주 → 정지')
             self.finish()
@@ -440,7 +457,9 @@ class MissionManager(Node):
             f"{self._stage_tag()}단계 {self.stage_idx + 1}/{len(self.seq)}"
             f"  이번 랩 {el:.1f}s"
             f"  회피 {'ON ' if st['avoid'] else 'off'}"
-            f"  grip_util {st['grip_util']:.2f}")
+            f"  grip_util {self._grip_now:.2f}"
+            + (f" →{st['grip_util']:.2f}"
+               if self._grip_now < float(st['grip_util']) - 1e-9 else ''))
 
     # ── 예선 시퀀스 ──────────────────────────────────────────────────────
 
@@ -504,8 +523,40 @@ class MissionManager(Node):
         self._enter_stage(stage, now)
 
     def _apply_stage_params(self, stage: dict):
-        self._set_remote_param(self.map_cli, 'grip_util', float(stage['grip_util']))
+        tgt = float(stage['grip_util'])
+        start = float(stage.get('grip_start', 0.0))
+        step = float(stage.get('grip_step', 0.0))
+        # 램프는 시작값이 목표보다 **낮을 때만** 의미가 있다. 0 이거나 목표
+        # 이상이면 그냥 목표값으로 들어간다 (램프 없던 시절과 같은 동작).
+        if 0.0 < start < tgt and step > 0.0:
+            self._grip_now = start
+            n = int(math.ceil((tgt - start) / step)) + 1
+            self.get_logger().info(
+                f'  {stage["name"]} 속도 램프: {start:.2f} → {tgt:.2f} '
+                f'(랩마다 +{step:.2f}, {n}바퀴째에 목표 도달)')
+        else:
+            self._grip_now = tgt
+        self._set_remote_param(self.map_cli, 'grip_util', self._grip_now)
         self._set_remote_param(self.fr_cli, 'avoid_enabled', bool(stage['avoid']))
+
+    def _stage_lap_ramp(self):
+        """랩을 하나 돌 때마다 grip_util 을 한 칸 올린다 (Q3 램프).
+
+        랩 완주 **직후**에 부른다. 목표에 닿으면 더 안 올리고 조용히 빠진다.
+        """
+        if not (self.seq_enabled and self.seq):
+            return
+        stage = self.seq[self.stage_idx]
+        step = float(stage.get('grip_step', 0.0))
+        tgt = float(stage['grip_util'])
+        if step <= 0.0 or self._grip_now >= tgt - 1e-9:
+            return
+        self._grip_now = min(tgt, self._grip_now + step)
+        at = '목표 도달' if self._grip_now >= tgt - 1e-9 else f'목표 {tgt:.2f}'
+        self.get_logger().info(
+            f'{self._stage_tag()}속도 램프 grip_util → '
+            f'{self._grip_now:.2f} ({at})')
+        self._set_remote_param(self.map_cli, 'grip_util', self._grip_now)
 
     def _set_remote_param(self, cli, name: str, value):
         """다른 노드에 /set_parameters 로 값을 하나 쏜다 (비동기, 응답 대기 안 함).
