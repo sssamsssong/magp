@@ -181,6 +181,19 @@ def generate_launch_description():
     wp_csv = os.path.join(race_data, 'waypoints', cfg['waypoints'] + '.csv')
     amcl_yaml = os.path.join(race_share, 'config', 'amcl.yaml')
 
+    # ★ 위치추정용 맵 (2026-08-21) — clean 맵은 "트랙 밖 전부 벽" 이라
+    #   likelihood field 가 퇴화한다: 빔 끝점이 트랙 밖 어디에 떨어져도
+    #   만점이라, 경계 틈으로 빔이 새는 코너에서 밖으로 밀린 자세 가설이
+    #   진짜 자세와 같은 점수를 받았다 (08/21 왼쪽 위 코너에서 매 바퀴
+    #   추정이 맵 밖으로 탈출한 원인). clean_map_auto.py 가 실측 벽만
+    #   점유로 남긴 <맵>_loc 을 같이 만든다 — AMCL·auto_localize·
+    #   localization_monitor 만 이걸 보고, 컨트롤러·회피·raceline 은
+    #   계속 clean 을 본다 (틈이 자유공간이 되면 회피 후보가 그리로 샌다).
+    loc_map_yaml = os.path.join(race_data, 'maps',
+                                cfg['map_name'] + '_loc.yaml')
+    if not os.path.exists(loc_map_yaml):
+        loc_map_yaml = map_yaml     # 옛 맵: _loc 이 없으면 그대로
+
     if not os.path.exists(map_yaml):
         raise RuntimeError(
             f'맵 파일 없음: {map_yaml}\n'
@@ -258,7 +271,7 @@ def generate_launch_description():
             package='race_stack', executable='localization_monitor',
             name='localization_monitor', output='screen',
             parameters=[{
-                'map_yaml':    map_yaml,
+                'map_yaml':    loc_map_yaml,
                 'scan_topic':  scan_topic,
                 'odom_topic':  odom_topic,
                 'fov_deg':     float(loc.get('monitor_fov_deg',   180.0)),
@@ -294,7 +307,7 @@ def generate_launch_description():
             package='race_stack', executable='auto_localize',
             name='auto_localize', output='screen',
             parameters=[{
-                'map_yaml':       map_yaml,
+                'map_yaml':       loc_map_yaml,
                 'scan_topic':     scan_topic,
                 'init_x':         float(loc.get('init_x',   0.0)),
                 'init_y':         float(loc.get('init_y',   0.0)),
@@ -319,7 +332,7 @@ def generate_launch_description():
     nodes.append(Node(
         package='nav2_map_server', executable='map_server', name='map_server',
         output='screen',
-        parameters=[{'yaml_filename': map_yaml,
+        parameters=[{'yaml_filename': loc_map_yaml,
                      'topic_name': 'map', 'frame_id': 'map'}]))
     nodes.append(Node(
         package='nav2_amcl', executable='amcl', name='amcl', output='screen',

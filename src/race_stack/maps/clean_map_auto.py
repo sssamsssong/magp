@@ -23,6 +23,22 @@ SSH 로만 붙어 작업할 때는 못 쓴다. 그런데 우리 맵에서 지워
 clean_map.py 의 "외부 폴리곤 밖은 전부 벽" 과 같은 규약이고, 이렇게 해야
 경계에 틈이 없어 gen_raceline 이 트랙을 추출할 수 있다.
 
+★★ 위치추정용 맵 `<출력>_loc` 도 같이 쓴다 (2026-08-21)
+──────────────────────────────────────────────────────
+"밖은 전부 벽" 규약은 gen_raceline 에는 필요하지만 **AMCL 을 퇴화시킨다.**
+likelihood field 는 빔 끝점에서 가장 가까운 점유 셀까지의 거리로 점수를
+매기는데, 외부가 통째로 점유라서 **끝점이 트랙 밖 어디에 떨어져도 만점**이다.
+경계 틈으로 빔이 새는 코너(맵핑 때 빛살이 생긴 바로 그 자리)에서는 실제
+스캔도 틈을 통과하므로, 자세를 밖으로 밀어낸 가설이 진짜 자세와 같은 점수를
+받는다 — 08/21 왼쪽 위 코너에서 매 바퀴 추정이 맵 밖으로 튀어나간 원인.
+그래서 위치추정 전용 맵을 하나 더 낸다:
+    자유(254)  트랙 복도 (동일)
+    벽(0)      **원본 맵의 실측 벽만**
+    미지(205)  그 밖 전부  ← likelihood field 의 거리 계산에서 빠진다
+race.launch.py 가 `<map_name>_loc.yaml` 이 있으면 AMCL·auto_localize·
+localization_monitor 에만 이걸 물린다. 컨트롤러·회피·raceline 은 계속
+`_clean` 을 본다 (틈이 자유공간이 되면 그쪽으로 회피 후보가 샌다).
+
 사용법
 ──────
     python3 src/race_stack/maps/clean_map_auto.py --map our_second
@@ -65,6 +81,39 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 def disk(r):
     yy, xx = np.ogrid[-r:r + 1, -r:r + 1]
     return (yy * yy + xx * xx) <= r * r
+
+
+def write_loc_map(a, track, src_name, out_name):
+    """위치추정용 맵 <out_name>_loc.pgm/.yaml 을 쓴다 (모듈 주석 참조).
+
+    a      원본 맵 배열 (0=벽, 205=미지, 254=자유)
+    track  채택된 트랙 복도 마스크
+    """
+    loc = np.full(a.shape, 205, np.uint8)   # 기본: 미지
+    loc[a == VAL_WALL] = VAL_WALL           # 실측 벽만 점유
+    loc[track] = VAL_FREE                   # 트랙 복도 (복도 안 순간 장애물 제거)
+    loc_name = out_name + '_loc'
+    loc_pgm = os.path.join(_DIR, loc_name + '.pgm')
+    Image.fromarray(loc).save(loc_pgm)
+
+    src_yaml = os.path.join(_DIR, src_name + '.yaml')
+    if not os.path.exists(src_yaml):
+        print(f'저장: {loc_pgm}   (yaml 원본이 없어 복사 못 함)')
+        return
+    with open(src_yaml) as f:
+        txt = f.read()
+    txt = txt.replace(src_name + '.pgm', loc_name + '.pgm')
+    # free_thresh 가 0.196(=미지 205 의 점유확률)보다 크면 map_server 가 205 를
+    # "자유" 로 분류해 RViz 에서 미지가 안 보인다. AMCL 점수에는 무관하지만
+    # (likelihood field 는 점유 셀만 본다) 눈으로 검수할 수 있게 맞춘다.
+    import re
+    txt, n = re.subn(r'free_thresh:\s*[\d.]+', 'free_thresh: 0.196', txt)
+    if n == 0:
+        txt += '\nfree_thresh: 0.196\n'
+    loc_yaml = os.path.join(_DIR, loc_name + '.yaml')
+    with open(loc_yaml, 'w') as f:
+        f.write(txt)
+    print(f'저장: {loc_pgm}\n      {loc_yaml}   (위치추정용 — AMCL 만 본다)')
 
 
 def main():
@@ -163,6 +212,12 @@ def main():
         print(f'저장: {dst_pgm}\n      {dst_yaml}')
     else:
         print(f'저장: {dst_pgm}   (yaml 원본이 없어 복사 못 함)')
+
+    # ⑤b 위치추정용 맵 (<출력>_loc) — 모듈 주석 "위치추정용 맵" 참조.
+    #    실측 벽(원본 0)만 점유로 남기고 그 밖은 미지(205). 트랙 자유가
+    #    마지막에 덮으므로 맵핑 때 복도 안에 찍힌 순간 장애물(사람 등)은
+    #    지워진다 — 실제 경기 때는 없는 물체다.
+    write_loc_map(a, track, args.map, out_name)
 
     print('\n다음 단계:')
     print(f'  1) {out_name}_preview.png 를 눈으로 확인 '
