@@ -42,7 +42,15 @@ class MissionManager(Node):
         self.declare_parameter('seq_laps_q1',          3)
         self.declare_parameter('seq_laps_buffer',      1)
         self.declare_parameter('seq_laps_q2',          3)
-        self.declare_parameter('seq_time_q3',          120)
+        self.declare_parameter('seq_time_q3',           60)
+        # ── 대회 규정 (2026-08-22 확인) ──────────────────────────────────
+        #   · Q1 출발부터 Q3 종료까지 **총 4분(240s)** 을 넘으면 안 된다
+        #   · Q3 **단독으로도 1분(60s)** 을 넘으면 안 된다
+        #   두 제약을 동시에 만족시키려면 Q3 시간을 고정으로 둘 수 없다:
+        #       Q3 실제 시간 = min(seq_time_q3, seq_total_limit − 지금까지 경과)
+        #   Q1~BUFFER2 가 3분 안에 끝났으면 Q3 는 온전히 1분을 쓰고(총 ≤4분),
+        #   3분을 넘겼으면 남은 시간만 써서 총합을 정확히 4분에 맞춘다.
+        self.declare_parameter('seq_total_limit',      240)
         self.declare_parameter('start_x', 0.0)
         self.declare_parameter('start_y', 0.0)
         self.declare_parameter('start_radius', 1.5)
@@ -77,6 +85,7 @@ class MissionManager(Node):
         #   Q3 처럼 랩이 아니라 시간이 기준인 단계에서 그걸 쓰면 랩이 끝날
         #   때마다 제한시간이 다시 시작된다.
         self.stage_start = self.start_time
+        self._stage_limit = 0.0     # 이 단계에 실제로 주어진 시간 [s] (0=랩 기준)
 
         # ── 예선 시퀀스 상태 ───────────────────────────────────────────
         self.seq_enabled = bool(self.p('sequence_enabled'))
@@ -279,8 +288,11 @@ class MissionManager(Node):
         if self.seq_enabled and self.seq:
             self.stage_idx = 0
             stage = self.seq[0]
-            self.get_logger().info(f'════════ 예선 시퀀스 — {stage["name"]} ════════')
-            self._apply_stage_params(stage)
+            self.get_logger().info(
+                f'════════ 예선 시퀀스 — {stage["name"]} '
+                f'(1/{len(self.seq)}, 총 제한 '
+                f'{float(self.p("seq_total_limit")):.0f}s) ════════')
+            self._enter_stage(stage, self.start_time)
         if not self._amcl_ok:
             self.get_logger().warn(
                 '⚠ AMCL pose 미수신 상태로 출발합니다 — init_pose 가정으로 달립니다')
@@ -313,16 +325,29 @@ class MissionManager(Node):
         if self.finished or not self.started:
             return
         if self.seq_enabled and self.seq:
+            now = self.get_clock().now()
+            # ★ 총 제한(4분)은 **어느 단계에 있든** 지킨다. Q1/Q2 가 예상보다
+            #   오래 걸려 Q3 에 닿기도 전에 4분을 넘길 수 있는데, 그때도
+            #   규정 위반이므로 여기서 끊는다.
+            tot = float(self.p('seq_total_limit'))
+            if tot > 0:
+                el_all = (now - self.start_time).nanoseconds * 1e-9
+                if el_all >= tot:
+                    self.get_logger().warn(
+                        f'⚠ 총 제한 {tot:.0f}s 도달 '
+                        f'({self.seq[self.stage_idx]["name"]} 진행 중) → 정지')
+                    self.finish()
+                    return
             stage = self.seq[self.stage_idx]
-            tl = stage['time_limit']
-            if tl <= 0:
+            tl = self._stage_limit
+            if stage['time_limit'] <= 0:
                 return                       # 이 단계는 랩 기준이다
             # ★ lap_start 가 아니라 stage_start 를 쓴다 — lap_start 는 랩이 끝날
             #   때마다 갱신돼서, Q3 처럼 시간이 기준인 단계에서 그걸 쓰면 랩이
             #   끝날 때마다 제한시간이 다시 시작된다.
-            elapsed = (self.get_clock().now() - self.stage_start).nanoseconds * 1e-9
+            elapsed = (now - self.stage_start).nanoseconds * 1e-9
             if elapsed >= tl:
-                self.get_logger().info(f'[{stage["name"]}] 제한시간 {tl}s 도달')
+                self.get_logger().info(f'[{stage["name"]}] 제한시간 {tl:.0f}s 도달')
                 self._advance_stage()
             return
         if tl <= 0:
@@ -394,7 +419,7 @@ class MissionManager(Node):
             return f"[{st['name']} {min(cur, st['laps'])}/{st['laps']}] "
         if st['time_limit'] > 0:
             el = (self.get_clock().now() - self.stage_start).nanoseconds * 1e-9
-            return f"[{st['name']} {el:.0f}/{st['time_limit']}s] "
+            return f"[{st['name']} {el:.0f}/{self._stage_limit:.0f}s] "
         return f"[{st['name']}] "
 
     def _progress_banner(self):
@@ -417,6 +442,44 @@ class MissionManager(Node):
 
     # ── 예선 시퀀스 ──────────────────────────────────────────────────────
 
+    def _stage_time_limit(self, stage, now) -> float:
+        """이 단계에 실제로 줄 시간 [s]. 랩 기준이면 0.
+
+        규정이 둘이라 고정으로 못 둔다 — Q3 단독 1분, 전체 4분.
+            실제 = min(단계 기본시간, 총제한 − 지금까지 경과)
+        Q1~BUFFER2 가 3분 안에 끝났으면 Q3 는 1분을 온전히 쓰고 총 ≤4분,
+        3분을 넘겼으면 남은 만큼만 써서 총합이 정확히 4분이 된다.
+        """
+        base = float(stage['time_limit'])
+        if base <= 0:
+            return 0.0
+        tot = float(self.p('seq_total_limit'))
+        if tot <= 0:
+            return base
+        elapsed = (now - self.start_time).nanoseconds * 1e-9
+        return min(base, tot - elapsed)
+
+    def _enter_stage(self, stage, now):
+        """단계 진입 공통 처리 — 시간 계산, 로그, 파라미터 전송."""
+        self._stage_limit = self._stage_time_limit(stage, now)
+        if stage['time_limit'] > 0:
+            el = (now - self.start_time).nanoseconds * 1e-9
+            if self._stage_limit <= 0.0:
+                # 여기 오면 이미 총 제한을 다 썼다. 시간을 0 으로 두면
+                # check_time 이 "랩 기준" 으로 오해해 영영 안 끝난다.
+                self.get_logger().warn(
+                    f'⚠ {stage["name"]} 진입 시점에 이미 총 제한을 다 썼다 '
+                    f'(경과 {el:.0f}s) → 즉시 정지')
+                self.finish()
+                return False
+            self.get_logger().info(
+                f'  {stage["name"]} 제한시간 {self._stage_limit:.0f}s '
+                f'(기본 {stage["time_limit"]}s, 경과 {el:.0f}s, '
+                f'총 제한 {float(self.p("seq_total_limit")):.0f}s '
+                f'→ 종료 예정 {el + self._stage_limit:.0f}s)')
+        self._apply_stage_params(stage)
+        return True
+
     def _advance_stage(self):
         """현재 단계를 끝내고 다음 단계로. 마지막 단계면 진짜로 정지한다."""
         self.stage_idx += 1
@@ -436,7 +499,7 @@ class MissionManager(Node):
             f'════════ 다음 단계 — {stage["name"]} '
             f'({self.stage_idx + 1}/{len(self.seq)}, {goal}, '
             f'회피 {"ON" if stage["avoid"] else "off"}) ════════')
-        self._apply_stage_params(stage)
+        self._enter_stage(stage, now)
 
     def _apply_stage_params(self, stage: dict):
         self._set_remote_param(self.map_cli, 'grip_util', float(stage['grip_util']))

@@ -350,7 +350,10 @@ def generate_launch_description():
     if laps_arg is not None:
         laps = laps_arg    # ./race.sh 10laprace → laps:=10. yaml 은 안 건드린다
     if mode == 'q3' and time_limit == 0:
-        time_limit = 120   # Q3 규정: 2분
+        # ★ 하드코딩하지 않는다 — 시퀀서(mission.seq_time_q3)와 단독 q3 가
+        #   같은 값을 읽어야 규정이 바뀔 때 한 곳만 고치면 된다.
+        #   2026-08-22 규정: Q3 단독 1분.
+        time_limit = int(m.get('seq_time_q3', 60))
     if mode == 'buffer' and laps == 0:
         laps = 1           # buffer 단독 실행 시 기본 1랩
     if bench:
@@ -403,7 +406,8 @@ def generate_launch_description():
                      'seq_laps_q1':          int(m.get('seq_laps_q1',     3)),
                      'seq_laps_buffer':      int(m.get('seq_laps_buffer', 1)),
                      'seq_laps_q2':          int(m.get('seq_laps_q2',     3)),
-                     'seq_time_q3':          int(m.get('seq_time_q3',     120)),
+                     'seq_time_q3':          int(m.get('seq_time_q3',      60)),
+                     'seq_total_limit':      int(m.get('seq_total_limit', 240)),
                      }]))
 
     # ---------- 4. 안전장치 (AEB) ----------
