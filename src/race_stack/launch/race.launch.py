@@ -777,6 +777,12 @@ def generate_launch_description():
                     'l1_min':           float(mp.get('l1_min', 1.32)),
                     'l1_k':             float(mp.get('l1_k',   0.75)),
                     'spd_span':         float(fr.get('spd_span',     1.20)),
+                    # 가로로 긴 장애물(상대차 + 콘이 같은 열) 감속 — 2026-08-22
+                    'wide_slow':        bool( fr.get('wide_slow',      True)),
+                    'wide_span_min':    float(fr.get('wide_span_min',  0.70)),
+                    'wide_span_max':    float(fr.get('wide_span_max',  1.40)),
+                    'wide_min_scale':   float(fr.get('wide_min_scale', 0.35)),
+                    'wide_gap':         float(fr.get('wide_gap',       0.35)),
                     'shift_cap':        bool( fr.get('shift_cap',    True)),
                     'shift_safety':     float(fr.get('shift_safety', 1.25)),
                     'shift_min_v':      float(fr.get('shift_min_v',  0.8)),

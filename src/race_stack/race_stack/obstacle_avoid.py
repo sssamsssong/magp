@@ -2062,6 +2062,77 @@ class ObstacleAvoidMixin:
             return bool(self.get_parameter('avoid_enabled').value)
         return self.mode in ('q2', 'race')
 
+    def _wide_block_scale(self) -> float:
+        """옆으로 **너무 긴** 장애물이면 속도 배율을 낮춘다 (1.0 = 안 낮춤).
+
+        ★ 왜 필요한가 — 2026-08-22 race 주행 사고.
+          상대차와 정적 장애물이 트랙을 가로질러 **같은 열**에 놓이면 빠져나갈
+          틈이 없다. 그런데 기존 로직은 그 상황에서도 "가장 넓은 후보"를 골라
+          그대로 달렸다. 통과 못 할 폭인 걸 알면서 속도를 안 줄인 것이다.
+          BLOCKED 판정(feasible 후보가 하나도 없음)은 **더 늦게** 걸린다 —
+          후보가 하나라도 형식상 살아 있으면 안 걸리기 때문이다. 여기서는
+          "막힌 폭" 자체를 재서 그보다 먼저 감속한다.
+
+        ★ 왜 단순히 max−min 이 아닌가
+          장애물 둘이 멀찍이 떨어져 있으면 그 사이로 지나갈 수 있는데,
+          max−min 은 그것도 "폭 2m" 로 읽어 헛되이 감속한다. 그래서 횡좌표를
+          정렬해 **wide_gap 보다 벌어진 곳에서 끊고**, 가장 넓은 한 덩어리의
+          폭만 본다. 차가 지나갈 틈이 있으면 덩어리가 갈라져 폭이 작아진다.
+
+        횡좌표는 레이싱라인 법선 기준이다 (후보 격자 fr_grid 와 같은 축).
+        """
+        if not getattr(self, 'wide_slow', False):
+            return 1.0
+        pts = getattr(self, 'on_track_pts', None)
+        if pts is None or len(pts) == 0:
+            pts = np.asarray(self.blocking_pts) if self.blocking_pts else None
+        if pts is None or len(pts) == 0:
+            self._wide_span = 0.0
+            return 1.0
+        wps = self.wps
+        if wps is None or len(wps) < 3 or self.pos is None:
+            return 1.0
+
+        px, py = float(self.pos[0]), float(self.pos[1])
+        pts = np.asarray(pts, float).reshape(-1, 2)
+        keep = np.hypot(pts[:, 0] - px, pts[:, 1] - py) < self._obs_horizon()
+        if not keep.any():
+            self._wide_span = 0.0
+            return 1.0
+        p = pts[keep]
+
+        # 각 점의 최근접 웨이포인트 법선으로 횡좌표를 잰다
+        n = len(wps)
+        i = np.argmin((wps[None, :, 0] - p[:, 0, None]) ** 2
+                      + (wps[None, :, 1] - p[:, 1, None]) ** 2, axis=1)
+        tang = wps[(i + 1) % n, :2] - wps[i, :2]
+        nt = np.hypot(tang[:, 0], tang[:, 1])
+        nt[nt < 1e-9] = 1e-9
+        tang /= nt[:, None]
+        rel = p - wps[i, :2]
+        lat = np.sort(rel[:, 0] * (-tang[:, 1]) + rel[:, 1] * tang[:, 0])
+
+        # wide_gap 보다 벌어진 곳에서 끊고, 가장 넓은 덩어리의 폭
+        if len(lat) == 1:
+            span = 0.0
+        else:
+            brk = np.where(np.diff(lat) > self.wide_gap)[0]
+            st = np.concatenate([[0], brk + 1])
+            en = np.concatenate([brk, [len(lat) - 1]])
+            span = float((lat[en] - lat[st]).max())
+        self._wide_span = span
+
+        if span <= self.wide_span_min:
+            return 1.0
+        t = (span - self.wide_span_min) / max(
+            self.wide_span_max - self.wide_span_min, 1e-6)
+        t = float(np.clip(t, 0.0, 1.0))
+        scale = 1.0 + t * (self.wide_min_scale - 1.0)
+        self.get_logger().warn(
+            f'[가로막힘] 장애물 폭 {span:.2f}m (기준 {self.wide_span_min:.2f}) '
+            f'→ 속도 {scale * 100:.0f}%', throttle_duration_sec=1.0)
+        return scale
+
     def _update_lane_free(self):
         """차단 투표 창이 과반이면 회피 유지 (통로를 넓혀 놓치지 않음).
 

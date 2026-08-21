@@ -203,6 +203,16 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         #   3.2㎧ 에서 4m 가 필요하다. 그 차이를 속도로 메운다.
         #   상세는 obstacle_avoid._shift_feasible_speed 주석.
         d('shift_cap',     True)
+
+        # ── 가로로 긴 장애물 감속 (2026-08-22) ──────────────────────────
+        #   상대차와 정적 장애물이 같은 열에 놓여 빠져나갈 틈이 없을 때,
+        #   BLOCKED 가 걸리기 전에 먼저 속도를 줄인다. 자세한 근거는
+        #   obstacle_avoid._wide_block_scale 주석 참조.
+        d('wide_slow',      True)
+        d('wide_span_min',  0.70)   # 이 폭을 넘으면 감속 시작 [m]
+        d('wide_span_max',  1.40)   # 이 폭이면 최대 감속 [m]
+        d('wide_min_scale', 0.35)   # 최대 감속 시 속도 배율
+        d('wide_gap',       0.35)   # 이보다 좁게 붙어 있으면 한 덩어리로 본다 [m]
         d('shift_safety',  1.25)
         d('shift_min_v',   0.8)
         # 움직이는 상대는 gap 을 접근속도로 환산한다 (2026-08-16)
@@ -245,6 +255,12 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         self.skew_max     = float(p('skew_max'))
         self.spd_span     = float(p('spd_span'))
         self.shift_cap_on   = bool( p('shift_cap'))
+        self.wide_slow      = bool( p('wide_slow'))
+        self.wide_span_min  = float(p('wide_span_min'))
+        self.wide_span_max  = float(p('wide_span_max'))
+        self.wide_min_scale = float(p('wide_min_scale'))
+        self.wide_gap       = float(p('wide_gap'))
+        self._wide_span     = 0.0
         self.shift_safety   = float(p('shift_safety'))
         self.shift_min_v    = float(p('shift_min_v'))
         self.shift_close_min = float(p('shift_close_min'))
@@ -497,6 +513,11 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         acap = self._approach_speed_cap()
         if np.isfinite(acap):
             scale = min(scale, float(np.clip(acap / v_ref, self.sp_min_scale, 1.0)))
+
+        # ★ 옆으로 빠져나갈 틈이 아예 없을 만큼 넓게 막혔으면 속도를 줄인다.
+        #   BLOCKED 는 feasible 후보가 **하나도** 없을 때라 더 늦게 걸린다.
+        #   여기서는 막힌 폭 자체를 재서 그 전에 감속한다.
+        scale = min(scale, self._wide_block_scale())
 
         # ★ 추월 금지 구간이면 상대 뒤를 따라간다 — 옆으로 못 푸니 종으로 푼다.
         if mode == FOLLOW or (self.ot_zone_on and not getattr(self, '_ot_allowed', True)):
