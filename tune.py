@@ -135,6 +135,9 @@ SPEED_ALIASES = {
     'q2':       'limits.grip_util.q2',
     'q3':       'limits.grip_util.q3',
     'race':     'limits.grip_util.race',
+    # 예선 시퀀서(./race.sh quali) 전용 — 대회 때 주로 이 둘을 만진다
+    'buffer':   'limits.grip_util.buffer',
+    'q3_start': 'limits.grip_util.q3_start',
 }
 
 # 보기(no-arg) 에 출력할 섹션 — 주행 중 만질 값들만
@@ -167,6 +170,9 @@ RANGES = {
     'limits.grip_util.q2':    (0.05, 1.0),
     'limits.grip_util.q3':    (0.05, 1.0),
     'limits.grip_util.race':  (0.05, 1.0),
+    'limits.grip_util.buffer': (0.05, 1.0),
+    # q3_start 는 0 이 "램프 끔" 이라 하한이 0 이다
+    'limits.grip_util.q3_start': (0.0, 1.0),
     'safety.ttc_threshold':   (0.05, 3.0),
     'joystick.max_speed':     (0.0, 6.0),
 }
@@ -191,6 +197,10 @@ SPEED_GUIDE = [
     ('limits.grip_util.q2',   './race.sh q2 만'),
     ('limits.grip_util.q3',   './race.sh q3 만'),
     ('limits.grip_util.race', './race.sh race 만'),
+    ('limits.grip_util.buffer',
+     './race.sh quali 의 buffer lap 만 (단계 사이 이동)'),
+    ('limits.grip_util.q3_start',
+     'quali 의 Q3 속도 램프 시작값 (0=끔). 랩마다 +0.1 씩 q3 까지 오른다'),
     ('limits.grip_util',      '전 모드 공통 η (숫자 하나일 때)'),
     ('speed.min_speed',       '하드웨어 바닥 (이 밑으로 안 내려감)'),
 ]
@@ -211,6 +221,8 @@ NO_RATIO_GUARD = {
     'mission.start_x', 'mission.start_y',
     'sim.sx', 'sim.sy', 'sim.stheta',
     'speed.hard_cap',   # 0 = 끔 이라 2→0 이 배수 가드에 걸리면 안 된다
+    # 0 = 램프 끔. 0.6→0 이 배수 가드에 걸리면 끌 수가 없다.
+    'limits.grip_util.q3_start',
 }
 
 C = {
@@ -557,6 +569,7 @@ def show_status(cfg):
     speed_shown = set()
     print(f"\n  {C['cyn']}{C['bld']}속도{C['off']}"
           f"   {C['dim']}(./tune.sh i  또는  ./tune.sh cap=3){C['off']}")
+    _speed_name_w = max(14, *(len(d.split('.', 1)[-1]) for d, _ in SPEED_GUIDE))
     for dotted, hint in SPEED_GUIDE:
         try:
             cur = get_nested(eff, dotted)
@@ -581,8 +594,11 @@ def show_status(cfg):
                 pass
 
         active_tag = f"  {C['grn']}◀ 현재 모드{C['off']}" if is_active else ''
+        # 이름 폭은 SPEED_GUIDE 중 가장 긴 키에 맞춘다 — 고정폭으로 두면
+        # grip_util.q3_start 같은 긴 키가 들어올 때 표가 어긋난다.
         pad = ' ' * max(2, 22 - len(plain))
-        print(f"   {mark} {name:14s} {val}{pad}{C['dim']}{hint}{C['off']}{active_tag}")
+        print(f"   {mark} {name:{_speed_name_w}s} {val}{pad}"
+              f"{C['dim']}{hint}{C['off']}{active_tag}")
 
     # 가이드에 없는 키가 바뀌었으면 따로 보여준다 (gap_follower 등)
     if base is not None:
@@ -669,8 +685,11 @@ def speed_knobs(cfg):
             'q2':   './race.sh q2 만',
             'q3':   './race.sh q3 만',
             'race': './race.sh race 만',
+            # 예선 시퀀서 전용 — ./race.sh quali 안에서만 쓰인다
+            'buffer':   'quali 의 buffer lap (단계 사이 이동)',
+            'q3_start': 'quali 의 Q3 램프 시작값. 0=끔, 랩마다 +0.1 → q3',
         }
-        for m in ('q1', 'q2', 'q3', 'race'):
+        for m in ('q1', 'q2', 'q3', 'q3_start', 'race', 'buffer'):
             if m not in gu:
                 continue
             items.append({

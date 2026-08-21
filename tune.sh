@@ -15,6 +15,21 @@
 #        ./race.sh q3     →  grip_util.q3     만 사용
 #        ./race.sh race   →  grip_util.race   만 사용
 #
+#    ── 예선 시퀀서 (./race.sh quali) 는 단계마다 키를 갈아 끼운다 ──
+#
+#        Q1      →  grip_util.q1
+#        buffer  →  grip_util.buffer     (단계 사이 이동 랩, 2번 돈다)
+#        Q2      →  grip_util.q2
+#        Q3      →  grip_util.q3_start 에서 시작해 **랩마다 +0.1** 씩
+#                   grip_util.q3 까지 올린 뒤 그 값 유지
+#                   (q3_start = 0 이면 램프 없이 처음부터 q3)
+#                   증가폭은 race_script.yaml 의 mission.seq_grip_step_q3
+#
+#      예) q3=0.8, q3_start=0.6  →  1바퀴 0.6 · 2바퀴 0.7 · 3바퀴 0.8 · 이후 0.8
+#
+#      ⚠ 총 4분 제한(mission.seq_total_limit)이 있어 buffer 에서 쓴 시간이
+#        Q3 시간을 그대로 깎는다. buffer 를 너무 낮추면 Q3 가 짧아진다.
+#
 #    q1 을 올려도 ./race.sh q2 속도는 안 변한다. 반대도 같다.
 #    yaml 의 mode: 줄은 ./race.sh 인자가 있으면 무시된다.
 #
@@ -49,6 +64,8 @@
 #    ./tune.sh q2+=0.1        grip_util.q2 += 0.1 ./race.sh q2 만
 #    ./tune.sh q3=0.75                            ./race.sh q3 만
 #    ./tune.sh race=0.6                           ./race.sh race 만
+#    ./tune.sh buffer=0.5     grip_util.buffer    ./race.sh quali 의 buffer lap
+#    ./tune.sh q3_start=0.6   grip_util.q3_start  quali 의 Q3 속도 램프 시작값
 #    ./tune.sh eta+=0.1       지금 yaml mode 의 η (인자 없이 ./race.sh 할 때)
 #
 #
