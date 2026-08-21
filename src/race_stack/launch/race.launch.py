@@ -391,6 +391,12 @@ def generate_launch_description():
                      'start_x': _start_x,
                      'start_y': _start_y,
                      'start_radius': float(m.get('start_radius', 1.5)),
+                     # ★ 2026-08-22 — 랩은 출발선 반경이 아니라 웨이포인트
+                     #   진행거리로 센다. 반경 방식은 차가 원의 가장자리를
+                     #   스치면 재진입 프레임을 통째로 놓친다 (quali 실주행
+                     #   에서 7바퀴를 돌고 1랩만 세어 시퀀서가 Q1 에 갇혔다).
+                     'lap_by_progress': bool(m.get('lap_by_progress', True)),
+                     'waypoints_csv': wp_csv,
                      # ── 예선 시퀀서 (mode='quali' 일 때만 의미 있음) ──────
                      #   grip_util 은 limits.grip_util 의 모드 키를 그대로 쓴다
                      #   — 여기서 새 숫자를 만들면 단독 ./race.sh q1 과 시퀀서
