@@ -190,6 +190,9 @@ class FrenetPlanner(ObstacleAvoidMixin, Node):
         # 검사 (B): 빔 끝점이 벽에서 이만큼 떨어지면 장애물. 0 = 끔.
         #   좁은 통로 한가운데 장애물을 잡는다 (_raycast_obstacle_pts 참고).
         d('raycast_free_gap', 0.30)
+        # 벽에서 이만큼 안쪽에 찍힌 끝점은 장애물로 안 본다 [m]. 0 = 끔.
+        # frenet_min_room 과 짝을 맞출 것 (min_room ≥ wall_skip + 차 반폭).
+        d('raycast_wall_skip', 0.20)
         # ── 자세 어긋남 자기보정 ──────────────────────────────────────
         #   AMCL 이 맵과 어긋난 만큼 두 검사의 문턱을 같이 올린다.
         #   어긋남은 빔 끝점의 벽거리 중앙값으로 매 스캔 잰다 (공짜).
