@@ -288,9 +288,6 @@ class StanleyController(ObstacleAvoidMixin, Node):
         # 좁은 통로 한가운데 장애물의 원거리 검출률을 3~10배로 올린다.
         # 근거는 obstacle_avoid._raycast_obstacle_pts 주석 참고.
         self.declare_parameter('raycast_free_gap',  0.30)
-        # 벽 밴드 무시 — obstacle_avoid._raycast_obstacle_pts 가 읽는다.
-        # 믹스인 공용이라 여기서도 선언해야 미선언 예외가 안 난다.
-        self.declare_parameter('raycast_wall_skip', 0.20)
 
         def p(n): return self.get_parameter(n).value
 
