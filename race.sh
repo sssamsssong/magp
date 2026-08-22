@@ -6,6 +6,12 @@
 #    ./race.sh                 race_script.yaml의 mode대로 실행
 #    ./race.sh mapping         모드 임시 오버라이드 (yaml 안 바꿔도 됨)
 #    ./race.sh mapping-joy     조이스틱으로 SLAM 맵핑
+#    ── 주행 중 화면 ──
+#    현재 단계와 랩이 **맨 아랫줄에 고정**돼 보인다 (statusline.py).
+#        [Q2 2/3] 단계 3/5  이번 랩 8.3s  회피 ON  grip_util 0.60  |  최근 LAP 1 · 12.43s
+#    로그는 그 위로 평소처럼 흐른다. 끄려면  RACE_STATUSLINE=0 ./race.sh ...
+#    (터미널이 아니면 — 파이프·리다이렉트 — 저절로 꺼진다)
+#
 #    ./race.sh q1|q2|q3|race [컨트롤러]
 #                              컨트롤러 생략 시 yaml의 controller 값 사용
 #                              (auto | stanley | pure_pursuit | gap_follower | map)
@@ -728,6 +734,27 @@ echo "     확인용: 다른 터미널에서  ./race.sh check   /  노트북에�
 fi
 echo "============================================"
 
+# ── 주행 중 현재 랩/단계를 화면 맨 아래에 고정 ────────────────────────
+#   mission_manager 가 2초마다 찍는 진행 배너가 다른 노드 로그에 밀려
+#   올라가 버린다. statusline.py 가 그 줄만 떼어 맨 아랫줄에 붙여 둔다.
+#   끄려면  RACE_STATUSLINE=0 ./race.sh ...
+#
+#   ★ 파이프를 물리면 파이썬 노드 stdout 이 블록 버퍼링으로 바뀐다.
+#     로그가 뭉텅이로 늦게 나오면 주행 중 상황 판단이 안 되므로 반드시 끈다.
+export PYTHONUNBUFFERED=1
+export RCUTILS_LOGGING_BUFFERED_STREAM=0
+export RCUTILS_COLORIZED_OUTPUT=1     # 파이프라 TTY 판정이 꺼지는 것을 되돌린다
+
+run_launch() {
+  # exec 를 쓰면 안 된다 — 셸이 교체돼 trap(로그 커밋)이 안 걸린다.
+  if [ "${RACE_STATUSLINE:-1}" = "0" ] || [ ! -t 1 ]; then
+    ros2 launch race_stack race.launch.py "$@" || true
+  else
+    ros2 launch race_stack race.launch.py "$@" 2>&1 \
+      | python3 "$SCRIPT_DIR/statusline.py" || true
+  fi
+}
+
 if [ "$MODE" = "mapping" ]; then
     # SLAM 맵핑: 브링업+slam_toolbox는 백그라운드, 키보드 텔레옵은 포그라운드(tty 필요)
     ros2 launch race_stack mapping.launch.py &
@@ -860,8 +887,8 @@ elif [ "$RECORD_BAG" = "1" ]; then
     # SIGINT 로 곱게 닫고, 안 죽으면 3초 뒤 강제 종료. 닫힌 bag 을 git 에 올린다.
     trap 'kill -INT $BAG_PID 2>/dev/null; ( sleep 3; kill -9 $BAG_PID 2>/dev/null ) & wait $BAG_PID 2>/dev/null; commit_logs' EXIT INT TERM
 
-    ros2 launch race_stack race.launch.py mode:=$MODE \
-        ${CTRL:+controller:=$CTRL} ${BENCH:+bench:=true} ${LAPS:+laps:=$LAPS} || true
+    run_launch mode:=$MODE \
+        ${CTRL:+controller:=$CTRL} ${BENCH:+bench:=true} ${LAPS:+laps:=$LAPS}
 
     kill -INT $BAG_PID 2>/dev/null || true
     wait $BAG_PID 2>/dev/null || true
@@ -880,6 +907,5 @@ elif [ -n "${BENCH:-}" ]; then
 else
     # exec 하면 셸이 교체돼 Ctrl+C 뒤 로그 커밋을 못 한다.
     trap commit_logs EXIT
-    ros2 launch race_stack race.launch.py mode:=$MODE \
-        ${CTRL:+controller:=$CTRL} ${LAPS:+laps:=$LAPS} || true
+    run_launch mode:=$MODE ${CTRL:+controller:=$CTRL} ${LAPS:+laps:=$LAPS}
 fi
