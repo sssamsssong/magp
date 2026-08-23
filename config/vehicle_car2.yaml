@@ -338,7 +338,7 @@ tuning:
   #                0 = 램프 끔 (처음부터 q3 로 간다).
   #                예) q3 0.8 · q3_start 0.6 → 1바퀴 0.6, 2바퀴 0.7, 3바퀴 0.8
   #     둘 다 ./tune.sh buffer=0.5 / ./tune.sh q3_start=0.6 으로 조절한다.
-  grip_util: {q1: 0.5, q2: 0.5, q3: 0.9, q3_start: 0.6, race: 0.8, buffer: 0.5}
+  grip_util: {q1: 0.5, q2: 0.5, q3: 0.9, q3_start: 0.6, race: 1, buffer: 0.5}
 
 joystick:
   # ✅ 2026-08-10 실차 확인: false 가 맞다 (스틱 좌 = 앞바퀴 좌).
