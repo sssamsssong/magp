@@ -6,6 +6,17 @@ set_init_pose.py — 맵 이미지 위에서 AMCL 초기 포즈(위치+yaw)를 �
 초기 포즈는 맵 yaml 이 아니라 race_script.yaml 의 [localization] 에 있다.
 (race.launch.py 가 이 값을 AMCL 의 initial_pose.x/y/yaw 로 주입한다)
 
+★ 2026-08-24 — 여기서 고른 맵/웨이포인트로 race_script.yaml 의 map_name:/
+  waypoints: 도 같이 갱신한다(--write 시). 예전엔 init_pose 만 쓰고 이
+  둘은 손으로 고쳐야 했다 — 이 도구가 이미 맵을 고르는 과정을 거치므로
+  (인자 없이 실행하면 맵 목록에서 고름, 또는 --map/--wp-file) 그 선택을
+  트랙 설정에도 그대로 반영한다.
+  ※ 새 맵을 딴 뒤 이 스크립트를 노트북에서 돌리려면, 그 전에 젯슨에서
+  savemap/clean 한 결과(맵 파일)를 커밋·푸시하고 노트북에서 git pull 해야
+  한다 — 맵 파일 자체는 두 차가 공유하지만(git), race_script.yaml 의
+  map_name:/waypoints: 값 자체는 커밋하지 말 것(CLAUDE.md — 두 차가 다른
+  트랙을 볼 수 있어 로컬 전용으로 둔다).
+
 ──────────────────────────────────────────────────────────────
 사용법 3가지 — 상황에 맞게 하나만 쓰면 된다
 ──────────────────────────────────────────────────────────────
@@ -259,7 +270,7 @@ def draw(img, res, ox, oy, H, W, wps, poses, title, out, show=False):
 
 
 # ── GUI 클릭 픽커 ───────────────────────────────────────────────
-def run_gui(img, res, ox, oy, H, W, wps, cur, map_name, out, auto_write):
+def run_gui(img, res, ox, oy, H, W, wps, cur, map_name, out, auto_write, wp_name=None):
     state = {'pos': None, 'yaw': None, 'artists': []}
 
     poses = [cur + ('red', 'current init_pose')] if cur else []
@@ -293,7 +304,8 @@ def run_gui(img, res, ox, oy, H, W, wps, cur, map_name, out, auto_write):
             print(f'yaw = {state["yaw"]:.4f} rad ({math.degrees(state["yaw"]):.1f}°)'
                   f'   → press w to write race_script.yaml')
             if auto_write:
-                apply_pose(x, y, state['yaw'], img, res, ox, oy, H, W, True, {})
+                apply_pose(x, y, state['yaw'], img, res, ox, oy, H, W, True, {},
+                          map_name=map_name, wp_name=wp_name)
         fig.canvas.draw_idle()
 
     def on_key(ev):
@@ -306,7 +318,8 @@ def run_gui(img, res, ox, oy, H, W, wps, cur, map_name, out, auto_write):
                 print('position and heading are not both set yet')
                 return
             x, y = state['pos']
-            apply_pose(x, y, state['yaw'], img, res, ox, oy, H, W, True, {})
+            apply_pose(x, y, state['yaw'], img, res, ox, oy, H, W, True, {},
+                      map_name=map_name, wp_name=wp_name)
             plt.close(fig)
 
     fig.canvas.mpl_connect('button_press_event', on_click)
@@ -315,7 +328,8 @@ def run_gui(img, res, ox, oy, H, W, wps, cur, map_name, out, auto_write):
 
 
 # ── 적용 ────────────────────────────────────────────────────────
-def apply_pose(x, y, yaw, img, res, ox, oy, H, W, do_write, extra):
+def apply_pose(x, y, yaw, img, res, ox, oy, H, W, do_write, extra,
+               map_name=None, wp_name=None):
     yaw = math.atan2(math.sin(yaw), math.cos(yaw))     # -π~π 로 정규화
     v = cell_value(img, x, y, res, ox, oy, H, W)
     print(f'\n초기 포즈:  init_x={x:.4f}  init_y={y:.4f}  init_yaw={yaw:.4f} rad '
@@ -330,6 +344,18 @@ def apply_pose(x, y, yaw, img, res, ox, oy, H, W, do_write, extra):
         pairs += [('start_x', f'{x:.4f}'), ('start_y', f'{y:.4f}')]
     if extra.get('sim'):
         pairs += [('sx', f'{x:.4f}'), ('sy', f'{y:.4f}'), ('stheta', f'{yaw:.4f}')]
+    # ★ 2026-08-24 — 여기서 고른 맵/웨이포인트를 race_script.yaml 의
+    #   map_name:/waypoints: 에도 같이 쓴다. 예전엔 init_pose 만 갱신하고
+    #   이 둘은 안 건드려서, 맵을 새로 딴 뒤엔 결국 에디터로 수동으로
+    #   고쳐야 했다(젯슨에서 이러던 것). 이 스크립트가 이미 맵을 고르는
+    #   과정을 다 거치므로(pick_map_interactive 또는 --map/--wp-file),
+    #   그 선택을 그대로 트랙 설정에도 반영한다.
+    #   ※ CLAUDE.md 규칙대로 이 값은 커밋하지 말 것 — 두 차가 공유하는
+    #     race_script.yaml 의 로컬 전용 필드다.
+    if map_name:
+        pairs.append(('map_name', map_name))
+    if wp_name:
+        pairs.append(('waypoints', wp_name))
 
     if do_write:
         print('race_script.yaml 갱신:')
@@ -395,7 +421,8 @@ def main():
         print(f'  현재 init_pose: ({cur[0]:.3f}, {cur[1]:.3f}, {cur[2]:.3f} rad) — {tag}')
 
     if args.gui:
-        run_gui(img, res, ox, oy, H, W, wps, cur, args.map, out, args.write)
+        run_gui(img, res, ox, oy, H, W, wps, cur, args.map, out, args.write,
+               wp_name=args.wp_file)
         return
 
     # ── 위치 결정 ──
@@ -440,7 +467,8 @@ def main():
             print('\n※ 위치는 받았지만 방향이 없습니다 (--yaw 또는 --to-x/--to-y 필요)')
         return
 
-    yaw = apply_pose(x, y, yaw, img, res, ox, oy, H, W, args.write, extra)
+    yaw = apply_pose(x, y, yaw, img, res, ox, oy, H, W, args.write, extra,
+                     map_name=args.map, wp_name=args.wp_file)
 
     poses = []
     if cur:

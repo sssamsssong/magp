@@ -61,7 +61,15 @@
 #    ./race.sh steertrim       조향 중립값 자동 캘리브레이션 (IMU 기반, 전/후진 반복)
 #    ./race.sh start_pos       ★ 맵 띄우고 두 번 클릭해 출발 포즈 지정
 #                              (click1=위치 click2=방향 w=쓰기). 스택 없이 됨
-#                              인자 없으면 맵 목록에서 고른다
+#                              인자 없으면 맵 목록에서 고른다 — 그때 고른 맵/
+#                              웨이포인트로 race_script.yaml 의 map_name:/
+#                              waypoints: 도 같이 갱신된다(2026-08-24~).
+#                              노트북에 repo 를 git pull 해뒀으면 노트북
+#                              로컬에서 그대로 실행해도 된다(디스플레이 필요).
+#    ./race.sh set_map         맵만 바꾼다(init_pose 는 안 건드림). 디스플레이
+#                              불필요 — SSH 에서 바로 됨. joy2(마찰계수 측정)
+#                              처럼 AMCL 없이 조이스틱만 쓸 때용. 인자 없으면
+#                              맵 목록에서 고른다.
 #    ./race.sh savepose        ★ 지금 AMCL 위치를 출발점으로 저장 (init_* + start_*)
 #                              savemap 이 맵 원점으로 이미 넣어두므로,
 #                              **출발 자리를 옮길 때만** 쓰면 됩니다
@@ -682,6 +690,15 @@ case "$CMD" in
     #
     # 인자 없이 실행하면 맵 목록에서 고르게 한다.
     exec python3 "$SCRIPT_DIR/set_init_pose.py" "${@:2}" ;;
+
+  set_map|setmap)
+    # ★ start_pos 의 가벼운 버전 — 맵만 바꾼다. init_pose 는 안 건드리고
+    #   디스플레이도 전혀 필요 없다(순수 텍스트, matplotlib 없음).
+    #   joy2(--bag, 마찰계수 측정) 처럼 AMCL 없이 조이스틱으로만 도는
+    #   용도 전용 — 출발 위치를 몰라도 상관없을 때. 자율주행(q1/q2/q3/
+    #   race/quali)에 쓸 거면 start_pos 를 쓸 것(맵+출발위치를 같이 잡음).
+    # 인자 없이 실행하면 맵 목록에서 고르게 한다.
+    exec python3 "$SCRIPT_DIR/set_map.py" "${@:2}" ;;
 
   savepose)
     # 지금 AMCL 이 믿고 있는 위치를 race_script.yaml 의 초기 추정으로 굳힌다.
