@@ -68,6 +68,9 @@ def generate_launch_description():
     controller = cfg.get('controller', 'auto')
     bench = False
     laps_arg = None      # laps:= 로 넘어오면 mission.laps 를 이긴다
+    q1laps_arg = None    # q1laps:=/q2laps:= 로 넘어오면 시퀀서(quali)의
+    q2laps_arg = None    #   seq_laps_q1/seq_laps_q2 를 이긴다 (quali-mini용)
+    nobuffer_arg = False # nobuffer:=true 면 BUFFER1/2 단계를 통째로 뺀다
     for a in sys.argv:
         if a.startswith('mode:='):
             mode = a.split(':=')[1]
@@ -80,6 +83,15 @@ def generate_launch_description():
             # yaml(mission.laps)을 건드리지 않는 게 핵심이다 — 대회장에서 모드를
             # 오갈 때마다 파일을 고치면 되돌리는 걸 잊는다.
             laps_arg = int(a.split(':=')[1])
+        elif a.startswith('q1laps:='):
+            # ./race.sh quali-mini 용. 같은 이유로 mode 는 'quali' 그대로 두고
+            # (컨트롤러·frenet·ot_zone·grip_util 선택을 그대로 물려받는다)
+            # 시퀀서 랩수만 launch 인자로 줄인다 — yaml 은 안 건드린다.
+            q1laps_arg = int(a.split(':=')[1])
+        elif a.startswith('q2laps:='):
+            q2laps_arg = int(a.split(':=')[1])
+        elif a.startswith('nobuffer:='):
+            nobuffer_arg = a.split(':=')[1].lower() in ('true', '1', 'yes')
     if mode not in DEFAULT_CONTROLLER:
         raise RuntimeError(f'race.launch.py: 잘못된 mode "{mode}"')
 
@@ -410,9 +422,12 @@ def generate_launch_description():
                      'seq_grip_util_q3_start':
                          float(_gu.get('q3_start', 0.0) if isinstance(_gu, dict) else 0.0),
                      'seq_grip_step_q3':     float(m.get('seq_grip_step_q3', 0.1)),
-                     'seq_laps_q1':          int(m.get('seq_laps_q1',     3)),
+                     'seq_laps_q1':          (q1laps_arg if q1laps_arg is not None
+                                              else int(m.get('seq_laps_q1', 3))),
                      'seq_laps_buffer':      int(m.get('seq_laps_buffer', 1)),
-                     'seq_laps_q2':          int(m.get('seq_laps_q2',     3)),
+                     'seq_laps_q2':          (q2laps_arg if q2laps_arg is not None
+                                              else int(m.get('seq_laps_q2', 3))),
+                     'seq_skip_buffer':      nobuffer_arg,
                      'seq_time_q3':          int(m.get('seq_time_q3',      75)),
                      'seq_total_limit':      int(m.get('seq_total_limit', 255)),
                      }]))

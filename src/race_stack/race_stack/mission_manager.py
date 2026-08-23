@@ -52,6 +52,15 @@ class MissionManager(Node):
         self.declare_parameter('seq_laps_q1',          3)
         self.declare_parameter('seq_laps_buffer',      1)
         self.declare_parameter('seq_laps_q2',          3)
+        # ★ quali-mini 용 (2026-08-24). seq_laps_buffer 를 0 으로 주면 안 된다 —
+        #   아래 self.seq 구성에서 각 단계는 laps>0 이어야 랩 완주로 다음
+        #   단계로 넘어간다(pose_cb 참고). 0 은 "무제한" 취급 관례(mission.laps
+        #   등)와 겹쳐서, BUFFER 단계가 laps=0 이면 **영원히 안 끝난다**
+        #   (BUFFER 의 time_limit 도 0 이라 시간으로도 못 넘어간다). 그래서
+        #   버퍼를 없애려면 랩수를 0으로 주지 말고, 이 스위치로 BUFFER1/2
+        #   단계 자체를 시퀀스에서 뺀다.
+        self.declare_parameter('seq_skip_buffer',      False)
+
         self.declare_parameter('seq_time_q3',           75)
         # ── 대회 규정 (2026-08-22 확인) ──────────────────────────────────
         #   · Q1 출발부터 Q3 종료까지 **총 4분(240s)** 을 넘으면 안 된다
@@ -126,6 +135,10 @@ class MissionManager(Node):
                  'grip_step':  float(self.p('seq_grip_step_q3')),
                  'avoid': False},
             ]
+            if bool(self.p('seq_skip_buffer')):
+                # BUFFER 단계 자체를 뺀다 (laps=0 으로 두면 영원히 안 끝난다 —
+                # 위 declare_parameter 주석 참고). Q1 → Q2 → Q3 로 바로 이어간다.
+                self.seq = [s for s in self.seq if not s['name'].startswith('BUFFER')]
             # map_controller / frenet_planner 가 **항상 떠 있다**고 가정한다
             # (race.launch.py 가 quali 에서 둘 다 띄운다).
             self.map_cli = self.create_client(SetParameters,

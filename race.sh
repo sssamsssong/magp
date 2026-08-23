@@ -19,6 +19,10 @@
 #    ./race.sh quali           ★ 예선 시퀀서 — Q1→buffer→Q2→buffer→Q3 를
 #                              한 프로세스로 이어간다 (Fully Autonomous 용,
 #                              사람이 단계마다 다시 누를 필요 없음)
+#    ./race.sh quali-mini [컨트롤러]  quali 와 동일, Q1/Q2 만 2랩(규정 3랩 대신)
+#                              + buffer 단계 없이 Q1→Q2→Q3 로 바로 이어감
+#                              — 연습 세션이 짧을 때. race_script.yaml 은
+#                              안 건드림(laps:= 처럼 launch 인자로만 줄임)
 #    ./race.sh buffer          단계 사이 저속 이동 랩만 단독 테스트
 #    ./race.sh 10laprace [컨트롤러]  ★ 1대1 경주 10바퀴 (mode=race, laps=10)
 #                              race 와 완전히 같은 스택이고 바퀴수만 다르다.
@@ -30,6 +34,11 @@
 #                              /scan · odom · IMU · pose · drive. 사후 분석용.
 #                              logs/bags/<시각>_<모드>_<컨트롤러>/ 에 쌓이고,
 #                              Ctrl+C 후 CSV·bag 을 car1/car2 에 커밋·푸시한다.
+#                              ★ slip_friction 도 자동 실행 — 원 그리기 없이
+#                              주행만 해도 logs/slip_tests/*_friction.csv 에
+#                              μ̂ 가 쌓인다 (q1|q2|q3|race|quali|joy2 전부 지원 —
+#                              joy 는 원래대로 두고 joy2 를 새로 만들었다).
+#                              나중에 ontrack_sysid 로 Pacejka B/C/D/E 를 꺼낼 수 있다.
 #    ./race.sh push-logs       아직 안 올라간 logs/ 를 커밋·푸시 (팀 공유기에서
 #                              푸시가 실패한 뒤, 인터넷 되는 와이파이에서)
 #    ./race.sh check           토픽이 실제로 발행 중인지 표로 확인 (주행 중 별도 터미널)
@@ -37,6 +46,8 @@
 #    ./race.sh savemap <이름>  맵핑 끝난 뒤 맵 저장 (맵핑 창을 끄기 전에)
 #    ./race.sh teleop          키보드 텔레옵만 단독 실행
 #    ./race.sh joy             조이스틱 수동 조종 (브링업 포함)
+#    ./race.sh joy2 --bag      joy 와 동일 + --bag 조합에서만 imu_odom·
+#                              slip_friction 자동 기동 (joy 는 그대로 둠)
 #    ./race.sh log <이름>      웨이포인트 기록 (수동주행하며 레이싱라인 녹화)
 #    ./race.sh waypoints [맵]  SLAM 맵에서 레이싱라인 생성 (GUI, 디스플레이 필요)
 #    ./race.sh clean [맵]      SLAM 맵 정제 (빛살 제거). 화면 없이 대화형
@@ -193,7 +204,7 @@ STACK_PROCS="[r]ace\.launch\.py|[m]apping\.launch\.py|[u]rg_node_driver|[v]esc_d
 [m]ission_manager|[p]ure_pursuit|[g]ap_follower|[m]ap_controller|[s]afety_node|[a]ckermann_mux|\
 [a]ckermann_to_vesc_node|[v]esc_to_odom_node|[s]lam_toolbox|\
 [j]oy_node|[j]oy_teleop|[s]tatic_transform_publisher|[k]eyboard_teleop|[j]oystick_teleop|\
-[w]aypoint_logger"
+[w]aypoint_logger|[s]lip_friction|[i]mu_odom"
 running_pids () { pgrep -f "$STACK_PROCS" 2>/dev/null || true; }
 
 kill_stack () {
@@ -329,6 +340,41 @@ EOF
     fi
 }
 
+# ── slip_friction 백그라운드 기동 (--bag 조합 전용, 2026-08-24 car1 fa581c7 이식) ──
+#   --bag 로 녹화하는 어떤 주행이든(q1/q2/q3/race/quali/joy2) 원 그리기 시험
+#   없이도 조용히 마찰계수(μ̂)를 뽑아낸다. logs/slip_tests/*_friction.csv 에
+#   쌓이고, 나중에 ontrack_sysid 로 Pacejka B/C/D/E 까지 뽑을 수 있다:
+#     ros2 run race_stack ontrack_sysid -- logs/slip_tests/*_friction.csv \
+#         --mass 3.487 --lf 0.1750 --lr 0.1450 --izz 0.040
+#   launch 가 토픽을 먼저 열어야 구독이 되므로 6초 뒤 기동한다. 실패해도
+#   조용히 넘어간다 — 이건 진단용 부가 기록이지, 주행 자체를 막으면 안 된다.
+start_slip_friction_bg () {
+    # $1 = odom_topic 오버라이드. 기본 /odom_imu — race.launch.py(q1/q2/q3/
+    #   race/quali)는 imu_odom 을 직접 띄우므로 그대로 쓰면 된다. joy2 는
+    #   joystick.launch.py 에 imu_odom 이 없어서 자기가 따로 띄운 뒤에도
+    #   같은 /odom_imu 를 넘긴다(2호차 speed_sign=-1.0 보정 때문에 raw
+    #   /odom 을 직접 물리면 안 된다 — 위 joy2 케이스 주석 참고).
+    local odom_topic="${1:-/odom_imu}"
+    local _vesc="$SCRIPT_DIR/config/vesc.yaml"
+    local SF_GAIN SF_OFF SF_SMIN SF_SMAX SF_WB
+    SF_GAIN=$(python3 -c "import yaml; p=yaml.safe_load(open('$_vesc'))['/**']['ros__parameters']; print(p['steering_angle_to_servo_gain'])" 2>/dev/null || echo "-0.761")
+    SF_OFF=$(python3  -c "import yaml; p=yaml.safe_load(open('$_vesc'))['/**']['ros__parameters']; print(p['steering_angle_to_servo_offset'])" 2>/dev/null || echo "0.418")
+    SF_SMIN=$(python3 -c "import yaml; p=yaml.safe_load(open('$_vesc'))['/**']['ros__parameters']; print(p.get('servo_min', 0.15))" 2>/dev/null || echo "0.15")
+    SF_SMAX=$(python3 -c "import yaml; p=yaml.safe_load(open('$_vesc'))['/**']['ros__parameters']; print(p.get('servo_max', 0.85))" 2>/dev/null || echo "0.85")
+    SF_WB=$(get_yaml geometry.wheelbase 2>/dev/null || echo "0.33")
+    ( sleep 6 && exec ros2 run race_stack slip_friction --ros-args \
+          -p servo_gain:="$SF_GAIN" \
+          -p servo_offset:="$SF_OFF" \
+          -p servo_min:="$SF_SMIN" \
+          -p servo_max:="$SF_SMAX" \
+          -p wheelbase:="$SF_WB" \
+          -p odom_topic:="$odom_topic" \
+          -p deskew:=false \
+          >/dev/null 2>&1 ) &
+    SLIP_PID=$!
+    echo "[race.sh]   slip_friction → logs/slip_tests/ (6초 후 기동, odom=$odom_topic, ontrack_sysid 용)"
+}
+
 case "$CMD" in
   stop)
     kill_stack; exit $? ;;
@@ -442,6 +488,57 @@ case "$CMD" in
     exec ros2 run race_stack keyboard_teleop --ros-args -p max_speed:=$(get_yaml speed.mapping_max) ;;
   joy)
     exec ros2 launch race_stack joystick.launch.py ;;
+  joy2)
+    # ★ joy 는 그대로 두고(계속 문제없이 써왔으니 손대지 않는다), 새로
+    #   만든 것(--bag 시 imu_odom+slip_friction 자동 기동)만 여기 넣는다.
+    #   조작법·조이스틱 동작은 joy 와 완전히 동일 — --bag 없이 쓰면
+    #   ./race.sh joy 와 사실상 똑같다.
+    if [ "$RECORD_BAG" != "1" ]; then
+        exec ros2 launch race_stack joystick.launch.py
+    fi
+    # ★ --bag 조합 (2026-08-24) — exec 를 쓰면 trap 이 안 걸려 bag 이 안
+    #   닫히므로(위 run_launch 주석과 같은 이유), 여기서만 exec 를 뺀다.
+    #   원 그리는 슬립 테스트(./race.sh slip) 대신, 그냥 평소처럼 조이스틱으로
+    #   몰면서 slip_friction 이 조용히 μ̂ 를 뽑게 하는 용도 — 대회장처럼 넓은
+    #   공간을 못 구했을 때 쓰라고 만들었다.
+    BAG_DIR="$SCRIPT_DIR/logs/bags/$(date +%Y%m%d_%H%M%S)_joy2"
+    mkdir -p "$(dirname "$BAG_DIR")"
+    echo "[race.sh] ★ bag 녹화: $BAG_DIR"
+    ros2 bag record -o "$BAG_DIR" \
+        /scan /odom /odom_imu /sensors/imu/raw /sensors/core \
+        /commands/servo/position /teleop >/dev/null 2>&1 &
+    BAG_PID=$!
+    # ★ joystick.launch.py 자체엔 imu_odom 이 없다(race.launch.py 만 띄움).
+    #   그런데 raw /odom 을 slip_friction 에 바로 물리면 안 된다: 2호차는
+    #   localization.speed_sign = -1.0 이라(config/vehicle_car2.yaml) raw
+    #   /odom 의 속도 부호가 뒤집혀 있다. imu_odom 이 그걸 보정해 /odom_imu 로
+    #   낸다 — race.launch.py 도 그래서 이걸 쓴다(위 start_slip_friction_bg 의
+    #   기본값과 같은 이유). 부호가 뒤집힌 채로 넣으면 kin_wz = v·tanδ/L 가
+    #   반대로 나가 실측 요레이트와 항상 어긋나 보여 "슬립"으로 오판하고
+    #   μ̂ 가 거의 안 쌓인다. 그래서 여기서 imu_odom 을 직접 띄운다.
+    ( sleep 2 && exec ros2 run race_stack imu_odom --ros-args \
+        -p imu_yaw:="$(get_yaml localization.imu_yaw 2>/dev/null || echo true)" \
+        -p imu_topic:="$(get_yaml localization.imu_topic 2>/dev/null || echo /sensors/imu/raw)" \
+        -p gyro_units:="$(get_yaml localization.imu_gyro_units 2>/dev/null || echo deg)" \
+        -p yaw_axis:="$(get_yaml localization.imu_yaw_axis 2>/dev/null || echo z)" \
+        -p yaw_sign:="$(get_yaml localization.imu_yaw_sign 2>/dev/null || echo 1.0)" \
+        -p speed_sign:="$(get_yaml localization.speed_sign 2>/dev/null || echo 1.0)" \
+        -p bias_warmup_sec:="$(get_yaml localization.imu_bias_warmup_sec 2>/dev/null || echo 3.0)" \
+        -p bias_alpha:="$(get_yaml localization.imu_bias_alpha 2>/dev/null || echo 0.002)" \
+        -p stationary_speed:="$(get_yaml localization.imu_stationary_speed 2>/dev/null || echo 0.05)" \
+        -p stationary_rate_deg:="$(get_yaml localization.imu_stationary_rate_deg 2>/dev/null || echo 2.0)" \
+        >/dev/null 2>&1 ) &
+    IMU_PID=$!
+    echo "[race.sh]   imu_odom → /odom_imu (2초 후 기동, speed_sign 보정 포함)"
+    start_slip_friction_bg /odom_imu
+    trap 'kill $IMU_PID $SLIP_PID 2>/dev/null || true; kill -INT $BAG_PID 2>/dev/null; ( sleep 3; kill -9 $BAG_PID 2>/dev/null ) & wait $BAG_PID 2>/dev/null; commit_logs' EXIT INT TERM
+    ros2 launch race_stack joystick.launch.py || true
+    kill $IMU_PID $SLIP_PID 2>/dev/null || true
+    kill -INT $BAG_PID 2>/dev/null || true
+    wait $BAG_PID 2>/dev/null || true
+    echo "[race.sh] bag 저장 완료: $BAG_DIR  ($(du -sh "$BAG_DIR" 2>/dev/null | cut -f1))"
+    commit_logs
+    exit 0 ;;
   slip)
     # 타이어 슬립 데이터 수집. 조종(조이스틱)까지 한 번에 올린다.
     # ←→ = 시험 조향각(= L스틱 최대값), ↑↓ = 램프 목표 속도, B = 시작/종료
@@ -708,6 +805,26 @@ PYEOF
       ""|auto|stanley|pure_pursuit|gap_follower|map) ;;
       * ) echo "알 수 없는 컨트롤러: $CTRL  (auto|stanley|pure_pursuit|gap_follower|map)"; exit 1 ;;
     esac ;;
+  quali-mini)
+    # quali 와 완전히 같은 스택 — 시퀀서를 줄인 것 (연습 세션이 짧을 때).
+    #   Q1 3→2, Q2 3→2, buffer 는 아예 뺀다(Q1→Q2→Q3), Q3 는 그대로.
+    #   race_script.yaml(mission.seq_laps_*) 은 안 건드린다 — 10laprace 와 같은
+    #   이유로, launch 인자(q1laps:=/q2laps:=/nobuffer:=)로만 넘긴다. mode 는
+    #   'quali' 그대로 둔다(컨트롤러·frenet·ot_zone·grip_util 선택이 전부
+    #   mode 에 물려 있어, 새 mode 이름을 쓰면 그 넷을 다 따라 정의해야 한다).
+    #   ★ seq_laps_buffer:=0 이 아니라 nobuffer:=true 를 쓴다 — 0 은 랩수
+    #     기준으로 "무제한" 취급과 겹쳐 BUFFER 단계가 영원히 안 끝난다
+    #     (mission_manager.py declare_parameter('seq_skip_buffer') 주석 참고).
+    MODE=quali
+    Q1LAPS=2
+    Q2LAPS=2
+    NOBUFFER=1
+    CTRL=${2:-}
+    case "$CTRL" in
+      ""|auto|stanley|pure_pursuit|gap_follower|map) ;;
+      * ) echo "알 수 없는 컨트롤러: $CTRL  (auto|stanley|pure_pursuit|gap_follower|map)"; exit 1 ;;
+    esac
+    echo "[race.sh] quali-mini — Q1 2랩→Q2 2랩→Q3 (버퍼 없음, mode=quali)" ;;
   * ) echo "알 수 없는 명령: $CMD"; exit 1 ;;
 esac
 
@@ -884,12 +1001,15 @@ elif [ "$RECORD_BAG" = "1" ]; then
         /loc/residual \
         /obstacle /overtake_zone >/dev/null 2>&1 &
     BAG_PID=$!
+    start_slip_friction_bg   # 기본 /odom_imu — race.launch.py 가 imu_odom 을 띄운다
     # SIGINT 로 곱게 닫고, 안 죽으면 3초 뒤 강제 종료. 닫힌 bag 을 git 에 올린다.
-    trap 'kill -INT $BAG_PID 2>/dev/null; ( sleep 3; kill -9 $BAG_PID 2>/dev/null ) & wait $BAG_PID 2>/dev/null; commit_logs' EXIT INT TERM
+    trap 'kill $SLIP_PID 2>/dev/null || true; kill -INT $BAG_PID 2>/dev/null; ( sleep 3; kill -9 $BAG_PID 2>/dev/null ) & wait $BAG_PID 2>/dev/null; commit_logs' EXIT INT TERM
 
     run_launch mode:=$MODE \
-        ${CTRL:+controller:=$CTRL} ${BENCH:+bench:=true} ${LAPS:+laps:=$LAPS}
+        ${CTRL:+controller:=$CTRL} ${BENCH:+bench:=true} ${LAPS:+laps:=$LAPS} \
+        ${Q1LAPS:+q1laps:=$Q1LAPS} ${Q2LAPS:+q2laps:=$Q2LAPS} ${NOBUFFER:+nobuffer:=true}
 
+    kill $SLIP_PID 2>/dev/null || true
     kill -INT $BAG_PID 2>/dev/null || true
     wait $BAG_PID 2>/dev/null || true
     echo "[race.sh] bag 저장 완료: $BAG_DIR  ($(du -sh "$BAG_DIR" 2>/dev/null | cut -f1))"
@@ -899,7 +1019,8 @@ elif [ -n "${BENCH:-}" ]; then
     # 함께 띄우는 joy_node+joy_teleop 은 /teleop 으로 따로 나가 그 경로를 우회한다.
     # 그래서 조이스틱 노드 자체를 죽인다 — box 는 조이스틱을 쓸 이유가 없다.
     ros2 launch race_stack race.launch.py mode:=$MODE \
-        ${CTRL:+controller:=$CTRL} bench:=true ${LAPS:+laps:=$LAPS} &
+        ${CTRL:+controller:=$CTRL} bench:=true ${LAPS:+laps:=$LAPS} \
+        ${Q1LAPS:+q1laps:=$Q1LAPS} ${Q2LAPS:+q2laps:=$Q2LAPS} ${NOBUFFER:+nobuffer:=true} &
     LAUNCH_PID=$!
     trap "kill $LAUNCH_PID 2>/dev/null; pkill -9 -f '[j]oy_teleop' 2>/dev/null" EXIT
     bench_kill_joy
@@ -907,5 +1028,6 @@ elif [ -n "${BENCH:-}" ]; then
 else
     # exec 하면 셸이 교체돼 Ctrl+C 뒤 로그 커밋을 못 한다.
     trap commit_logs EXIT
-    run_launch mode:=$MODE ${CTRL:+controller:=$CTRL} ${LAPS:+laps:=$LAPS}
+    run_launch mode:=$MODE ${CTRL:+controller:=$CTRL} ${LAPS:+laps:=$LAPS} \
+        ${Q1LAPS:+q1laps:=$Q1LAPS} ${Q2LAPS:+q2laps:=$Q2LAPS} ${NOBUFFER:+nobuffer:=true}
 fi
