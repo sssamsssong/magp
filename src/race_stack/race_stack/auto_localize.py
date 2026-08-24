@@ -78,6 +78,29 @@ class AutoLocalize(Node):
         self.declare_parameter('jump_warn', 0.30)
         # 복도 벽 방향으로 yaw 를 먼저 맞출 것인가
         self.declare_parameter('use_walls', True)
+
+        # ── 주행 중 재정렬(/race/relocalize) — 2026-08-25 ────────────────
+        #   ★ 기동 시 정렬과 **탐색 중심이 다르다.** 기동 때는 init_pose(출발선)
+        #     주변을 훑는 게 맞지만, 경기 중 충돌 뒤에 재정렬할 때 출발선을
+        #     훑으면 트랙 반대편에 있는 차를 출발선에 갖다 놓으려 든다.
+        #     그래서 그때는 **지금 AMCL 자세** 를 중심으로 훑는다.
+        #   ※ 충돌 직후 자세는 얼어붙어 있을 수 있으므로(정지 중 AMCL 미갱신)
+        #     탐색 범위를 기동 때보다 넓게 잡는다. stuck_recovery 는 조금
+        #     후진해서 AMCL 을 한 번 깨운 뒤 이걸 부른다.
+        self.declare_parameter('relocalize_from_current', True)
+        self.declare_parameter('relocalize_search_xy', 1.0)        # ± m
+        self.declare_parameter('relocalize_search_yaw_deg', 30.0)  # ± deg
+
+        # ── 수동 지정 모드 (./race.sh <모드> --self) — 2026-08-25 ────────
+        #   자동 정렬을 아예 안 하고 사람이 RViz "2D Pose Estimate" 로 찍어줄
+        #   때까지 기다린다. 대칭 트랙이라 자동 정렬이 자꾸 틀리는 자리에서 쓴다.
+        #
+        #   ★ 노드를 안 띄우는 것과는 다르다. mission_manager 의 출발 게이트는
+        #     /race/localized(정합 평균오차) 를 기다리는데, 그건 이 노드만
+        #     발행한다. 노드를 빼면 게이트가 영영 안 열린다. 그래서 노드는
+        #     띄우되 "탐색만 안 하고, 사람이 찍은 자세의 적합도를 재서 발행" 한다.
+        #     → 사람도 자기가 찍은 위치가 얼마나 맞는지(몇 cm) 바로 보게 된다.
+        self.declare_parameter('manual_only', False)
         self.declare_parameter('wall_range', 3.0)     # 옆벽으로 볼 최대 거리 (m)
         # 스캔은 PCA 직선다움(0~1), 맵은 히스토그램 봉우리 비율 — 척도가 달라 따로 둔다
         self.declare_parameter('wall_scan_min', 0.85)
@@ -99,6 +122,10 @@ class AutoLocalize(Node):
         self.scan = None
         self.speed = 0.0          # 주행 중 재시드 방지용
         self.done = False
+        self._amcl_pose = None    # (x, y, yaw) — 재정렬 시 탐색 중심
+        # 이번 정렬에만 쓰는 (중심, 탐색반경, yaw반경, 벽정렬). None 이면 init 기준.
+        #   벽정렬이 None 이면 use_walls 파라미터를 그대로 쓴다.
+        self._override = None
         self.dist = None          # 거리변환 (m 단위), 맵 픽셀 격자
         self._bnd = None          # (by, bx, 방향, 세기) 벽 표면 픽셀
 
@@ -127,10 +154,16 @@ class AutoLocalize(Node):
                                  self._manual_cb, 10)
         self.create_timer(float(gp('startup_delay')), self._try)
 
-        self.get_logger().info(
-            f'AutoLocalize 시작 — init ({self.init[0]:.2f}, {self.init[1]:.2f}, '
-            f'{math.degrees(self.init[2]):.1f}°) 주변 ±{gp("search_xy")}m '
-            f'±{gp("search_yaw_deg")}° 탐색')
+        if bool(gp('manual_only')):
+            self.get_logger().warn(
+                'AutoLocalize — ★ 수동 지정 모드(--self). 자동 정렬을 하지 '
+                '않습니다. RViz "2D Pose Estimate" 로 찍어주세요. 찍으면 그 '
+                '자세의 적합도(cm)를 재서 출발 게이트를 엽니다')
+        else:
+            self.get_logger().info(
+                f'AutoLocalize 시작 — init ({self.init[0]:.2f}, {self.init[1]:.2f}, '
+                f'{math.degrees(self.init[2]):.1f}°) 주변 ±{gp("search_xy")}m '
+                f'±{gp("search_yaw_deg")}° 탐색')
 
     # ── 맵 → 거리변환 ──────────────────────────────────────────────────────
     def _load_map(self, path):
@@ -194,6 +227,10 @@ class AutoLocalize(Node):
             return
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
+        # 재정렬(/race/relocalize)의 탐색 중심으로 쓴다 — 아래 _redo_cb 참고.
+        q = msg.pose.pose.orientation
+        self._amcl_pose = (x, y, math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                                            1.0 - 2.0 * (q.y * q.y + q.z * q.z)))
         ix = int((x - self.ox) / self.res)
         iy = int(self.H - (y - self.oy) / self.res)
         inside = 0 <= ix < self.W and 0 <= iy < self.H
@@ -221,22 +258,67 @@ class AutoLocalize(Node):
         import time as _t
         if _t.time() - self._self_pub_t < 0.5:
             return                      # 우리가 쏜 것
-        if self.done:
+        manual_only = bool(self.get_parameter('manual_only').value)
+        # 수동 지정 모드에서는 사람이 다시 찍을 때마다 매번 다시 평가한다.
+        if self.done and not manual_only:
             return
+        x = msg.pose.pose.position.x
+        y = msg.pose.pose.position.y
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
         self.done = True
-        self.get_logger().warn(
-            f'수동 /initialpose 수신 ({msg.pose.pose.position.x:+.2f}, '
-            f'{msg.pose.pose.position.y:+.2f}) — 자동 정렬을 **건너뜁니다**. '
-            f'다시 자동으로 맞추려면 /race/relocalize 에 true 를 쏘세요.')
+
+        # ★★ 사람이 찍은 자세의 **적합도를 재서 /race/localized 로 발행한다.**
+        #   안 하면 mission_manager 의 출발 게이트가 "위치 정렬" 을 영원히
+        #   기다린다 — 그 토픽은 이 노드만 내기 때문이다 (2026-08-25 발견.
+        #   그전에는 자동 정렬이 **먼저** 돈 경우에만 우연히 게이트가 열렸다).
+        #   탐색은 하지 않는다(±0): 사람이 정한 자세를 그대로 존중하고
+        #   점수만 매긴다. 벽 정렬도 끈다 — 켜면 사람이 찍은 yaw 를 덮어쓴다.
+        if self.dist is not None and self.scan is not None:
+            self._override = ((x, y, yaw), 0.0, 0.0, False)
+            self.get_logger().warn(
+                f'수동 /initialpose 수신 ({x:+.2f}, {y:+.2f}, '
+                f'{math.degrees(yaw):+.0f}°) — 탐색 없이 이 자세의 적합도만 잽니다')
+            self._align(self.scan)      # 여기서 fit 이 발행된다
+        else:
+            self.get_logger().warn(
+                f'수동 /initialpose 수신 ({x:+.2f}, {y:+.2f}) — 맵/스캔이 아직 '
+                f'없어 적합도를 못 쟀습니다. 출발 게이트가 안 열리면 다시 찍으세요')
 
     def _redo_cb(self, msg: Bool):
-        if msg.data:
-            self.done = False
-            self.get_logger().info('재정렬 요청 수신')
-            self._try()
+        if not msg.data:
+            return
+        gp = lambda n: self.get_parameter(n).value
+        self.done = False
+        # ★ 경기 중 재정렬은 **지금 자세** 를 중심으로 훑는다 (init_pose 아님).
+        #   출발선을 중심으로 훑으면 트랙 반대편의 차를 출발선으로 끌어간다.
+        if bool(gp('relocalize_from_current')) and self._amcl_pose is not None:
+            self._override = (self._amcl_pose,
+                              float(gp('relocalize_search_xy')),
+                              float(gp('relocalize_search_yaw_deg')), None)
+            x, y, th = self._amcl_pose
+            self.get_logger().info(
+                f'재정렬 요청 수신 — 현재 자세 ({x:+.2f}, {y:+.2f}, '
+                f'{math.degrees(th):+.0f}°) 주변 ±{self._override[1]}m '
+                f'±{self._override[2]}° 탐색')
+        else:
+            self._override = None
+            self.get_logger().info('재정렬 요청 수신 — init_pose 주변 탐색')
+        self._try()
 
     def _try(self):
         if self.done or self.dist is None:
+            return
+        # ★ 수동 지정 모드 — 자동 탐색을 하지 않고 사람이 찍어줄 때까지 기다린다.
+        #   /race/relocalize 로 명시적으로 부른 경우(_override 가 세팅된 상태)는
+        #   예외다 — stuck_recovery 의 복구 재정렬은 이 모드에서도 돌아야 한다.
+        if bool(self.get_parameter('manual_only').value) and self._override is None:
+            self.get_logger().warn(
+                '수동 지정 모드(--self) — 자동 정렬을 하지 않습니다. '
+                'RViz 에서 "2D Pose Estimate" 로 차 위치를 찍어주세요 '
+                '(찍으면 적합도를 재서 출발 게이트를 엽니다)',
+                throttle_duration_sec=5.0)
             return
         if self.scan is None:
             self.get_logger().warn('스캔 대기 중…')
@@ -384,18 +466,30 @@ class AutoLocalize(Node):
         py = r[idx] * np.sin(a[idx]) + self.laser_dy      # (N, ) base_link 기준
 
         # 후보 격자
-        sxy = float(gp('search_xy')); step = float(gp('step_xy'))
-        syaw = math.radians(float(gp('search_yaw_deg')))
+        #   ★ _override 가 있으면(주행 중 재정렬) 중심·범위를 그걸로 바꾼다.
+        #     한 번 쓰고 버린다 — 다음 정렬은 다시 init 기준이다.
+        if self._override is not None:
+            center, o_sxy, o_syaw, o_walls = self._override
+            self._override = None
+            sxy = o_sxy
+            syaw = math.radians(o_syaw)
+            walls_on = bool(gp('use_walls')) if o_walls is None else bool(o_walls)
+        else:
+            center = self.init
+            sxy = float(gp('search_xy'))
+            syaw = math.radians(float(gp('search_yaw_deg')))
+            walls_on = bool(gp('use_walls'))
+        step = float(gp('step_xy'))
         dyaw = math.radians(float(gp('step_yaw_deg')))
         dx = np.arange(-sxy, sxy + 1e-9, step)
         dy = np.arange(-sxy, sxy + 1e-9, step)
         dth = np.arange(-syaw, syaw + 1e-9, dyaw)
-        x0, y0, th0 = self.init
+        x0, y0, th0 = center
 
         # ── 벽 방향으로 yaw 를 먼저 확정한다 ────────────────────────────
         # 되면 격자는 그 주변만 미세하게 훑는다. 안 되면(복도가 아니거나 방향성이
         # 약하면) 원래 범위로 되돌아간다 — 조용히 나빠지지 않게 로그를 남긴다.
-        if bool(gp('use_walls')):
+        if walls_on:
             sa, sR = self._scan_wall_dir(px, py)
             ma, mR = self._map_wall_dir(x0, y0)
             if (sa is not None and ma is not None
@@ -444,7 +538,7 @@ class AutoLocalize(Node):
         d0 = math.hypot(bx - x0, by - y0)
         self.get_logger().info(
             f'정렬 결과: ({bx:+.3f}, {by:+.3f}, {math.degrees(bth):+.1f}°)  '
-            f'평균오차 {fit*100:.1f}cm  |  init 대비 {d0*100:.1f}cm '
+            f'평균오차 {fit*100:.1f}cm  |  탐색중심 대비 {d0*100:.1f}cm '
             f'{math.degrees(bth - th0):+.1f}°')
 
         if fit > self.fit_warn:

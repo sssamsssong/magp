@@ -73,6 +73,9 @@ def generate_launch_description():
     nobuffer_arg = False # nobuffer:=true 면 BUFFER1/2 단계를 통째로 뺀다
     trustpos_arg = False # trustpos:=true 면 auto_localize 격자탐색을 끄고
                           #   init_x/y/yaw 를 그대로 믿는다 (race2 용)
+    selfpose_arg = False # selfpose:=true 면 자동 정렬을 아예 안 하고 사람이
+                          #   RViz 2D Pose Estimate 로 찍어줄 때까지 기다린다
+                          #   (./race.sh <모드> --self)
     for a in sys.argv:
         if a.startswith('mode:='):
             mode = a.split(':=')[1]
@@ -96,6 +99,8 @@ def generate_launch_description():
             nobuffer_arg = a.split(':=')[1].lower() in ('true', '1', 'yes')
         elif a.startswith('trustpos:='):
             trustpos_arg = a.split(':=')[1].lower() in ('true', '1', 'yes')
+        elif a.startswith('selfpose:='):
+            selfpose_arg = a.split(':=')[1].lower() in ('true', '1', 'yes')
     if mode not in DEFAULT_CONTROLLER:
         raise RuntimeError(f'race.launch.py: 잘못된 mode "{mode}"')
 
@@ -190,9 +195,22 @@ def generate_launch_description():
     nodes = []
 
     # ---------- 1. 차량 브링업 ----------
+    # ★ 충돌 복구(stuck_recovery)를 켜면 mux 에 recovery 채널(우선순위 50)이
+    #   필요하다 — 컨트롤러(/drive, 10)는 이기고 조이스틱(/teleop, 100)에는
+    #   지는 자리다. 기본 mux.yaml 에는 그 채널이 없으므로 갈아끼운다.
+    #   config/ 는 repo 루트에 있다 (RACE_REPO 는 race.sh 가 export).
+    _rec = cfg.get('recovery', {}) or {}
+    _repo = os.environ.get('RACE_REPO', '')
+    _mux_rec = os.path.join(_repo, 'config', 'mux_recovery.yaml') if _repo else ''
+    _use_rec_mux = bool(_rec.get('enabled', False)) and os.path.exists(_mux_rec)
+    if bool(_rec.get('enabled', False)) and not _use_rec_mux:
+        print(f'[race.launch] ⚠ recovery.enabled 인데 mux 설정을 못 찾음: '
+              f'{_mux_rec or "(RACE_REPO 미설정)"} — 복구 노드를 띄우지 않습니다')
     nodes.append(IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(f1tenth_share, 'launch', 'bringup_launch.py'))))
+            os.path.join(f1tenth_share, 'launch', 'bringup_launch.py')),
+        launch_arguments=({'mux_config': _mux_rec}.items()
+                          if _use_rec_mux else [])))
 
     # ---------- 1-1. odom TF 발행자 (IMU yaw 융합) ----------
     # ★ vesc.yaml 에서 vesc_to_odom_node.publish_tf: false 로 껐기 때문에
@@ -306,6 +324,15 @@ def generate_launch_description():
                 'fit_warn':       float(loc.get('align_fit_warn',       0.20)),
                 'use_walls':      _walls,
                 'laser_offset_x': 0.27, 'laser_offset_y': 0.0,
+                'manual_only':    selfpose_arg,
+                # 주행 중 재정렬(/race/relocalize)은 출발선이 아니라 **지금
+                # 자세** 주변을 훑는다 — stuck_recovery 가 이걸 부른다.
+                'relocalize_from_current':
+                    bool(_rec.get('relocalize_from_current', True)),
+                'relocalize_search_xy':
+                    float(_rec.get('relocalize_search_xy', 1.0)),
+                'relocalize_search_yaw_deg':
+                    float(_rec.get('relocalize_search_yaw_deg', 30.0)),
             }])]))
 
     # ---------- 2. 맵 서버 + AMCL + lifecycle ----------
@@ -448,6 +475,35 @@ def generate_launch_description():
                      'seq_time_q3':          int(m.get('seq_time_q3',      75)),
                      'seq_total_limit':      int(m.get('seq_total_limit', 255)),
                      }]))
+
+    # ---------- 3-1. 충돌 후 끼임 복구 (2026-08-25) ----------
+    # 충돌로 끼면 조금 후진하고, 서서 /race/relocalize 로 자세를 다시 잡는다.
+    # AMCL 은 정지 중엔 갱신을 아예 안 하므로(update_min_d), 움직여야 자세가
+    # 살아난다 — 상세는 stuck_recovery.py 머리말.
+    # bench 에서는 띄우지 않는다 (바퀴를 안 돌리는 모드라 끼임 자체가 없다).
+    if _use_rec_mux and not bench:
+        nodes.append(TimerAction(period=8.0, actions=[Node(
+            package='race_stack', executable='stuck_recovery',
+            name='stuck_recovery', output='screen',
+            parameters=[{
+                'enabled':         True,
+                'scan_topic':      scan_topic,
+                'odom_topic':      odom_topic,
+                'stall_cmd_min':   float(_rec.get('stall_cmd_min',   0.30)),
+                'stall_speed_max': float(_rec.get('stall_speed_max', 0.10)),
+                'stall_sec':       float(_rec.get('stall_sec',       1.5)),
+                'back_speed':      float(_rec.get('back_speed',     -0.6)),
+                'back_dist':       float(_rec.get('back_dist',       0.40)),
+                'back_max_sec':    float(_rec.get('back_max_sec',    2.0)),
+                'back_steer':      float(_rec.get('back_steer',      0.0)),
+                'rear_from_deg':   float(_rec.get('rear_from_deg',   100.0)),
+                'rear_safety_m':   float(_rec.get('rear_safety_m',   0.35)),
+                'settle_sec':      float(_rec.get('settle_sec',      0.6)),
+                'reloc_wait_sec':  float(_rec.get('reloc_wait_sec',  1.5)),
+                'cooldown_sec':    float(_rec.get('cooldown_sec',    5.0)),
+                'max_attempts':    int(  _rec.get('max_attempts',    3)),
+                'reset_after_sec': float(_rec.get('reset_after_sec', 20.0)),
+            }])]))
 
     # ---------- 4. 안전장치 (AEB) ----------
     s = cfg.get('safety', {})

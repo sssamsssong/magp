@@ -42,6 +42,10 @@
 #                              μ̂ 가 쌓인다 (q1|q2|q3|race|quali|joy2 전부 지원 —
 #                              joy 는 원래대로 두고 joy2 를 새로 만들었다).
 #                              나중에 ontrack_sysid 로 Pacejka B/C/D/E 를 꺼낼 수 있다.
+#    ./race.sh <모드> --self   ★ 자동 위치정렬을 끄고 사람이 RViz 의
+#                              "2D Pose Estimate" 로 직접 찍을 때까지 기다린다.
+#                              찍으면 그 자세의 적합도(cm)를 재서 출발 게이트를
+#                              연다. 대칭 트랙에서 자동 정렬이 틀릴 때 쓴다.
 #    ./race.sh push-logs       아직 안 올라간 logs/ 를 커밋·푸시 (팀 공유기에서
 #                              푸시가 실패한 뒤, 인터넷 되는 와이파이에서)
 #    ./race.sh check           토픽이 실제로 발행 중인지 표로 확인 (주행 중 별도 터미널)
@@ -172,10 +176,18 @@ export RACE_SCRIPT   # launch 파일이 이 env로 yaml 경로를 읽음
 # /scan 원시 데이터가 없으면 deskew·AMCL·ICP 같은 앞단 문제를 사후에 못 판정한다
 # (2026-08-09: 고속 deskew 를 켤지 정하려는데 고속 주행 bag 이 하나도 없었다).
 RECORD_BAG=0
+# --self : 자동 위치정렬(auto_localize)을 하지 않고, 사람이 RViz 의
+#   "2D Pose Estimate" 로 직접 찍을 때까지 기다린다. 대칭 구조라 자동 정렬이
+#   자꾸 엉뚱한 데로 수렴하는 자리에서 쓴다.
+#   ★ 노드를 빼는 게 아니라 "탐색만 안 하는" 모드다 — 출발 게이트가 기다리는
+#     /race/localized 를 그 노드만 발행하기 때문이다. 사람이 찍으면 그 자세의
+#     적합도를 재서 발행하므로, 찍은 위치가 몇 cm 맞는지도 같이 보인다.
+SELF_POSE=0
 _args=()
 for _a in "$@"; do
     case "$_a" in
         --bag) RECORD_BAG=1 ;;
+        --self) SELF_POSE=1 ;;
         *) _args+=("$_a") ;;
     esac
 done
@@ -215,7 +227,7 @@ STACK_PROCS="[r]ace\.launch\.py|[m]apping\.launch\.py|[u]rg_node_driver|[v]esc_d
 [m]ission_manager|[p]ure_pursuit|[g]ap_follower|[m]ap_controller|[s]afety_node|[a]ckermann_mux|\
 [a]ckermann_to_vesc_node|[v]esc_to_odom_node|[s]lam_toolbox|\
 [j]oy_node|[j]oy_teleop|[s]tatic_transform_publisher|[k]eyboard_teleop|[j]oystick_teleop|\
-[w]aypoint_logger|[s]lip_friction|[i]mu_odom"
+[w]aypoint_logger|[s]lip_friction|[i]mu_odom|[s]tuck_recovery"
 running_pids () { pgrep -f "$STACK_PROCS" 2>/dev/null || true; }
 
 kill_stack () {
@@ -1049,7 +1061,7 @@ elif [ "$RECORD_BAG" = "1" ]; then
 
     run_launch mode:=$MODE \
         ${CTRL:+controller:=$CTRL} ${BENCH:+bench:=true} ${LAPS:+laps:=$LAPS} \
-        ${Q1LAPS:+q1laps:=$Q1LAPS} ${Q2LAPS:+q2laps:=$Q2LAPS} ${NOBUFFER:+nobuffer:=true} ${TRUSTPOS:+trustpos:=true}
+        ${Q1LAPS:+q1laps:=$Q1LAPS} ${Q2LAPS:+q2laps:=$Q2LAPS} ${NOBUFFER:+nobuffer:=true} ${TRUSTPOS:+trustpos:=true} $([ "$SELF_POSE" = 1 ] && echo selfpose:=true)
 
     kill $SLIP_PID 2>/dev/null || true
     kill -INT $BAG_PID 2>/dev/null || true
@@ -1062,7 +1074,7 @@ elif [ -n "${BENCH:-}" ]; then
     # 그래서 조이스틱 노드 자체를 죽인다 — box 는 조이스틱을 쓸 이유가 없다.
     ros2 launch race_stack race.launch.py mode:=$MODE \
         ${CTRL:+controller:=$CTRL} bench:=true ${LAPS:+laps:=$LAPS} \
-        ${Q1LAPS:+q1laps:=$Q1LAPS} ${Q2LAPS:+q2laps:=$Q2LAPS} ${NOBUFFER:+nobuffer:=true} ${TRUSTPOS:+trustpos:=true} &
+        ${Q1LAPS:+q1laps:=$Q1LAPS} ${Q2LAPS:+q2laps:=$Q2LAPS} ${NOBUFFER:+nobuffer:=true} ${TRUSTPOS:+trustpos:=true} $([ "$SELF_POSE" = 1 ] && echo selfpose:=true) &
     LAUNCH_PID=$!
     trap "kill $LAUNCH_PID 2>/dev/null; pkill -9 -f '[j]oy_teleop' 2>/dev/null" EXIT
     bench_kill_joy
@@ -1071,5 +1083,5 @@ else
     # exec 하면 셸이 교체돼 Ctrl+C 뒤 로그 커밋을 못 한다.
     trap commit_logs EXIT
     run_launch mode:=$MODE ${CTRL:+controller:=$CTRL} ${LAPS:+laps:=$LAPS} \
-        ${Q1LAPS:+q1laps:=$Q1LAPS} ${Q2LAPS:+q2laps:=$Q2LAPS} ${NOBUFFER:+nobuffer:=true} ${TRUSTPOS:+trustpos:=true}
+        ${Q1LAPS:+q1laps:=$Q1LAPS} ${Q2LAPS:+q2laps:=$Q2LAPS} ${NOBUFFER:+nobuffer:=true} ${TRUSTPOS:+trustpos:=true} $([ "$SELF_POSE" = 1 ] && echo selfpose:=true)
 fi

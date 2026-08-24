@@ -1,0 +1,31 @@
+# mux_recovery.yaml — 충돌 후 자동 복구(stuck_recovery)용 채널을 끼운 mux 설정.
+#
+# 기본 mux.yaml 은 navigation(10) / joystick(100) 두 채널뿐이다. 복구 노드가
+# 컨트롤러(/drive)를 이기고 후진 명령을 내려면 그 사이 우선순위가 필요하다.
+#
+#   navigation 10  <  recovery 50  <  joystick 100
+#                      ↑                ↑
+#         컨트롤러를 덮어쓴다      사람은 언제든 복구를 덮어쓴다
+#
+# ★ recovery 를 joystick 보다 **낮게** 둔 것이 핵심이다. 복구가 오작동해도
+#   조이스틱 LB→수동 전환이 항상 이긴다. 규정 9[a] 도 "충돌로 주행 불가
+#   상태의 비상정지" 를 위해 사람이 개입하는 것을 허용한다.
+#
+# timeout 0.3s — 복구 노드는 20Hz 로 내므로 여유가 있다. 노드가 죽거나
+# 복구가 끝나 발행을 멈추면 이 시간 뒤 자동으로 navigation 채널로 돌아간다
+# (복구 종료를 위해 따로 뭘 할 필요가 없다).
+ackermann_mux:
+  ros__parameters:
+    topics:
+      navigation:
+        topic   : drive
+        timeout : 0.2
+        priority: 10
+      recovery:
+        topic   : recovery_drive
+        timeout : 0.3
+        priority: 50
+      joystick:
+        topic   : teleop
+        timeout : 0.2
+        priority: 100

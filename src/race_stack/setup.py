@@ -48,6 +48,7 @@ setup(
             'imu_odom           = race_stack.imu_odom:main',
             'scan_deskew        = race_stack.scan_deskew:main',
             'auto_localize      = race_stack.auto_localize:main',
+            'stuck_recovery     = race_stack.stuck_recovery:main',
             'localization_monitor = race_stack.localization_monitor:main',
             'frenet_planner     = race_stack.frenet_planner:main',
             'slip_logger        = race_stack.slip_logger:main',
