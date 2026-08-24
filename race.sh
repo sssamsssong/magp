@@ -23,6 +23,9 @@
 #                              + buffer 단계 없이 Q1→Q2→Q3 로 바로 이어감
 #                              — 연습 세션이 짧을 때. race_script.yaml 은
 #                              안 건드림(laps:= 처럼 launch 인자로만 줄임)
+#    ./race.sh race2 [컨트롤러]  race 와 동일, 격자탐색/벽방향 재정렬 없이
+#                              start_pos 로 찍어둔 init_x/y/yaw 를 그대로
+#                              믿고 시작(auto_localize 가 그 한 점만 확인)
 #    ./race.sh buffer          단계 사이 저속 이동 랩만 단독 테스트
 #    ./race.sh 10laprace [컨트롤러]  ★ 1대1 경주 10바퀴 (mode=race, laps=10)
 #                              race 와 완전히 같은 스택이고 바퀴수만 다르다.
@@ -842,6 +845,28 @@ PYEOF
       * ) echo "알 수 없는 컨트롤러: $CTRL  (auto|stanley|pure_pursuit|gap_follower|map)"; exit 1 ;;
     esac
     echo "[race.sh] quali-mini — Q1 2랩→Q2 2랩→Q3 (버퍼 없음, mode=quali)" ;;
+  race2)
+    # race 와 완전히 같은 스택(mode=race 그대로 — 컨트롤러·frenet·ot_zone·
+    # grip_util 선택을 다 물려받는다). 차이는 auto_localize 하나뿐이다.
+    #
+    # 평소엔 auto_localize 가 init_x/y/yaw 주변 ±0.5m/±15°를 격자탐색하고,
+    # 벽 방향이 잡히면 yaw 까지 다시 맞춘다 — 사람이 출발선 "근처"에만 세워도
+    # 되게 하려는 여유분이다. race2 는 그 여유를 안 쓴다: ./race.sh start_pos
+    # 로 이미 정확한 위치를 찍어놨다는 전제로, 격자탐색·벽방향 재정렬 없이
+    # init_x/y/yaw 그 자리를 그대로 믿고 /initialpose 를 낸다(trustpos:=true
+    # → race.launch.py 가 search_xy/search_yaw_deg/use_walls 를 0/0/false로).
+    # ★ start_pos 로 찍은 위치가 실제로 부정확하면 이 모드는 그 오차를
+    #   흡수 안 해준다 — 그래도 발행 자체는 하고(auto_localize 는 적합도가
+    #   나빠도 경고만 하고 발행한다), 얼마나 안 맞는지는 기동 로그의
+    #   "평균오차 Ncm" 줄로 보인다.
+    MODE=race
+    TRUSTPOS=1
+    CTRL=${2:-}
+    case "$CTRL" in
+      ""|auto|stanley|pure_pursuit|gap_follower|map) ;;
+      * ) echo "알 수 없는 컨트롤러: $CTRL  (auto|stanley|pure_pursuit|gap_follower|map)"; exit 1 ;;
+    esac
+    echo "[race.sh] race2 — start_pos 로 찍은 위치를 그대로 믿고 시작 (mode=race)" ;;
   * ) echo "알 수 없는 명령: $CMD"; exit 1 ;;
 esac
 
@@ -1024,7 +1049,7 @@ elif [ "$RECORD_BAG" = "1" ]; then
 
     run_launch mode:=$MODE \
         ${CTRL:+controller:=$CTRL} ${BENCH:+bench:=true} ${LAPS:+laps:=$LAPS} \
-        ${Q1LAPS:+q1laps:=$Q1LAPS} ${Q2LAPS:+q2laps:=$Q2LAPS} ${NOBUFFER:+nobuffer:=true}
+        ${Q1LAPS:+q1laps:=$Q1LAPS} ${Q2LAPS:+q2laps:=$Q2LAPS} ${NOBUFFER:+nobuffer:=true} ${TRUSTPOS:+trustpos:=true}
 
     kill $SLIP_PID 2>/dev/null || true
     kill -INT $BAG_PID 2>/dev/null || true
@@ -1037,7 +1062,7 @@ elif [ -n "${BENCH:-}" ]; then
     # 그래서 조이스틱 노드 자체를 죽인다 — box 는 조이스틱을 쓸 이유가 없다.
     ros2 launch race_stack race.launch.py mode:=$MODE \
         ${CTRL:+controller:=$CTRL} bench:=true ${LAPS:+laps:=$LAPS} \
-        ${Q1LAPS:+q1laps:=$Q1LAPS} ${Q2LAPS:+q2laps:=$Q2LAPS} ${NOBUFFER:+nobuffer:=true} &
+        ${Q1LAPS:+q1laps:=$Q1LAPS} ${Q2LAPS:+q2laps:=$Q2LAPS} ${NOBUFFER:+nobuffer:=true} ${TRUSTPOS:+trustpos:=true} &
     LAUNCH_PID=$!
     trap "kill $LAUNCH_PID 2>/dev/null; pkill -9 -f '[j]oy_teleop' 2>/dev/null" EXIT
     bench_kill_joy
@@ -1046,5 +1071,5 @@ else
     # exec 하면 셸이 교체돼 Ctrl+C 뒤 로그 커밋을 못 한다.
     trap commit_logs EXIT
     run_launch mode:=$MODE ${CTRL:+controller:=$CTRL} ${LAPS:+laps:=$LAPS} \
-        ${Q1LAPS:+q1laps:=$Q1LAPS} ${Q2LAPS:+q2laps:=$Q2LAPS} ${NOBUFFER:+nobuffer:=true}
+        ${Q1LAPS:+q1laps:=$Q1LAPS} ${Q2LAPS:+q2laps:=$Q2LAPS} ${NOBUFFER:+nobuffer:=true} ${TRUSTPOS:+trustpos:=true}
 fi

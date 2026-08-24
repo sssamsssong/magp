@@ -71,6 +71,8 @@ def generate_launch_description():
     q1laps_arg = None    # q1laps:=/q2laps:= 로 넘어오면 시퀀서(quali)의
     q2laps_arg = None    #   seq_laps_q1/seq_laps_q2 를 이긴다 (quali-mini용)
     nobuffer_arg = False # nobuffer:=true 면 BUFFER1/2 단계를 통째로 뺀다
+    trustpos_arg = False # trustpos:=true 면 auto_localize 격자탐색을 끄고
+                          #   init_x/y/yaw 를 그대로 믿는다 (race2 용)
     for a in sys.argv:
         if a.startswith('mode:='):
             mode = a.split(':=')[1]
@@ -92,6 +94,8 @@ def generate_launch_description():
             q2laps_arg = int(a.split(':=')[1])
         elif a.startswith('nobuffer:='):
             nobuffer_arg = a.split(':=')[1].lower() in ('true', '1', 'yes')
+        elif a.startswith('trustpos:='):
+            trustpos_arg = a.split(':=')[1].lower() in ('true', '1', 'yes')
     if mode not in DEFAULT_CONTROLLER:
         raise RuntimeError(f'race.launch.py: 잘못된 mode "{mode}"')
 
@@ -273,6 +277,19 @@ def generate_launch_description():
     # 맞춰 init_pose 주변을 훑고 /initialpose 를 대신 발행한다.
     # AMCL 이 활성화된 뒤여야 하므로 지연 기동한다.
     if bool(loc.get('auto_localize', True)):
+        # ★ trustpos:=true (./race.sh race2) — 격자탐색을 0으로 접어서 후보를
+        #   init_x/y/yaw 딱 하나로 만든다. auto_localize._align 의
+        #   np.arange(-0, 0+1e-9, step) 는 [0.0] 하나만 내므로 탐색 없이
+        #   그 지점의 적합도만 재고 바로 /initialpose 를 낸다. ./race.sh
+        #   start_pos 로 이미 정확한 위치를 찍어뒀을 때, 그 값을 격자탐색이
+        #   흔들지 않고 그대로 믿고 싶을 때 쓴다.
+        #   ⚠ use_walls 도 같이 꺼야 한다 — 켜져 있으면 search_yaw_deg=0 이어도
+        #   벽 방향 감지가 yaw 후보를 통째로 다른 값으로 바꿔치기하고 그 주변
+        #   ±6°를 다시 훑는다(_align 의 use_walls 분기). init_yaw 를 있는
+        #   그대로 믿는다는 목적과 어긋나므로 trustpos 에서는 끈다.
+        _sxy  = 0.0 if trustpos_arg else float(loc.get('align_search_xy',      0.5))
+        _syaw = 0.0 if trustpos_arg else float(loc.get('align_search_yaw_deg', 15.0))
+        _walls = False if trustpos_arg else bool(loc.get('align_use_walls', True))
         nodes.append(TimerAction(period=7.0, actions=[Node(
             package='race_stack', executable='auto_localize',
             name='auto_localize', output='screen',
@@ -282,12 +299,12 @@ def generate_launch_description():
                 'init_x':         float(loc.get('init_x',   0.0)),
                 'init_y':         float(loc.get('init_y',   0.0)),
                 'init_yaw':       float(loc.get('init_yaw', 0.0)),
-                'search_xy':      float(loc.get('align_search_xy',      0.5)),
-                'search_yaw_deg': float(loc.get('align_search_yaw_deg', 15.0)),
+                'search_xy':      _sxy,
+                'search_yaw_deg': _syaw,
                 'step_xy':        float(loc.get('align_step_xy',        0.05)),
                 'step_yaw_deg':   float(loc.get('align_step_yaw_deg',   1.0)),
                 'fit_warn':       float(loc.get('align_fit_warn',       0.20)),
-                'use_walls':      bool( loc.get('align_use_walls',      True)),
+                'use_walls':      _walls,
                 'laser_offset_x': 0.27, 'laser_offset_y': 0.0,
             }])]))
 
