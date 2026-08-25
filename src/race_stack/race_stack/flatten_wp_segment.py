@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+ #!/usr/bin/env python3
 """
 flatten_wp_segment.py — 이미 만든 웨이포인트의 한 구간만 "최대한 평평하게" 다시 깎는다.
 
@@ -93,7 +93,7 @@ def _band_at(dist, res, ox, oy, H, W, x, y_ref, margin):
 
 
 def flatten_segment(map_name, in_wp, out_wp, x0, x1, margin, blend_frac,
-                    n_grid, mu, pac_d, vmax, vmin, acc, brk):
+                    n_grid, mu, pac_d, vmax, vmin, acc, brk, y_near=None):
     dist, res, ox, oy, H, W = _load_map(map_name)
     pts = _load_wp(os.path.join(WP_DIR, in_wp + '.csv'))
 
@@ -111,7 +111,12 @@ def flatten_segment(map_name, in_wp, out_wp, x0, x1, margin, blend_frac,
     if len(runs) > 1:
         print(f'⚠ x 범위 [{lo:.2f},{hi:.2f}] 가 서로 떨어진 {len(runs)}개 구간과 겹칩니다 '
              f'(폐루프에서 흔함) — 그중 가장 긴 구간만 씁니다')
-    run = max(runs, key=len)
+    if y_near is not None and len(runs) > 1:
+        # 지정한 y 에 평균이 가장 가까운 구간 (외벽/안쪽 직선 구분용)
+        run = min(runs, key=lambda r: abs(float(np.mean(pts[r, 1])) - y_near))
+        print(f'  --y-near {y_near:.2f} → 평균 y {float(np.mean(pts[run,1])):.2f} 구간 선택 (idx {int(run[0])}~{int(run[-1])})')
+    else:
+        run = max(runs, key=len)
     i0, i1 = int(run[0]), int(run[-1])
     seg = pts[i0:i1 + 1]
     x_seg, y_seg = seg[:, 0], seg[:, 1]
@@ -182,7 +187,7 @@ def flatten_segment(map_name, in_wp, out_wp, x0, x1, margin, blend_frac,
     print(f'전체 곡률 최대 {kappa.max():.3f} 1/m  (R_min={1/max(kappa.max(),1e-9):.3f}m)')
 
     v = calc_vel_profile(kappa, el, mu=mu, v_max=vmax, v_min=vmin,
-                         a_lon_acc=acc, a_lon_brk=brk, pac_d=pac_d)
+                         a_lon_acc=acc, a_lon_brk=brk)   # car2 calc_vel_profile: pac_d 없음(mu·g)
 
     out_path = os.path.join(WP_DIR, out_wp + '.csv')
     with open(out_path, 'w', newline='') as f:
@@ -213,10 +218,14 @@ def main():
     p.add_argument('--vmin', type=float, default=1.0)
     p.add_argument('--acc', type=float, default=5.0)
     p.add_argument('--brk', type=float, default=8.0)
+    p.add_argument('--y-near', dest='y_near', type=float, default=None,
+                   help='폐루프에서 x 범위에 직선이 2개 겹칠 때, 이 y 에 가장 가까운 '
+                        '구간을 고른다 (없으면 가장 긴 구간). 예: 외벽쪽 직선이면 --y-near 4.2')
     args = p.parse_args()
     flatten_segment(args.map, args.in_wp, args.out_wp, args.x0, args.x1,
                     args.margin, args.blend_frac, args.n_grid,
-                    args.mu, args.pac_d, args.vmax, args.vmin, args.acc, args.brk)
+                    args.mu, args.pac_d, args.vmax, args.vmin, args.acc, args.brk,
+                    y_near=args.y_near)
 
 
 if __name__ == '__main__':
