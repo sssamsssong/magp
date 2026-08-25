@@ -309,19 +309,27 @@ def run_gui(img, res, ox, oy, H, W, wps, cur, map_name, out, auto_write, wp_name
                               arrowprops=dict(arrowstyle='-|>', color=c, lw=2.5))
             state['artists'].append(ann)
             if state['sel']:
-                # 선택된 프리셋에 저장하고, 이 점/화살표/라벨을 **영구로** 남긴다
-                apply_pose(x, y, state['yaw'], img, res, ox, oy, H, W, True,
-                           {'preset': state['sel']})
-                ax.annotate(state['sel'], (x, y), color=c, fontsize=11,
-                            fontweight='bold', zorder=8,
-                            xytext=(6, 6), textcoords='offset points')
-                state['artists'] = []       # 참조를 버려서 clear 때 안 지워지게 = 영구
-                state['pos'] = state['yaw'] = None
-                print(f'★ 프리셋 [{state["sel"]}] 저장됨 — 다음 프리셋 키 누르고 클릭')
+                # 선택된 프리셋에 저장을 **시도**한다. 실제로 써졌을 때만
+                # 점을 영구로 남기고 성공 메시지를 찍는다 — 예전엔 write
+                # 가 조용히 실패해도(줄이 없어서) 무조건 "저장됨" 을 찍어서
+                # 안 써진 걸 써진 것처럼 오인했다 (2026-08-26 실제로 겪음).
+                _, ok = apply_pose(x, y, state['yaw'], img, res, ox, oy, H, W,
+                                   True, {'preset': state['sel']})
+                if ok:
+                    ax.annotate(state['sel'], (x, y), color=c, fontsize=11,
+                                fontweight='bold', zorder=8,
+                                xytext=(6, 6), textcoords='offset points')
+                    state['artists'] = []   # 참조를 버려서 clear 때 안 지워지게 = 영구
+                    state['pos'] = state['yaw'] = None
+                    print(f'★ 프리셋 [{state["sel"]}] 저장됨 — 다음 프리셋 키 누르고 클릭')
+                else:
+                    print(f'✗ 프리셋 [{state["sel"]}] 저장 실패 — race_script.yaml 에 '
+                          f'preset_{state["sel"]}: 줄이 없습니다. 점은 아직 임시(r=취소, '
+                          f'다시 클릭)이고, w 키로도 안 써집니다 — 파일에 그 줄을 먼저 추가하세요.')
                 state['sel'] = None
             elif auto_write:
                 apply_pose(x, y, state['yaw'], img, res, ox, oy, H, W, True, {},
-                           map_name=map_name, wp_name=wp_name)
+                           map_name=map_name, wp_name=wp_name)  # (yaw, ok) — 여기선 항상 성공
             else:
                 print(f'방향 찍음 ({math.degrees(state["yaw"]):.0f}°) → '
                       'w=init/start, 또는 프리셋 키 먼저 눌렀어야 함')
@@ -338,7 +346,7 @@ def run_gui(img, res, ox, oy, H, W, wps, cur, map_name, out, auto_write, wp_name
                 return
             x, y = state['pos']
             apply_pose(x, y, state['yaw'], img, res, ox, oy, H, W, True, {},
-                       map_name=map_name, wp_name=wp_name)
+                       map_name=map_name, wp_name=wp_name)  # (yaw, ok) — init/start 는 항상 성공
             plt.close(fig)
         elif ev.key in PRESET_KEYS:
             state['sel'] = ev.key
@@ -366,12 +374,19 @@ def apply_pose(x, y, yaw, img, res, ox, oy, H, W, do_write, extra,
     if preset:
         # 프리셋 전용: init/start/map 은 건드리지 않고 preset_<key> 만 쓴다.
         pairs = [(f'preset_{preset}', f'[{x:.4f}, {y:.4f}, {yaw:.4f}]')]
+        ok = True
         if do_write:
             print(f'race_script.yaml 갱신 (프리셋 {preset}):')
-            write_values(pairs)
+            # ★ write_values 는 **기존 줄만** 값을 바꾼다. race_script.yaml 에
+            #   preset_<key>: 줄 자체가 없으면 경고만 찍고 조용히 건너뛰는데,
+            #   예전엔 호출자가 그 결과를 안 보고 무조건 "저장됨" 을 찍어서
+            #   실제로는 저장 안 됐는데 성공한 것처럼 보였다 (2026-08-26 실제로
+            #   겪음 — preset_* 줄이 race_script.yaml 에 아예 없었다).
+            done = write_values(pairs)
+            ok = f'preset_{preset}' in done
         else:
             print(f'(미리보기) preset_{preset}: [{x:.4f}, {y:.4f}, {yaw:.4f}]')
-        return yaw
+        return yaw, ok
 
     pairs = [('init_x', f'{x:.4f}'), ('init_y', f'{y:.4f}'), ('init_yaw', f'{yaw:.4f}')]
     if extra.get('start'):
@@ -396,7 +411,7 @@ def apply_pose(x, y, yaw, img, res, ox, oy, H, W, do_write, extra,
         write_values(pairs)
     else:
         print('(--write 를 붙이면 race_script.yaml 에 씁니다. 지금은 미리보기만)')
-    return yaw
+    return yaw, True
 
 
 def main():
@@ -505,8 +520,8 @@ def main():
             print('\n※ 위치는 받았지만 방향이 없습니다 (--yaw 또는 --to-x/--to-y 필요)')
         return
 
-    yaw = apply_pose(x, y, yaw, img, res, ox, oy, H, W, args.write, extra,
-                     map_name=args.map, wp_name=args.wp_file)
+    yaw, _ok = apply_pose(x, y, yaw, img, res, ox, oy, H, W, args.write, extra,
+                          map_name=args.map, wp_name=args.wp_file)
 
     poses = []
     if cur:
