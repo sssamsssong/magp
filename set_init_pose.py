@@ -138,7 +138,7 @@ def write_values(pairs, dry=False):
 
     done = {}
     for key, val in pairs:
-        pat = re.compile(rf'^(\s*{re.escape(key)}:\s*)([^\s#]+)(.*)$')
+        pat = re.compile(rf'^(\s*{re.escape(key)}:\s*)(\[[^\]]*\]|[^\s#]+)(.*)$')
         for i, ln in enumerate(lines):
             m = pat.match(ln)
             if m:
@@ -271,14 +271,19 @@ def draw(img, res, ox, oy, H, W, wps, poses, title, out, show=False):
 
 # ── GUI 클릭 픽커 ───────────────────────────────────────────────
 def run_gui(img, res, ox, oy, H, W, wps, cur, map_name, out, auto_write, wp_name=None):
-    state = {'pos': None, 'yaw': None, 'artists': []}
+    PRESET_KEYS = {'up', 'down', 'left', 'right', 'a', 'b', 'x', 'y'}
+    PRESET_COLORS = {'up': 'red', 'down': 'orange', 'left': 'gold', 'right': 'lime',
+                     'a': 'cyan', 'b': 'deepskyblue', 'x': 'magenta', 'y': 'white'}
+    state = {'pos': None, 'yaw': None, 'artists': [], 'sel': None}
 
     poses = [cur + ('red', 'current init_pose')] if cur else []
     fig, ax, plt = draw(img, res, ox, oy, H, W, wps, poses,
-                        f'{map_name} - click1=position, click2=heading | w=write  r=reset  q=quit',
+                        f'{map_name} | ①키(↑↓←→·a/b/x/y)로 프리셋 선택 → ②위치·방향 클릭 '
+                        '| w=init/start  r=취소  q=종료',
                         out, show=True)
 
-    def clear():
+    def clear_transient():
+        """진행중인(아직 저장 안 한) 클릭 마커만 지운다. 저장된 프리셋 점은 남는다."""
         for a in state['artists']:
             a.remove()
         state['artists'] = []
@@ -288,39 +293,57 @@ def run_gui(img, res, ox, oy, H, W, wps, cur, map_name, out, auto_write, wp_name
     def on_click(ev):
         if ev.inaxes is not ax or ev.xdata is None:
             return
+        c = PRESET_COLORS.get(state['sel'], 'lime')
         if state['pos'] is None:
             state['pos'] = (ev.xdata, ev.ydata)
             state['artists'] += ax.plot([ev.xdata], [ev.ydata], 'o', ms=9,
-                                        color='lime', mec='black', zorder=7)
-            print(f'pos: x={ev.xdata:.3f} y={ev.ydata:.3f}  → now click the heading')
+                                        color=c, mec='black', zorder=7)
+            tag = f' [프리셋 {state["sel"]}]' if state['sel'] else ''
+            print(f'위치 찍음{tag} → 이제 방향 클릭')
         else:
             x, y = state['pos']
             state['yaw'] = math.atan2(ev.ydata - y, ev.xdata - x)
             ann = ax.annotate('', xy=(x + 0.9 * math.cos(state['yaw']),
                                       y + 0.9 * math.sin(state['yaw'])),
                               xytext=(x, y), zorder=7,
-                              arrowprops=dict(arrowstyle='-|>', color='lime', lw=2.5))
+                              arrowprops=dict(arrowstyle='-|>', color=c, lw=2.5))
             state['artists'].append(ann)
-            print(f'yaw = {state["yaw"]:.4f} rad ({math.degrees(state["yaw"]):.1f}°)'
-                  f'   → press w to write race_script.yaml')
-            if auto_write:
+            if state['sel']:
+                # 선택된 프리셋에 저장하고, 이 점/화살표/라벨을 **영구로** 남긴다
+                apply_pose(x, y, state['yaw'], img, res, ox, oy, H, W, True,
+                           {'preset': state['sel']})
+                ax.annotate(state['sel'], (x, y), color=c, fontsize=11,
+                            fontweight='bold', zorder=8,
+                            xytext=(6, 6), textcoords='offset points')
+                state['artists'] = []       # 참조를 버려서 clear 때 안 지워지게 = 영구
+                state['pos'] = state['yaw'] = None
+                print(f'★ 프리셋 [{state["sel"]}] 저장됨 — 다음 프리셋 키 누르고 클릭')
+                state['sel'] = None
+            elif auto_write:
                 apply_pose(x, y, state['yaw'], img, res, ox, oy, H, W, True, {},
-                          map_name=map_name, wp_name=wp_name)
+                           map_name=map_name, wp_name=wp_name)
+            else:
+                print(f'방향 찍음 ({math.degrees(state["yaw"]):.0f}°) → '
+                      'w=init/start, 또는 프리셋 키 먼저 눌렀어야 함')
         fig.canvas.draw_idle()
 
     def on_key(ev):
         if ev.key == 'r':
-            clear(); print('reset — click again')
+            clear_transient(); state['sel'] = None; print('취소 — 다시')
         elif ev.key == 'q':
             plt.close(fig)
         elif ev.key == 'w':
             if state['pos'] is None or state['yaw'] is None:
-                print('position and heading are not both set yet')
+                print('위치+방향을 먼저 클릭하세요')
                 return
             x, y = state['pos']
             apply_pose(x, y, state['yaw'], img, res, ox, oy, H, W, True, {},
-                      map_name=map_name, wp_name=wp_name)
+                       map_name=map_name, wp_name=wp_name)
             plt.close(fig)
+        elif ev.key in PRESET_KEYS:
+            state['sel'] = ev.key
+            clear_transient()   # 진행중 클릭만 리셋 (저장된 프리셋 점은 유지)
+            print(f'프리셋 [{ev.key}] 선택 (색 {PRESET_COLORS[ev.key]}) — 위치·방향 클릭하세요')
 
     fig.canvas.mpl_connect('button_press_event', on_click)
     fig.canvas.mpl_connect('key_press_event', on_key)
@@ -338,6 +361,17 @@ def apply_pose(x, y, yaw, img, res, ox, oy, H, W, do_write, extra,
         print('⚠ 이 좌표는 맵 밖입니다 — AMCL 이 수렴 못 합니다')
     elif v < 128:
         print(f'⚠ 이 좌표의 픽셀값이 {v} (어두움 = 벽/미탐색). 트랙 위인지 확인하세요')
+
+    preset = extra.get('preset')
+    if preset:
+        # 프리셋 전용: init/start/map 은 건드리지 않고 preset_<key> 만 쓴다.
+        pairs = [(f'preset_{preset}', f'[{x:.4f}, {y:.4f}, {yaw:.4f}]')]
+        if do_write:
+            print(f'race_script.yaml 갱신 (프리셋 {preset}):')
+            write_values(pairs)
+        else:
+            print(f'(미리보기) preset_{preset}: [{x:.4f}, {y:.4f}, {yaw:.4f}]')
+        return yaw
 
     pairs = [('init_x', f'{x:.4f}'), ('init_y', f'{y:.4f}'), ('init_yaw', f'{yaw:.4f}')]
     if extra.get('start'):
@@ -388,6 +422,10 @@ def main():
                     help='mission.start_x/start_y 도 같은 좌표로 갱신')
     ap.add_argument('--also-sim', action='store_true',
                     help='sim.sx/sy/stheta 도 같은 포즈로 갱신')
+    ap.add_argument('--preset', choices=['up', 'down', 'left', 'right',
+                                         'a', 'b', 'x', 'y'], default=None,
+                    help='이 좌표를 복구 프리셋 joystick.preset_<키> 에 쓴다 '
+                         '(init/start 대신). GUI 에선 ↑↓←→·a/b/x/y 키로도 가능')
     ap.add_argument('--out', default='', help='미리보기 PNG 경로')
     args = ap.parse_args()
 
@@ -406,7 +444,7 @@ def main():
     img, res, ox, oy, H, W = load_map(args.map)
     wps = load_waypoints(args.wp_file)
     out = args.out or f'/tmp/init_pose_{args.map}.png'
-    extra = {'start': args.also_start, 'sim': args.also_sim}
+    extra = {'start': args.also_start, 'sim': args.also_sim, 'preset': args.preset}
 
     loc = cfg.get('localization') or {}
     cur = None

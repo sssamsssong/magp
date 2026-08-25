@@ -409,6 +409,15 @@ def generate_launch_description():
                 'max_speed':        float(jc.get('max_speed',
                                                  cfg['speed'].get('mapping_max', 1.0))),
                 'max_steer':        float(pp0.get('max_steer', 0.36)),
+                # 복구용 프리셋 포즈 (수동 D-pad/ABXY → /initialpose). [x,y,yaw]
+                'preset_up':    [float(v) for v in jc.get('preset_up',    [999.0, 999.0, 999.0])],
+                'preset_down':  [float(v) for v in jc.get('preset_down',  [999.0, 999.0, 999.0])],
+                'preset_left':  [float(v) for v in jc.get('preset_left',  [999.0, 999.0, 999.0])],
+                'preset_right': [float(v) for v in jc.get('preset_right', [999.0, 999.0, 999.0])],
+                'preset_a':     [float(v) for v in jc.get('preset_a',     [999.0, 999.0, 999.0])],
+                'preset_b':     [float(v) for v in jc.get('preset_b',     [999.0, 999.0, 999.0])],
+                'preset_x':     [float(v) for v in jc.get('preset_x',     [999.0, 999.0, 999.0])],
+                'preset_y':     [float(v) for v in jc.get('preset_y',     [999.0, 999.0, 999.0])],
             }])]))
 
     # ---------- 3. 미션 매니저 ----------

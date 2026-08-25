@@ -49,8 +49,9 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import Joy
-from std_msgs.msg import Bool, Float32, Float64
+from std_msgs.msg import Bool, Float64
 from ackermann_msgs.msg import AckermannDriveStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped
 
 
 class JoystickTeleop(Node):
@@ -85,6 +86,15 @@ class JoystickTeleop(Node):
         self.declare_parameter('speed_invert',     False)  # 전진/후진 부호 반전
         self.declare_parameter('trigger_invert',   True)   # /joy 기준 안 누름=+1
         self.declare_parameter('trigger_deadzone', 0.05)
+        # ── 복구용 프리셋 포즈 (2026-08-26) ────────────────────────────
+        #   충돌·헛돎으로 AMCL 이 어긋나면: 수동(LB)으로 차를 트랙 위 프리셋
+        #   지점까지 몰고 가 정지 → 아래 버튼으로 /initialpose 발행(2D Pose
+        #   Estimate) → LB 로 자율 전환하면 그 위치에서 AMCL 이 국소 보정하며 이어감.
+        #   ★ recovery_alpha=0 이라 놓은 위치 ±0.5m 안이어야 보정된다.
+        #   입력 8개: D-pad ↑↓←→ + 버튼 A/B/X/Y.  각 값은 [x, y, yaw(rad)].
+        #   [999,999,999] = 미설정(무시).
+        for _k in ('up', 'down', 'left', 'right', 'a', 'b', 'x', 'y'):
+            self.declare_parameter(f'preset_{_k}', [999.0, 999.0, 999.0])
         self.declare_parameter('trigger_expo',     1.0)    # 1.0 = 완전 선형
         self.declare_parameter('steer_deadzone',   0.08)
         self.declare_parameter('arm_on_neutral',   True)
@@ -166,22 +176,19 @@ class JoystickTeleop(Node):
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.pub_manual.publish(Bool(data=not self.auto_mode))
 
-        # ── 충돌 복구 (X 버튼) — 2026-08-26 ─────────────────────────────
-        #   흐름:  충돌 → LB(수동) → 사람이 차를 트랙에 다시 놓음 → **X**
-        #          → 라이다로 위치를 다시 찾고, 잘 잡히면 곧바로 자율 재개.
-        #   auto_localize 가 마지막으로 성했던 자세를 중심으로 넓게 훑는다
-        #   (충돌로 AMCL 이 맵 밖/벽 안으로 튀었어도 복구되도록).
-        self.pub_recover = self.create_publisher(
-            Bool, '/race/relocalize_recover', 10)
-        self._reloc_pending = False   # X 를 눌러 결과를 기다리는 중인가
-        self._reloc_t = 0.0
-        self.prev_x = False
-        # 정합 결과(평균오차 m). ★ 래치라 **구독하는 순간 옛 값**이 한 번 온다 —
-        #   그래서 _reloc_pending 일 때만 본다. 안 그러면 기동 시 정렬 결과가
-        #   들어와 누르지도 않은 복구가 성공한 것처럼 처리된다.
-        self.create_subscription(
-            Float32, '/race/localized', self._fit_cb,
-            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        # ── 복구용 프리셋 → /initialpose ──────────────────────────────
+        self.pub_initpose = self.create_publisher(
+            PoseWithCovarianceStamped, '/initialpose', 10)
+        self._presets = {}
+        for _k in ('up', 'down', 'left', 'right', 'a', 'b', 'x', 'y'):
+            _v = list(self.get_parameter(f'preset_{_k}').value or [])
+            if len(_v) >= 3 and _v[0] < 900.0:
+                self._presets[_k] = (float(_v[0]), float(_v[1]), float(_v[2]))
+        self._preset_prev = {}
+        if self._presets:
+            self.get_logger().info(
+                f'복구 프리셋 {len(self._presets)}개: {sorted(self._presets)} '
+                '— 수동 모드에서 D-pad ↑↓←→ / A·B·X·Y 로 /initialpose 발행')
 
         # ★ 자율 모드로 넘겼는데 실제로 굴러가는지 확인한다.
         #   자율 모드는 "/teleop 발행을 멈춰 mux 를 /drive 채널로 넘기는" 것뿐이라,
@@ -322,47 +329,40 @@ class JoystickTeleop(Node):
         mag = (mag - self.steer_dz) / (1.0 - self.steer_dz)
         return min(mag, 1.0) * (1.0 if raw > 0 else -1.0)
 
-    # ── 충돌 복구 ────────────────────────────────────────────────────
-    def _recover_pressed(self):
-        """X 버튼 — 위치를 다시 찾고, 잘 잡히면 자율 재개."""
-        if not self.allow_tog:
-            self.get_logger().info(
-                'X(복구)는 이 모드에서 꺼져 있습니다 (수동 전용). '
-                '자율주행 스택(./race.sh race 등)에서만 씁니다.',
-                throttle_duration_sec=5.0)
-            return
-        if self.auto_mode:
-            # 이미 자율이면 재개할 게 없다. 달리는 중 재정렬은 위험하므로
-            # auto_localize 가 어차피 거절한다 — 여기서 먼저 막아 알린다.
-            self.get_logger().warn(
-                'X(복구)는 수동 상태에서 쓰세요 — 지금은 자율 주행 중입니다. '
-                '충돌했다면 먼저 LB 로 세우고, 차를 트랙에 놓은 뒤 X.')
-            return
-        self._publish(0.0, 0.0)          # 확실히 정지 (정지해야 재시드된다)
-        self._reloc_pending = True
-        self._reloc_t = time.time()
-        self.pub_recover.publish(Bool(data=True))
-        self.get_logger().warn(
-            '★ 충돌 복구 — 라이다로 위치를 다시 찾는 중… '
-            '(차를 움직이지 마세요. 잘 잡히면 곧바로 자율 재개합니다)')
+    def _check_pose_presets(self, msg: Joy):
+        """수동 모드에서 D-pad/버튼 상승엣지 → 해당 프리셋 /initialpose 발행.
+        입력 8개: D-pad ↑↓←→(축 7/6) + A/B/X/Y(버튼 0~3). F710 X모드 기준."""
+        ax, bt = msg.axes, msg.buttons
+        def a(i): return ax[i] if len(ax) > i else 0.0
+        def b(i): return bool(bt[i]) if len(bt) > i else False
+        state = {
+            'up':    a(7) > 0.5,  'down':  a(7) < -0.5,
+            'left':  a(6) > 0.5,  'right': a(6) < -0.5,
+            'a': b(0), 'b': b(1), 'x': b(2), 'y': b(3),
+        }
+        for k, pressed in state.items():
+            if pressed and not self._preset_prev.get(k, False) and k in self._presets:
+                self._fire_preset(k)
+        self._preset_prev = state
 
-    def _fit_cb(self, msg: Float32):
-        """auto_localize 의 정합 결과. X 를 눌러 기다리는 중일 때만 본다."""
-        if not self._reloc_pending:
-            return                        # 기동 시 래치로 들어온 옛 값 등
-        self._reloc_pending = False
-        fit = float(msg.data)
-        if fit > self.rec_fit_max:
-            self.get_logger().error(
-                f'✗ 위치 정합 {fit*100:.1f}㎝ — 기준({self.rec_fit_max*100:.0f}㎝)보다 '
-                f'나빠 자율을 재개하지 않습니다. 차를 트랙 위 제자리에 '
-                f'주행 방향으로 놓고 X 를 다시 누르세요')
-            return
-        self.auto_mode = True
-        self._auto_since = time.time()
-        self.pub_manual.publish(Bool(data=False))
-        self.get_logger().info(
-            f'✓ 위치 정합 {fit*100:.1f}㎝ — 자율 재개. 컨트롤러가 이어받습니다')
+    def _fire_preset(self, key: str):
+        x, y, yaw = self._presets[key]
+        m = PoseWithCovarianceStamped()
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.header.frame_id = 'map'
+        m.pose.pose.position.x = x
+        m.pose.pose.position.y = y
+        m.pose.pose.orientation.z = math.sin(yaw / 2.0)
+        m.pose.pose.orientation.w = math.cos(yaw / 2.0)
+        cov = [0.0] * 36
+        cov[0] = 0.2 ** 2       # x 분산 (±0.2m)
+        cov[7] = 0.2 ** 2       # y
+        cov[35] = 0.087 ** 2    # yaw (±5°)
+        m.pose.covariance = cov
+        self.pub_initpose.publish(m)
+        self.get_logger().warn(
+            f'★ 프리셋 [{key}] → /initialpose ({x:+.2f}, {y:+.2f}, {math.degrees(yaw):+.0f}°). '
+            '차를 이 지점 ±0.5m 안에 놓았는지 확인 후 LB 로 자율 전환하세요.')
 
     def _joy_cb(self, msg: Joy):
         self._last_joy = self.get_clock().now().nanoseconds * 1e-9
@@ -390,19 +390,9 @@ class JoystickTeleop(Node):
                     self._publish(0.0, 0.0)  # 수동 전환 시 즉시 정지
         self.prev_lb = lb
 
-        # ── 충돌 복구 (X 상승 엣지) ───────────────────────────────────
-        xb = (len(msg.buttons) > self.btn_rec and bool(msg.buttons[self.btn_rec]))
-        if xb and not self.prev_x:
-            self._recover_pressed()
-        self.prev_x = xb
-
-        # 복구 응답이 안 오면 무한정 기다리지 않는다 (auto_localize 가 정지
-        # 상태를 요구하므로, 차가 굴러가고 있으면 조용히 거절될 수 있다).
-        if self._reloc_pending and time.time() - self._reloc_t > self.rec_timeout:
-            self._reloc_pending = False
-            self.get_logger().error(
-                f'복구 응답이 {self.rec_timeout:.0f}초 안에 안 왔습니다 — 자율 재개 안 함. '
-                f'차가 완전히 멈춰 있는지 확인하고 X 를 다시 누르세요')
+        # ── 복구용 프리셋 (수동 모드에서만) ────────────────────────────
+        if not self.auto_mode and self._presets:
+            self._check_pose_presets(msg)
 
         # 자율 모드: /teleop 발행 안 함 → mux가 자율주행 채널로 전환
         if self.auto_mode:
