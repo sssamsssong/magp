@@ -91,6 +91,19 @@ class AutoLocalize(Node):
         self.declare_parameter('relocalize_search_xy', 1.0)        # ± m
         self.declare_parameter('relocalize_search_yaw_deg', 30.0)  # ± deg
 
+        # ── 충돌 복구 재정렬 (조이스틱 X) — 2026-08-26 ────────────────────
+        #   흐름: 충돌 → LB(수동) → 사람이 차를 트랙에 다시 놓음 → X.
+        #   사람이 손으로 옮겨 놓으므로 위치·방향이 꽤 어긋난다. 그래서
+        #   평소 재정렬(±1.0m/±30°)보다 넓게 훑는다.
+        #   ⚠ 넓힐수록 좌우 대칭 구간에서 뒤집힌 자세로 수렴할 위험이 커진다.
+        #     차를 **주행 방향으로** 놓아야 이 값으로 잡힌다.
+        self.declare_parameter('recover_search_xy', 1.5)          # ± m
+        self.declare_parameter('recover_search_yaw_deg', 45.0)    # ± deg
+        #   ★ 충돌로 AMCL 이 맵 밖이나 벽 안으로 튀면 그 자세를 중심으로
+        #     훑어봐야 소용없다. **마지막으로 맵 안 자유공간에 있던 자세**를
+        #     기억해 두고 그걸 중심으로 쓴다 (사용자 요청, 2026-08-26).
+        self.declare_parameter('recover_use_last_good', True)
+
         # ── 수동 지정 모드 (./race.sh <모드> --self) — 2026-08-25 ────────
         #   자동 정렬을 아예 안 하고 사람이 RViz "2D Pose Estimate" 로 찍어줄
         #   때까지 기다린다. 대칭 트랙이라 자동 정렬이 자꾸 틀리는 자리에서 쓴다.
@@ -123,6 +136,8 @@ class AutoLocalize(Node):
         self.speed = 0.0          # 주행 중 재시드 방지용
         self.done = False
         self._amcl_pose = None    # (x, y, yaw) — 재정렬 시 탐색 중심
+        self._amcl_ok = False     # 지금 자세가 맵 안 자유공간인가
+        self._last_good = None    # 마지막으로 맵 안 자유공간이던 자세 (충돌 복구용)
         # 이번 정렬에만 쓰는 (중심, 탐색반경, yaw반경, 벽정렬). None 이면 init 기준.
         #   벽정렬이 None 이면 use_walls 파라미터를 그대로 쓴다.
         self._override = None
@@ -141,6 +156,8 @@ class AutoLocalize(Node):
         self.create_subscription(LaserScan, str(gp('scan_topic')),
                                  self._scan_cb, qos_profile_sensor_data)
         self.create_subscription(Bool, '/race/relocalize', self._redo_cb, 10)
+        self.create_subscription(Bool, '/race/relocalize_recover',
+                                 self._recover_cb, 10)
         self.create_subscription(Odometry, str(gp('odom_topic')), self._odom_cb, 10)
         self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose',
                                  self._amcl_cb, 10)
@@ -236,6 +253,13 @@ class AutoLocalize(Node):
         inside = 0 <= ix < self.W and 0 <= iy < self.H
         clear = float(self.dist[iy, ix]) if inside else -1.0
 
+        # ★ 충돌 복구의 탐색 중심으로 쓸 "마지막 성한 자세" 를 기억한다.
+        #   충돌로 AMCL 이 맵 밖이나 벽 안으로 튀어버리면 그 자세는 못 쓴다 —
+        #   튀기 **직전** 자세가 차가 실제로 있던 곳에 가장 가깝다.
+        self._amcl_ok = bool(inside and clear > 0.0)
+        if self._amcl_ok:
+            self._last_good = self._amcl_pose
+
         if self._amcl_prev is not None:
             d = math.hypot(x - self._amcl_prev[0], y - self._amcl_prev[1])
             if d > self.jump_warn:
@@ -287,24 +311,53 @@ class AutoLocalize(Node):
                 f'없어 적합도를 못 쟀습니다. 출발 게이트가 안 열리면 다시 찍으세요')
 
     def _redo_cb(self, msg: Bool):
-        if not msg.data:
-            return
+        """평소 재정렬. /race/relocalize 에 true."""
+        if msg.data:
+            self._do_redo(recover=False)
+
+    def _recover_cb(self, msg: Bool):
+        """충돌 복구 재정렬 (조이스틱 X). /race/relocalize_recover 에 true.
+
+        평소 재정렬과 두 가지가 다르다:
+          · 탐색을 넓게 한다 — 사람이 차를 손으로 다시 놓았으므로 위치·방향이
+            평소 보정폭보다 크게 어긋나 있다
+          · 중심을 **마지막으로 성했던 자세** 로 잡는다 — 충돌로 AMCL 이 맵
+            밖이나 벽 안으로 튀었으면 지금 자세는 아무 의미가 없다
+        """
+        if msg.data:
+            self._do_redo(recover=True)
+
+    def _do_redo(self, recover: bool):
         gp = lambda n: self.get_parameter(n).value
         self.done = False
-        # ★ 경기 중 재정렬은 **지금 자세** 를 중심으로 훑는다 (init_pose 아님).
-        #   출발선을 중심으로 훑으면 트랙 반대편의 차를 출발선으로 끌어간다.
-        if bool(gp('relocalize_from_current')) and self._amcl_pose is not None:
-            self._override = (self._amcl_pose,
-                              float(gp('relocalize_search_xy')),
-                              float(gp('relocalize_search_yaw_deg')), None)
-            x, y, th = self._amcl_pose
-            self.get_logger().info(
-                f'재정렬 요청 수신 — 현재 자세 ({x:+.2f}, {y:+.2f}, '
-                f'{math.degrees(th):+.0f}°) 주변 ±{self._override[1]}m '
-                f'±{self._override[2]}° 탐색')
+        tag = '충돌 복구' if recover else '재정렬'
+
+        if recover:
+            sxy = float(gp('recover_search_xy'))
+            syaw = float(gp('recover_search_yaw_deg'))
+            # 지금 자세가 성하면 그걸 쓰고, 튀었으면 마지막 성한 자세로.
+            if self._amcl_ok and self._amcl_pose is not None:
+                center, why = self._amcl_pose, '현재 자세'
+            elif bool(gp('recover_use_last_good')) and self._last_good is not None:
+                center, why = self._last_good, '마지막 성한 자세(현재는 맵 밖/벽 안)'
+            else:
+                center, why = self._amcl_pose, '현재 자세(대체값 없음)'
         else:
+            sxy = float(gp('relocalize_search_xy'))
+            syaw = float(gp('relocalize_search_yaw_deg'))
+            center = self._amcl_pose if bool(gp('relocalize_from_current')) else None
+            why = '현재 자세'
+
+        if center is None:
             self._override = None
-            self.get_logger().info('재정렬 요청 수신 — init_pose 주변 탐색')
+            self.get_logger().warn(
+                f'{tag} 요청 — AMCL 자세를 아직 못 받아 init_pose 주변을 훑습니다')
+        else:
+            self._override = (center, sxy, syaw, None)
+            x, y, th = center
+            self.get_logger().info(
+                f'{tag} 요청 — {why} ({x:+.2f}, {y:+.2f}, {math.degrees(th):+.0f}°) '
+                f'주변 ±{sxy}m ±{syaw}° 탐색')
         self._try()
 
     def _try(self):

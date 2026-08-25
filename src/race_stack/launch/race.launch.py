@@ -333,6 +333,14 @@ def generate_launch_description():
                     float(_rec.get('relocalize_search_xy', 1.0)),
                 'relocalize_search_yaw_deg':
                     float(_rec.get('relocalize_search_yaw_deg', 30.0)),
+                # 충돌 복구(조이스틱 X) 전용 — 사람이 손으로 다시 놓으므로
+                # 평소 재정렬보다 넓게 훑는다. 상세는 auto_localize.py.
+                'recover_search_xy':
+                    float(_rec.get('recover_search_xy', 1.5)),
+                'recover_search_yaw_deg':
+                    float(_rec.get('recover_search_yaw_deg', 45.0)),
+                'recover_use_last_good':
+                    bool(_rec.get('recover_use_last_good', True)),
             }])]))
 
     # ---------- 2. 맵 서버 + AMCL + lifecycle ----------
@@ -384,6 +392,10 @@ def generate_launch_description():
                 'axis_speed':       int(  jc.get('axis_speed',       5)),
                 'btn_reverse':      int(  jc.get('btn_reverse',      5)),
                 'btn_toggle':       int(  jc.get('btn_toggle',       4)),
+                # 충돌 복구 (X) — 2026-08-26
+                'btn_recover':      int(  jc.get('btn_recover',      2)),
+                'recover_fit_max':  float(jc.get('recover_fit_max',  0.20)),
+                'recover_timeout':  float(jc.get('recover_timeout',  8.0)),
                 'steer_invert':     bool( jc.get('steer_invert',     False)),
                 'speed_invert':     bool( jc.get('speed_invert',     False)),
                 'trigger_invert':   bool( jc.get('trigger_invert',   True)),

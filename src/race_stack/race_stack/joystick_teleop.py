@@ -7,6 +7,10 @@ sensor_msgs/Joy → /teleop (AckermannDriveStamped)
 
 조작법 (Logitech F710, Mode 버튼 OFF):
   LB              → 수동 ↔ 자율 모드 즉시 전환 (토글)
+  X               → ★ 충돌 복구 (수동 상태에서만)
+                     차를 트랙에 다시 놓고 누르면 라이다로 위치를 다시 찾고,
+                     정합이 좋으면(recover_fit_max) 곧바로 자율을 재개한다.
+                     나쁘면 재개하지 않고 알린다 — 다시 놓고 X 를 또 누른다.
   RT 당김          → 전진 (당긴 만큼 선형 비례, 수동 모드에서만)
   RT 놓음          → 즉시 정지  ← 회생제동처럼
   RB 누른 채 RT    → 후진
@@ -45,7 +49,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import Joy
-from std_msgs.msg import Bool, Float64
+from std_msgs.msg import Bool, Float32, Float64
 from ackermann_msgs.msg import AckermannDriveStamped
 
 
@@ -57,6 +61,14 @@ class JoystickTeleop(Node):
         self.declare_parameter('axis_speed',       5)      # RT 트리거
         self.declare_parameter('btn_reverse',      5)      # RB — 후진 전환
         self.declare_parameter('btn_toggle',       4)      # LB — 수동↔자율 토글
+        # ── 충돌 복구 (2026-08-26) ─────────────────────────────────────
+        #   X 버튼(F710: A=0 B=1 X=2 Y=3). 충돌 후 LB 로 세우고 차를 트랙에
+        #   다시 놓은 다음 누르면, 라이다로 위치를 다시 찾고 자율을 재개한다.
+        self.declare_parameter('btn_recover',      2)      # X
+        #   정합 평균오차가 이보다 나쁘면 **자동 재개하지 않는다** — 위치를
+        #   잘못 잡은 채 출발하면 그대로 벽으로 간다. 다시 놓고 X 를 또 누른다.
+        self.declare_parameter('recover_fit_max',  0.20)   # m
+        self.declare_parameter('recover_timeout',  8.0)    # s
         # ── LB 토글의 의미는 어느 스택에 붙느냐로 갈린다 ────────────────
         #  · ./race.sh joy (수동 전용, 트랙 밖에서 굴릴 때)
         #      allow_toggle=False, start_auto=False
@@ -107,6 +119,9 @@ class JoystickTeleop(Node):
         self.ax_speed      = p('axis_speed')
         self.btn_rev       = p('btn_reverse')
         self.btn_tog       = p('btn_toggle')
+        self.btn_rec       = p('btn_recover')
+        self.rec_fit_max   = float(p('recover_fit_max'))
+        self.rec_timeout   = float(p('recover_timeout'))
         self.inv_steer     = p('steer_invert')
         self.inv_speed     = bool(p('speed_invert'))
         self.inv_trigger   = p('trigger_invert')
@@ -150,6 +165,23 @@ class JoystickTeleop(Node):
             Bool, '/race/manual',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.pub_manual.publish(Bool(data=not self.auto_mode))
+
+        # ── 충돌 복구 (X 버튼) — 2026-08-26 ─────────────────────────────
+        #   흐름:  충돌 → LB(수동) → 사람이 차를 트랙에 다시 놓음 → **X**
+        #          → 라이다로 위치를 다시 찾고, 잘 잡히면 곧바로 자율 재개.
+        #   auto_localize 가 마지막으로 성했던 자세를 중심으로 넓게 훑는다
+        #   (충돌로 AMCL 이 맵 밖/벽 안으로 튀었어도 복구되도록).
+        self.pub_recover = self.create_publisher(
+            Bool, '/race/relocalize_recover', 10)
+        self._reloc_pending = False   # X 를 눌러 결과를 기다리는 중인가
+        self._reloc_t = 0.0
+        self.prev_x = False
+        # 정합 결과(평균오차 m). ★ 래치라 **구독하는 순간 옛 값**이 한 번 온다 —
+        #   그래서 _reloc_pending 일 때만 본다. 안 그러면 기동 시 정렬 결과가
+        #   들어와 누르지도 않은 복구가 성공한 것처럼 처리된다.
+        self.create_subscription(
+            Float32, '/race/localized', self._fit_cb,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
         # ★ 자율 모드로 넘겼는데 실제로 굴러가는지 확인한다.
         #   자율 모드는 "/teleop 발행을 멈춰 mux 를 /drive 채널로 넘기는" 것뿐이라,
@@ -290,6 +322,48 @@ class JoystickTeleop(Node):
         mag = (mag - self.steer_dz) / (1.0 - self.steer_dz)
         return min(mag, 1.0) * (1.0 if raw > 0 else -1.0)
 
+    # ── 충돌 복구 ────────────────────────────────────────────────────
+    def _recover_pressed(self):
+        """X 버튼 — 위치를 다시 찾고, 잘 잡히면 자율 재개."""
+        if not self.allow_tog:
+            self.get_logger().info(
+                'X(복구)는 이 모드에서 꺼져 있습니다 (수동 전용). '
+                '자율주행 스택(./race.sh race 등)에서만 씁니다.',
+                throttle_duration_sec=5.0)
+            return
+        if self.auto_mode:
+            # 이미 자율이면 재개할 게 없다. 달리는 중 재정렬은 위험하므로
+            # auto_localize 가 어차피 거절한다 — 여기서 먼저 막아 알린다.
+            self.get_logger().warn(
+                'X(복구)는 수동 상태에서 쓰세요 — 지금은 자율 주행 중입니다. '
+                '충돌했다면 먼저 LB 로 세우고, 차를 트랙에 놓은 뒤 X.')
+            return
+        self._publish(0.0, 0.0)          # 확실히 정지 (정지해야 재시드된다)
+        self._reloc_pending = True
+        self._reloc_t = time.time()
+        self.pub_recover.publish(Bool(data=True))
+        self.get_logger().warn(
+            '★ 충돌 복구 — 라이다로 위치를 다시 찾는 중… '
+            '(차를 움직이지 마세요. 잘 잡히면 곧바로 자율 재개합니다)')
+
+    def _fit_cb(self, msg: Float32):
+        """auto_localize 의 정합 결과. X 를 눌러 기다리는 중일 때만 본다."""
+        if not self._reloc_pending:
+            return                        # 기동 시 래치로 들어온 옛 값 등
+        self._reloc_pending = False
+        fit = float(msg.data)
+        if fit > self.rec_fit_max:
+            self.get_logger().error(
+                f'✗ 위치 정합 {fit*100:.1f}㎝ — 기준({self.rec_fit_max*100:.0f}㎝)보다 '
+                f'나빠 자율을 재개하지 않습니다. 차를 트랙 위 제자리에 '
+                f'주행 방향으로 놓고 X 를 다시 누르세요')
+            return
+        self.auto_mode = True
+        self._auto_since = time.time()
+        self.pub_manual.publish(Bool(data=False))
+        self.get_logger().info(
+            f'✓ 위치 정합 {fit*100:.1f}㎝ — 자율 재개. 컨트롤러가 이어받습니다')
+
     def _joy_cb(self, msg: Joy):
         self._last_joy = self.get_clock().now().nanoseconds * 1e-9
         # ── 모드 토글 (LB 상승 엣지) ──────────────────────────────
@@ -315,6 +389,20 @@ class JoystickTeleop(Node):
                 if not self.auto_mode:
                     self._publish(0.0, 0.0)  # 수동 전환 시 즉시 정지
         self.prev_lb = lb
+
+        # ── 충돌 복구 (X 상승 엣지) ───────────────────────────────────
+        xb = (len(msg.buttons) > self.btn_rec and bool(msg.buttons[self.btn_rec]))
+        if xb and not self.prev_x:
+            self._recover_pressed()
+        self.prev_x = xb
+
+        # 복구 응답이 안 오면 무한정 기다리지 않는다 (auto_localize 가 정지
+        # 상태를 요구하므로, 차가 굴러가고 있으면 조용히 거절될 수 있다).
+        if self._reloc_pending and time.time() - self._reloc_t > self.rec_timeout:
+            self._reloc_pending = False
+            self.get_logger().error(
+                f'복구 응답이 {self.rec_timeout:.0f}초 안에 안 왔습니다 — 자율 재개 안 함. '
+                f'차가 완전히 멈춰 있는지 확인하고 X 를 다시 누르세요')
 
         # 자율 모드: /teleop 발행 안 함 → mux가 자율주행 채널로 전환
         if self.auto_mode:
