@@ -47,6 +47,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool, Float64
 from ackermann_msgs.msg import AckermannDriveStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped
 
 
 class JoystickTeleop(Node):
@@ -73,6 +74,15 @@ class JoystickTeleop(Node):
         self.declare_parameter('speed_invert',     False)  # 전진/후진 부호 반전
         self.declare_parameter('trigger_invert',   True)   # /joy 기준 안 누름=+1
         self.declare_parameter('trigger_deadzone', 0.05)
+        # ── 복구용 프리셋 포즈 (2026-08-26) ────────────────────────────
+        #   충돌·헛돎으로 AMCL 이 어긋나면: 수동(LB)으로 차를 트랙 위 프리셋
+        #   지점까지 몰고 가 정지 → 아래 버튼으로 /initialpose 발행(2D Pose
+        #   Estimate) → LB 로 자율 전환하면 그 위치에서 AMCL 이 국소 보정하며 이어감.
+        #   ★ recovery_alpha=0 이라 놓은 위치 ±0.5m 안이어야 보정된다.
+        #   입력 8개: D-pad ↑↓←→ + 버튼 A/B/X/Y.  각 값은 [x, y, yaw(rad)].
+        #   [999,999,999] = 미설정(무시).
+        for _k in ('up', 'down', 'left', 'right', 'a', 'b', 'x', 'y'):
+            self.declare_parameter(f'preset_{_k}', [999.0, 999.0, 999.0])
         self.declare_parameter('trigger_expo',     1.0)    # 1.0 = 완전 선형
         self.declare_parameter('steer_deadzone',   0.08)
         self.declare_parameter('arm_on_neutral',   True)
@@ -150,6 +160,20 @@ class JoystickTeleop(Node):
             Bool, '/race/manual',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.pub_manual.publish(Bool(data=not self.auto_mode))
+
+        # ── 복구용 프리셋 → /initialpose ──────────────────────────────
+        self.pub_initpose = self.create_publisher(
+            PoseWithCovarianceStamped, '/initialpose', 10)
+        self._presets = {}
+        for _k in ('up', 'down', 'left', 'right', 'a', 'b', 'x', 'y'):
+            _v = list(self.get_parameter(f'preset_{_k}').value or [])
+            if len(_v) >= 3 and _v[0] < 900.0:
+                self._presets[_k] = (float(_v[0]), float(_v[1]), float(_v[2]))
+        self._preset_prev = {}
+        if self._presets:
+            self.get_logger().info(
+                f'복구 프리셋 {len(self._presets)}개: {sorted(self._presets)} '
+                '— 수동 모드에서 D-pad ↑↓←→ / A·B·X·Y 로 /initialpose 발행')
 
         # ★ 자율 모드로 넘겼는데 실제로 굴러가는지 확인한다.
         #   자율 모드는 "/teleop 발행을 멈춰 mux 를 /drive 채널로 넘기는" 것뿐이라,
@@ -290,6 +314,41 @@ class JoystickTeleop(Node):
         mag = (mag - self.steer_dz) / (1.0 - self.steer_dz)
         return min(mag, 1.0) * (1.0 if raw > 0 else -1.0)
 
+    def _check_pose_presets(self, msg: Joy):
+        """수동 모드에서 D-pad/버튼 상승엣지 → 해당 프리셋 /initialpose 발행.
+        입력 8개: D-pad ↑↓←→(축 7/6) + A/B/X/Y(버튼 0~3). F710 X모드 기준."""
+        ax, bt = msg.axes, msg.buttons
+        def a(i): return ax[i] if len(ax) > i else 0.0
+        def b(i): return bool(bt[i]) if len(bt) > i else False
+        state = {
+            'up':    a(7) > 0.5,  'down':  a(7) < -0.5,
+            'left':  a(6) > 0.5,  'right': a(6) < -0.5,
+            'a': b(0), 'b': b(1), 'x': b(2), 'y': b(3),
+        }
+        for k, pressed in state.items():
+            if pressed and not self._preset_prev.get(k, False) and k in self._presets:
+                self._fire_preset(k)
+        self._preset_prev = state
+
+    def _fire_preset(self, key: str):
+        x, y, yaw = self._presets[key]
+        m = PoseWithCovarianceStamped()
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.header.frame_id = 'map'
+        m.pose.pose.position.x = x
+        m.pose.pose.position.y = y
+        m.pose.pose.orientation.z = math.sin(yaw / 2.0)
+        m.pose.pose.orientation.w = math.cos(yaw / 2.0)
+        cov = [0.0] * 36
+        cov[0] = 0.2 ** 2       # x 분산 (±0.2m)
+        cov[7] = 0.2 ** 2       # y
+        cov[35] = 0.087 ** 2    # yaw (±5°)
+        m.pose.covariance = cov
+        self.pub_initpose.publish(m)
+        self.get_logger().warn(
+            f'★ 프리셋 [{key}] → /initialpose ({x:+.2f}, {y:+.2f}, {math.degrees(yaw):+.0f}°). '
+            '차를 이 지점 ±0.5m 안에 놓았는지 확인 후 LB 로 자율 전환하세요.')
+
     def _joy_cb(self, msg: Joy):
         self._last_joy = self.get_clock().now().nanoseconds * 1e-9
         # ── 모드 토글 (LB 상승 엣지) ──────────────────────────────
@@ -315,6 +374,10 @@ class JoystickTeleop(Node):
                 if not self.auto_mode:
                     self._publish(0.0, 0.0)  # 수동 전환 시 즉시 정지
         self.prev_lb = lb
+
+        # ── 복구용 프리셋 (수동 모드에서만) ────────────────────────────
+        if not self.auto_mode and self._presets:
+            self._check_pose_presets(msg)
 
         # 자율 모드: /teleop 발행 안 함 → mux가 자율주행 채널로 전환
         if self.auto_mode:
