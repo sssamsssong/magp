@@ -336,11 +336,17 @@ def run_gui(img, res, ox, oy, H, W, wps, cur, map_name, out, auto_write, wp_name
         fig.canvas.draw_idle()
 
     def on_key(ev):
-        if ev.key == 'r':
+        # ★ Caps Lock/Shift 가 켜져 있으면 matplotlib 이 대문자('A' 등)를
+        #   준다. PRESET_KEYS 는 소문자만 담고 있어서 대문자는 그냥 씹혀
+        #   조용히 아무 반응이 없었다(에러도 없음) — 2026-08-26 실제로 겪음.
+        #   화살표는 'up'/'down' 처럼 이름 자체가 대소문자 개념이 없어서
+        #   멀쩡히 됐고, a/b/x/y 네 개만 전부 막혀 있었다.
+        key = (ev.key or '').lower()
+        if key == 'r':
             clear_transient(); state['sel'] = None; print('취소 — 다시')
-        elif ev.key == 'q':
+        elif key == 'q':
             plt.close(fig)
-        elif ev.key == 'w':
+        elif key == 'w':
             if state['pos'] is None or state['yaw'] is None:
                 print('위치+방향을 먼저 클릭하세요')
                 return
@@ -348,10 +354,10 @@ def run_gui(img, res, ox, oy, H, W, wps, cur, map_name, out, auto_write, wp_name
             apply_pose(x, y, state['yaw'], img, res, ox, oy, H, W, True, {},
                        map_name=map_name, wp_name=wp_name)  # (yaw, ok) — init/start 는 항상 성공
             plt.close(fig)
-        elif ev.key in PRESET_KEYS:
-            state['sel'] = ev.key
+        elif key in PRESET_KEYS:
+            state['sel'] = key
             clear_transient()   # 진행중 클릭만 리셋 (저장된 프리셋 점은 유지)
-            print(f'프리셋 [{ev.key}] 선택 (색 {PRESET_COLORS[ev.key]}) — 위치·방향 클릭하세요')
+            print(f'프리셋 [{key}] 선택 (색 {PRESET_COLORS[key]}) — 위치·방향 클릭하세요')
 
     fig.canvas.mpl_connect('button_press_event', on_click)
     fig.canvas.mpl_connect('key_press_event', on_key)
