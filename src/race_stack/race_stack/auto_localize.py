@@ -71,6 +71,16 @@ class AutoLocalize(Node):
         self.declare_parameter('laser_offset_x', 0.27)    # base_link → laser
         self.declare_parameter('laser_offset_y', 0.0)
         self.declare_parameter('startup_delay', 2.0)      # 스캔 안정화 대기 (s)
+        # 수동 /initialpose(조이스틱 프리셋) 를 받으면 그 지점 주변으로 스캔 정렬을
+        # 재실행한다 (기동 정렬과 동일, 중심만 그 pose, startup_delay 없이 즉시).
+        # 대회 현장 복구용 — 프리셋 근처에 세우고 버튼만 눌러도 정밀 보정된다.
+        #   false = 받은 pose 를 그대로 믿고 정렬 건너뜀 (RViz 수동추정용, 옛 동작).
+        self.declare_parameter('align_on_manual', True)
+        # 프리셋 정렬 탐색창 (m). 기동용 search_xy(0.5)보다 넓게 — 프리셋서 좀
+        # 떨어져 세워도 잡히게. ★ M자·U턴처럼 기하가 독특한 지점은 넓혀도 안전
+        # 하지만, 직선 위 프리셋은 종방향 aliasing 이라 이 값을 넘으면 오매칭
+        # 위험 → 평행 직선 간격(≈4m)보다 충분히 작게 유지할 것.
+        self.declare_parameter('manual_search_xy', 1.5)
         # 평균 오차가 이보다 크면 "제대로 못 맞췄다" 고 본다 (m)
         self.declare_parameter('fit_warn', 0.20)
         # 한 스텝에 이만큼 넘게 튀면 경고 (m). 1.45m/s 에서 AMCL 갱신 간격을
@@ -282,33 +292,48 @@ class AutoLocalize(Node):
         import time as _t
         if _t.time() - self._self_pub_t < 0.5:
             return                      # 우리가 쏜 것
-        manual_only = bool(self.get_parameter('manual_only').value)
-        # 수동 지정 모드에서는 사람이 다시 찍을 때마다 매번 다시 평가한다.
-        if self.done and not manual_only:
-            return
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
         q = msg.pose.pose.orientation
         yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
                          1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-        self.done = True
 
-        # ★★ 사람이 찍은 자세의 **적합도를 재서 /race/localized 로 발행한다.**
-        #   안 하면 mission_manager 의 출발 게이트가 "위치 정렬" 을 영원히
-        #   기다린다 — 그 토픽은 이 노드만 내기 때문이다 (2026-08-25 발견.
-        #   그전에는 자동 정렬이 **먼저** 돈 경우에만 우연히 게이트가 열렸다).
-        #   탐색은 하지 않는다(±0): 사람이 정한 자세를 그대로 존중하고
-        #   점수만 매긴다. 벽 정렬도 끈다 — 켜면 사람이 찍은 yaw 를 덮어쓴다.
-        if self.dist is not None and self.scan is not None:
+        # ★ manual_only(--self) 였던 예전 "done 이면 무시" 가드는 뺐다.
+        #   조이스틱 프리셋(2026-08-26)이 정확히 "이미 done 인 상태(주행 중
+        #   자동정렬 끝남)에서 사람이 또 초기화한다" 는 경우라, 그 가드를
+        #   두면 충돌 복구 프리셋이 아예 안 먹는다. manual_only 모드는
+        #   _try()/_align() 쪽 가드(아래)에서 여전히 따로 처리된다.
+        if bool(self.get_parameter('align_on_manual').value):
+            # 받은 pose(프리셋 버튼 또는 RViz 클릭) 를 중심으로 스캔 정렬
+            # 재실행 → 정밀 보정. 기동 정렬과 같은 메커니즘, 중심만 이 pose.
+            #   ★ _override 는 _align() 안에서 **한 번 쓰고 스스로 지워진다**
+            #     (기존 /race/relocalize 재정렬과 같은 방식). 예전엔 여기서
+            #     self._align_sxy 라는 별도 필드에 넓은 탐색창을 저장했는데
+            #     한 번도 되돌리지 않아서, 프리셋을 한 번이라도 쓰면 그 뒤
+            #     **모든** 재정렬(stuck_recovery 의 평소 /race/relocalize 포함)
+            #     이 계속 이 넓은 창으로 도는 버그였다. _override 로 통일하면
+            #     한 번 쓰고 자동으로 원래 폭(search_xy)으로 돌아온다.
+            sxy = float(self.get_parameter('manual_search_xy').value)
+            syaw = float(self.get_parameter('search_yaw_deg').value)
+            self._override = ((x, y, yaw), sxy, syaw, False)
+            self.done = False
+            self.get_logger().warn(
+                f'수동 /initialpose ({x:+.2f}, {y:+.2f}) — ±{sxy:.1f}m 스캔 정렬 실행')
+            self._try()
+        else:
+            # 탐색 없이(±0) 이 자세의 적합도만 잰다 — 사람이 정확히 찍었다고
+            # 믿는다. 벽 정렬도 끈다(walls_off=False 아님, 여기선 아예 재탐색이
+            # 없으므로 무관). ★★ 반드시 fit 을 발행해야 한다 — 안 하면
+            # mission_manager 의 출발 게이트가 "위치 정렬" 을 영원히 기다린다
+            # (2026-08-25 발견. 그전엔 자동 정렬이 먼저 돈 경우에만 우연히
+            # 게이트가 열렸다). _override 로 넘겨 _try() 의 정지 게이트까지
+            # 그대로 타게 한다.
             self._override = ((x, y, yaw), 0.0, 0.0, False)
+            self.done = False
             self.get_logger().warn(
                 f'수동 /initialpose 수신 ({x:+.2f}, {y:+.2f}, '
                 f'{math.degrees(yaw):+.0f}°) — 탐색 없이 이 자세의 적합도만 잽니다')
-            self._align(self.scan)      # 여기서 fit 이 발행된다
-        else:
-            self.get_logger().warn(
-                f'수동 /initialpose 수신 ({x:+.2f}, {y:+.2f}) — 맵/스캔이 아직 '
-                f'없어 적합도를 못 쟀습니다. 출발 게이트가 안 열리면 다시 찍으세요')
+            self._try()
 
     def _redo_cb(self, msg: Bool):
         """평소 재정렬. /race/relocalize 에 true."""
@@ -519,8 +544,11 @@ class AutoLocalize(Node):
         py = r[idx] * np.sin(a[idx]) + self.laser_dy      # (N, ) base_link 기준
 
         # 후보 격자
-        #   ★ _override 가 있으면(주행 중 재정렬) 중심·범위를 그걸로 바꾼다.
-        #     한 번 쓰고 버린다 — 다음 정렬은 다시 init 기준이다.
+        #   ★ _override 가 있으면(주행 중 재정렬 / 조이스틱 프리셋) 중심·범위를
+        #     그걸로 바꾼다. 한 번 쓰고 버린다 — 다음 정렬은 다시 init 기준이다.
+        #     (예전에 프리셋 전용으로 self._align_sxy 라는 안 지워지는 필드를
+        #      따로 뒀다가, 한 번 쓰면 그 뒤 모든 재정렬이 계속 넓은 창으로
+        #      도는 버그가 있었다 — _override 로 통일해 없앴다.)
         if self._override is not None:
             center, o_sxy, o_syaw, o_walls = self._override
             self._override = None

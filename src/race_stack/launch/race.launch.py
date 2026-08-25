@@ -333,14 +333,19 @@ def generate_launch_description():
                     float(_rec.get('relocalize_search_xy', 1.0)),
                 'relocalize_search_yaw_deg':
                     float(_rec.get('relocalize_search_yaw_deg', 30.0)),
-                # 충돌 복구(조이스틱 X) 전용 — 사람이 손으로 다시 놓으므로
-                # 평소 재정렬보다 넓게 훑는다. 상세는 auto_localize.py.
+                # 충돌 복구(stuck_recovery, /race/relocalize_recover) 전용 — 사람 손을
+                # 안 거치므로 평소 재정렬보다 넓게 훑는다. 상세는 auto_localize.py.
                 'recover_search_xy':
                     float(_rec.get('recover_search_xy', 1.5)),
                 'recover_search_yaw_deg':
                     float(_rec.get('recover_search_yaw_deg', 45.0)),
                 'recover_use_last_good':
                     bool(_rec.get('recover_use_last_good', True)),
+                # 수동 /initialpose(조이스틱 프리셋) 정렬 (2026-08-26) — 사람이
+                # 프리셋 버튼으로 지점을 지정하면 그 주변을 훑는다. 위 recover_*
+                # 와는 별개 경로다(자동 vs 사람이 버튼으로 지정).
+                'align_on_manual':  bool(loc.get('align_on_manual', True)),
+                'manual_search_xy': float(loc.get('manual_search_xy', 1.5)),
             }])]))
 
     # ---------- 2. 맵 서버 + AMCL + lifecycle ----------
