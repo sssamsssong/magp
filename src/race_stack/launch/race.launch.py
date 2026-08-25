@@ -341,11 +341,15 @@ def generate_launch_description():
                     float(_rec.get('recover_search_yaw_deg', 45.0)),
                 'recover_use_last_good':
                     bool(_rec.get('recover_use_last_good', True)),
-                # 수동 /initialpose(조이스틱 프리셋) 정렬 (2026-08-26) — 사람이
-                # 프리셋 버튼으로 지점을 지정하면 그 주변을 훑는다. 위 recover_*
-                # 와는 별개 경로다(자동 vs 사람이 버튼으로 지정).
-                'align_on_manual':  bool(loc.get('align_on_manual', True)),
+                # 프리셋 버튼은 위치만 심는다(raw reseed, 2026-08-26). 정렬은
+                # LT 로 사람이 명령한다 — align_on_manual=false 면 프리셋
+                # /initialpose 를 그대로 AMCL 에 심고 정렬은 안 하고, LT 당김이
+                # /race/relocalize 를 쏴서 그때 정렬한다. 위 recover_* (stuck_recovery
+                # 자동 후진 복구)와는 별개 경로다.
+                'align_on_manual':  bool(loc.get('align_on_manual', False)),
                 'manual_search_xy': float(loc.get('manual_search_xy', 1.5)),
+                # 기동 자동정렬은 ON (대회장서 오보정 없었음 — 원래대로).
+                'auto_align_startup': bool(loc.get('auto_align_startup', True)),
             }])]))
 
     # ---------- 2. 맵 서버 + AMCL + lifecycle ----------

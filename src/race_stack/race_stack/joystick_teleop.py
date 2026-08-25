@@ -167,6 +167,10 @@ class JoystickTeleop(Node):
         # ── 복구용 프리셋 → /initialpose ──────────────────────────────
         self.pub_initpose = self.create_publisher(
             PoseWithCovarianceStamped, '/initialpose', 10)
+        # LT 당김 → 정렬 명령 (auto_localize 가 현재 위치 기준 스캔정렬). 기동 자동
+        # 정렬을 끈 대신, 필요할 때만 사람이 명령한다.
+        self.pub_reloc = self.create_publisher(Bool, '/race/relocalize', 10)
+        self._prev_lt = False
         self._presets = {}
         for _k in ('up', 'down', 'left', 'right', 'a', 'b', 'x', 'y'):
             _v = list(self.get_parameter(f'preset_{_k}').value or [])
@@ -377,6 +381,15 @@ class JoystickTeleop(Node):
                 if not self.auto_mode:
                     self._publish(0.0, 0.0)  # 수동 전환 시 즉시 정지
         self.prev_lb = lb
+
+        # ── LT 당김(상승엣지) → 정렬 명령 (/race/relocalize) ───────────
+        #   기동 자동정렬은 꺼져 있고(직선서 오정렬 방지), 필요할 때만 LT 로 명령.
+        #   auto_localize 가 정지 상태에서 현재 위치 기준으로 스캔정렬한다.
+        lt = (msg.axes[2] < -0.5) if len(msg.axes) > 2 else False
+        if lt and not self._prev_lt:
+            self.pub_reloc.publish(Bool(data=True))
+            self.get_logger().warn('LT → 정렬 명령 — 정지 상태에서 스캔↔맵 정렬 실행')
+        self._prev_lt = lt
 
         # ── 복구용 프리셋 (수동 모드에서만) ────────────────────────────
         if not self.auto_mode and self._presets:

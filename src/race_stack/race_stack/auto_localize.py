@@ -81,6 +81,11 @@ class AutoLocalize(Node):
         # 하지만, 직선 위 프리셋은 종방향 aliasing 이라 이 값을 넘으면 오매칭
         # 위험 → 평행 직선 간격(≈4m)보다 충분히 작게 유지할 것.
         self.declare_parameter('manual_search_xy', 1.5)
+        # 기동 시 자동 정렬 여부. false(기본) = 구버전처럼 init_pose 에 그대로 고정
+        # (정렬 안 함). 직선 출발선에서 자동정렬이 aperture 문제로 오히려 틀어지던
+        # 걸 피한다. 대신 정렬이 필요하면 조이스틱 LT 당김 → /race/relocalize 로
+        # 그때만 명령. true 면 옛 동작(startup_delay 뒤 자동 정렬).
+        self.declare_parameter('auto_align_startup', False)
         # 평균 오차가 이보다 크면 "제대로 못 맞췄다" 고 본다 (m)
         self.declare_parameter('fit_warn', 0.20)
         # 한 스텝에 이만큼 넘게 튀면 경고 (m). 1.45m/s 에서 AMCL 갱신 간격을
@@ -144,12 +149,17 @@ class AutoLocalize(Node):
 
         self.scan = None
         self.speed = 0.0          # 주행 중 재시드 방지용
-        self.done = False
+        # auto_align_startup=false(기본) 면 done=True 로 시작 → 기동 타이머 정렬이
+        # 건너뛰어져 init_pose 에 그대로 고정된다. LT(/race/relocalize)·프리셋이
+        # 오면(각각 _redo_cb/_manual_cb) done=False 로 풀려 그때 정렬한다.
+        self.done = not bool(self.get_parameter('auto_align_startup').value)
         self._amcl_pose = None    # (x, y, yaw) — 재정렬 시 탐색 중심
         self._amcl_ok = False     # 지금 자세가 맵 안 자유공간인가
         self._last_good = None    # 마지막으로 맵 안 자유공간이던 자세 (충돌 복구용)
         # 이번 정렬에만 쓰는 (중심, 탐색반경, yaw반경, 벽정렬). None 이면 init 기준.
-        #   벽정렬이 None 이면 use_walls 파라미터를 그대로 쓴다.
+        #   벽정렬이 None 이면 use_walls 파라미터를 그대로 쓴다. _align() 안에서
+        #   한 번 쓰고 스스로 지워진다(self-clearing) — LT(_redo_cb)·프리셋
+        #   (_manual_cb) 이 둘 다 이걸로 넓은 탐색창을 넘긴다.
         self._override = None
         self.dist = None          # 거리변환 (m 단위), 맵 픽셀 격자
         self._bnd = None          # (by, bx, 방향, 세기) 벽 표면 픽셀
@@ -336,7 +346,17 @@ class AutoLocalize(Node):
             self._try()
 
     def _redo_cb(self, msg: Bool):
-        """평소 재정렬. /race/relocalize 에 true."""
+        """평소 재정렬 — LT 당김(조이스틱)과 stuck_recovery 의 자동 재정렬이
+        **같은 토픽**(/race/relocalize)을 쏜다. 둘 다 여기로 들어와
+        _do_redo(recover=False) 로 처리된다 — 사람이 급하면 LT 로 직접 명령하고,
+        차가 스스로 끼임을 감지하면 stuck_recovery 가 후진한 뒤 이걸 대신
+        불러준다. 탐색 중심(현재 AMCL 자세)·탐색폭(relocalize_search_xy)이
+        둘 다 같다. (2026-08-26: LT 전용으로 manual_search_xy·self._align_sxy 를
+        따로 쓰는 방안도 있었지만, 그러면 self._align_sxy 를 되돌리는 코드가
+        없어서 프리셋 쪽에서 이미 한 번 겪은 것과 같은 누수가 재발한다 —
+        _do_redo 가 쓰는 _override 는 _align() 안에서 한 번 쓰고 스스로
+        지워져 그 문제가 없다.)
+        """
         if msg.data:
             self._do_redo(recover=False)
 
