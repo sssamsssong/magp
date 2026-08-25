@@ -7,10 +7,9 @@ sensor_msgs/Joy → /teleop (AckermannDriveStamped)
 
 조작법 (Logitech F710, Mode 버튼 OFF):
   LB              → 수동 ↔ 자율 모드 즉시 전환 (토글)
-  X               → ★ 충돌 복구 (수동 상태에서만)
-                     차를 트랙에 다시 놓고 누르면 라이다로 위치를 다시 찾고,
-                     정합이 좋으면(recover_fit_max) 곧바로 자율을 재개한다.
-                     나쁘면 재개하지 않고 알린다 — 다시 놓고 X 를 또 누른다.
+  D-pad/A·B·X·Y   → ★ 복구 프리셋(수동 상태에서만) — 눌러 둔 좌표를 그대로
+                     AMCL 에 심는다(raw reseed, 정렬 안 함). race_script.yaml
+                     의 joystick.preset_* 8개, set_init_pose.py 로 찍는다.
   RT 당김          → 전진 (당긴 만큼 선형 비례, 수동 모드에서만)
   RT 놓음          → 즉시 정지  ← 회생제동처럼
   RB 누른 채 RT    → 후진
@@ -62,14 +61,6 @@ class JoystickTeleop(Node):
         self.declare_parameter('axis_speed',       5)      # RT 트리거
         self.declare_parameter('btn_reverse',      5)      # RB — 후진 전환
         self.declare_parameter('btn_toggle',       4)      # LB — 수동↔자율 토글
-        # ── 충돌 복구 (2026-08-26) ─────────────────────────────────────
-        #   X 버튼(F710: A=0 B=1 X=2 Y=3). 충돌 후 LB 로 세우고 차를 트랙에
-        #   다시 놓은 다음 누르면, 라이다로 위치를 다시 찾고 자율을 재개한다.
-        self.declare_parameter('btn_recover',      2)      # X
-        #   정합 평균오차가 이보다 나쁘면 **자동 재개하지 않는다** — 위치를
-        #   잘못 잡은 채 출발하면 그대로 벽으로 간다. 다시 놓고 X 를 또 누른다.
-        self.declare_parameter('recover_fit_max',  0.20)   # m
-        self.declare_parameter('recover_timeout',  8.0)    # s
         # ── LB 토글의 의미는 어느 스택에 붙느냐로 갈린다 ────────────────
         #  · ./race.sh joy (수동 전용, 트랙 밖에서 굴릴 때)
         #      allow_toggle=False, start_auto=False
@@ -129,9 +120,6 @@ class JoystickTeleop(Node):
         self.ax_speed      = p('axis_speed')
         self.btn_rev       = p('btn_reverse')
         self.btn_tog       = p('btn_toggle')
-        self.btn_rec       = p('btn_recover')
-        self.rec_fit_max   = float(p('recover_fit_max'))
-        self.rec_timeout   = float(p('recover_timeout'))
         self.inv_steer     = p('steer_invert')
         self.inv_speed     = bool(p('speed_invert'))
         self.inv_trigger   = p('trigger_invert')

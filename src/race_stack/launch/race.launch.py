@@ -397,10 +397,6 @@ def generate_launch_description():
                 'axis_speed':       int(  jc.get('axis_speed',       5)),
                 'btn_reverse':      int(  jc.get('btn_reverse',      5)),
                 'btn_toggle':       int(  jc.get('btn_toggle',       4)),
-                # 충돌 복구 (X) — 2026-08-26
-                'btn_recover':      int(  jc.get('btn_recover',      2)),
-                'recover_fit_max':  float(jc.get('recover_fit_max',  0.20)),
-                'recover_timeout':  float(jc.get('recover_timeout',  8.0)),
                 'steer_invert':     bool( jc.get('steer_invert',     False)),
                 'speed_invert':     bool( jc.get('speed_invert',     False)),
                 'trigger_invert':   bool( jc.get('trigger_invert',   True)),
