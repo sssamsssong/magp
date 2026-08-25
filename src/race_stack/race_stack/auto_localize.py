@@ -71,6 +71,16 @@ class AutoLocalize(Node):
         self.declare_parameter('laser_offset_x', 0.27)    # base_link → laser
         self.declare_parameter('laser_offset_y', 0.0)
         self.declare_parameter('startup_delay', 2.0)      # 스캔 안정화 대기 (s)
+        # 수동 /initialpose(조이스틱 프리셋) 를 받으면 그 지점 주변으로 스캔 정렬을
+        # 재실행한다 (기동 정렬과 동일, 중심만 그 pose, startup_delay 없이 즉시).
+        # 대회 현장 복구용 — 프리셋 근처에 세우고 버튼만 눌러도 정밀 보정된다.
+        #   false = 받은 pose 를 그대로 믿고 정렬 건너뜀 (RViz 수동추정용, 옛 동작).
+        self.declare_parameter('align_on_manual', True)
+        # 프리셋 정렬 탐색창 (m). 기동용 search_xy(0.5)보다 넓게 — 프리셋서 좀
+        # 떨어져 세워도 잡히게. ★ M자·U턴처럼 기하가 독특한 지점은 넓혀도 안전
+        # 하지만, 직선 위 프리셋은 종방향 aliasing 이라 이 값을 넘으면 오매칭
+        # 위험 → 평행 직선 간격(≈4m)보다 충분히 작게 유지할 것.
+        self.declare_parameter('manual_search_xy', 1.5)
         # 평균 오차가 이보다 크면 "제대로 못 맞췄다" 고 본다 (m)
         self.declare_parameter('fit_warn', 0.20)
         # 한 스텝에 이만큼 넘게 튀면 경고 (m). 1.45m/s 에서 AMCL 갱신 간격을
@@ -123,6 +133,7 @@ class AutoLocalize(Node):
         #   났다. 정지 상태인지만 봤지 "이미 사람이 정해줬는지" 는 안 봤다.
         #   우리가 쏜 것과 구분하려고 발행 직후 0.5s 는 무시한다.
         self._self_pub_t = -1e9
+        self._align_sxy = None   # 이번 정렬 탐색창 오버라이드 (프리셋 정렬용)
         self.create_subscription(PoseWithCovarianceStamped, '/initialpose',
                                  self._manual_cb, 10)
         self.create_timer(float(gp('startup_delay')), self._try)
@@ -221,13 +232,28 @@ class AutoLocalize(Node):
         import time as _t
         if _t.time() - self._self_pub_t < 0.5:
             return                      # 우리가 쏜 것
-        if self.done:
-            return
-        self.done = True
-        self.get_logger().warn(
-            f'수동 /initialpose 수신 ({msg.pose.pose.position.x:+.2f}, '
-            f'{msg.pose.pose.position.y:+.2f}) — 자동 정렬을 **건너뜁니다**. '
-            f'다시 자동으로 맞추려면 /race/relocalize 에 true 를 쏘세요.')
+        px = msg.pose.pose.position.x
+        py = msg.pose.pose.position.y
+        q = msg.pose.pose.orientation
+        pyaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                          1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+        if bool(self.get_parameter('align_on_manual').value):
+            # ★ 받은 pose(프리셋) 를 중심으로 스캔 정렬 재실행 → 정밀 보정.
+            #   기동 정렬과 동일하되 중심만 이 pose, 탐색창은 manual_search_xy(넓게).
+            #   정지 상태에서만 실행된다(_try 의 speed 가드). startup_delay 없이 즉시.
+            self.init = (px, py, pyaw)
+            self._align_sxy = float(self.get_parameter('manual_search_xy').value)
+            self.done = False
+            self.get_logger().warn(
+                f'수동 /initialpose ({px:+.2f}, {py:+.2f}) — '
+                f'±{self._align_sxy:.1f}m 스캔 정렬 실행')
+            self._try()
+        else:
+            self.done = True
+            self.get_logger().warn(
+                f'수동 /initialpose 수신 ({px:+.2f}, {py:+.2f}) — 자동 정렬을 '
+                f'**건너뜁니다**. 자동 정렬하려면 align_on_manual:=true.')
 
     def _redo_cb(self, msg: Bool):
         if msg.data:
@@ -383,8 +409,9 @@ class AutoLocalize(Node):
         px = r[idx] * np.cos(a[idx]) + self.laser_dx
         py = r[idx] * np.sin(a[idx]) + self.laser_dy      # (N, ) base_link 기준
 
-        # 후보 격자
-        sxy = float(gp('search_xy')); step = float(gp('step_xy'))
+        # 후보 격자 — 프리셋 정렬이면 넓은 창(manual_search_xy) 사용
+        sxy = self._align_sxy if self._align_sxy else float(gp('search_xy'))
+        step = float(gp('step_xy'))
         syaw = math.radians(float(gp('search_yaw_deg')))
         dyaw = math.radians(float(gp('step_yaw_deg')))
         dx = np.arange(-sxy, sxy + 1e-9, step)

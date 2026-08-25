@@ -306,6 +306,9 @@ def generate_launch_description():
                 'fit_warn':       float(loc.get('align_fit_warn',       0.20)),
                 'use_walls':      _walls,
                 'laser_offset_x': 0.27, 'laser_offset_y': 0.0,
+                # 수동 /initialpose(조이스틱 프리셋) 정렬 (2026-08-26)
+                'align_on_manual':  bool(loc.get('align_on_manual', True)),
+                'manual_search_xy': float(loc.get('manual_search_xy', 1.5)),
             }])]))
 
     # ---------- 2. 맵 서버 + AMCL + lifecycle ----------
