@@ -81,6 +81,11 @@ class AutoLocalize(Node):
         # 하지만, 직선 위 프리셋은 종방향 aliasing 이라 이 값을 넘으면 오매칭
         # 위험 → 평행 직선 간격(≈4m)보다 충분히 작게 유지할 것.
         self.declare_parameter('manual_search_xy', 1.5)
+        # 기동 시 자동 정렬 여부. false(기본) = 구버전처럼 init_pose 에 그대로 고정
+        # (정렬 안 함). 직선 출발선에서 자동정렬이 aperture 문제로 오히려 틀어지던
+        # 걸 피한다. 대신 정렬이 필요하면 조이스틱 LT 당김 → /race/relocalize 로
+        # 그때만 명령. true 면 옛 동작(startup_delay 뒤 자동 정렬).
+        self.declare_parameter('auto_align_startup', False)
         # 평균 오차가 이보다 크면 "제대로 못 맞췄다" 고 본다 (m)
         self.declare_parameter('fit_warn', 0.20)
         # 한 스텝에 이만큼 넘게 튀면 경고 (m). 1.45m/s 에서 AMCL 갱신 간격을
@@ -102,13 +107,16 @@ class AutoLocalize(Node):
         self.fit_warn = float(gp('fit_warn'))
         self.jump_warn = float(gp('jump_warn'))
         self._amcl_prev = None
+        self._cur_pose = None     # 최신 AMCL 자세 (LT 정렬 중심)
         self.wall_range = float(gp('wall_range'))
         self.wall_scan_min = float(gp('wall_scan_min'))
         self.wall_map_min = float(gp('wall_map_min'))
 
         self.scan = None
         self.speed = 0.0          # 주행 중 재시드 방지용
-        self.done = False
+        # auto_align_startup=false 면 done=True 로 시작 → 기동 타이머 정렬이 건너뛰어져
+        # init_pose 에 고정. LT(/race/relocalize)·프리셋이 오면 done=False 로 풀려 정렬.
+        self.done = not bool(self.get_parameter('auto_align_startup').value)
         self.dist = None          # 거리변환 (m 단위), 맵 픽셀 격자
         self._bnd = None          # (by, bx, 방향, 세기) 벽 표면 픽셀
 
@@ -218,6 +226,11 @@ class AutoLocalize(Node):
                     f'({self._amcl_prev[0]:+.2f},{self._amcl_prev[1]:+.2f}) → '
                     f'({x:+.2f},{y:+.2f}). 컨트롤러가 이 값을 그대로 믿습니다')
         self._amcl_prev = (x, y)
+        # 현재 AMCL 자세 저장 — LT 정렬(_redo_cb)이 이 위치 기준으로 맞춘다
+        _q = msg.pose.pose.orientation
+        _yaw = math.atan2(2.0 * (_q.w * _q.z + _q.x * _q.y),
+                          1.0 - 2.0 * (_q.y * _q.y + _q.z * _q.z))
+        self._cur_pose = (x, y, _yaw)
 
         if not inside:
             self.get_logger().error(f'⚠ AMCL 이 맵 밖을 가리킵니다 ({x:+.2f},{y:+.2f})',
@@ -257,8 +270,16 @@ class AutoLocalize(Node):
 
     def _redo_cb(self, msg: Bool):
         if msg.data:
+            # LT 정렬 — 현재 AMCL 위치 기준으로 스캔정렬. 프리셋으로 위치를 심어둔
+            # 뒤 당기면 그 프리셋 자리에서 정밀 보정된다. 현재 자세를 아직 못 받았으면
+            # init_pose 기준으로 폴백.
+            if self._cur_pose is not None:
+                self.init = self._cur_pose
+            self._align_sxy = float(self.get_parameter('manual_search_xy').value)
             self.done = False
-            self.get_logger().info('재정렬 요청 수신')
+            self.get_logger().info(
+                f'LT 정렬 요청 — 현재 위치({self.init[0]:+.2f},{self.init[1]:+.2f}) '
+                f'±{self._align_sxy:.1f}m 스캔↔맵 정렬')
             self._try()
 
     def _try(self):

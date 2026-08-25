@@ -306,9 +306,13 @@ def generate_launch_description():
                 'fit_warn':       float(loc.get('align_fit_warn',       0.20)),
                 'use_walls':      _walls,
                 'laser_offset_x': 0.27, 'laser_offset_y': 0.0,
-                # 수동 /initialpose(조이스틱 프리셋) 정렬 (2026-08-26)
-                'align_on_manual':  bool(loc.get('align_on_manual', True)),
+                # 프리셋 버튼은 위치만 심는다(raw reseed). 정렬은 LT 로 사람이 명령.
+                #   align_on_manual=false → 프리셋 /initialpose 를 그대로 AMCL 에 심고
+                #   정렬은 안 함. 정렬이 필요하면 LT 당김 → /race/relocalize.
+                'align_on_manual':  bool(loc.get('align_on_manual', False)),
                 'manual_search_xy': float(loc.get('manual_search_xy', 1.5)),
+                # 기동 자동정렬은 ON (대회장서 오보정 없었음 — 원래대로).
+                'auto_align_startup': bool(loc.get('auto_align_startup', True)),
             }])]))
 
     # ---------- 2. 맵 서버 + AMCL + lifecycle ----------
